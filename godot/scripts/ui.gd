@@ -377,6 +377,7 @@ func show_title(has_save: bool) -> void:
 	bs.append(["New run", "ghost" if has_save else "go", "newgame"])
 	bs.append(["How to fly", "ghost", "help"])
 	bs.append(["Display settings", "ghost", "settings"])
+	bs.append(["Quit to desktop", "ghost", "quit_desktop"])
 	stack(bs)
 	show_panel("title")
 
@@ -397,7 +398,7 @@ const HELP := [
 	["Noise", "Your landing, gunfire, running, explosions, and siphoning fuel all fill the noise meter. At each mark a new wave of the dead arrives from the edges of the map. When it fills, the horde comes and does not stop. The crossbow and machete make no noise. Loot what you can and leave in time."],
 	["On foot", "WASD to move, aim with the mouse and click to fire. Hold Shift to run, hold right mouse to aim down sights for steadier, slower aim, Space to jump, Q to swap guns, H to heal, G to throw a pipe bomb, E to board the plane. Jumping clears fences, sandbags, and car hoods, and nothing can bite you in the air. Running is loud, and some of the bodies on the ground are not dead. Walk over containers to burst them open, then collect what spills out. Rarer finds glow green, blue, or gold. Locked safes take a spare part or a bomb and hold the best loot, including trinkets with permanent perks. Houses sometimes hide stashes under loose floorboards that only show up close. Footlockers hold ammo, bombs, and armor. Registers hold cash and jewelry. Toolboxes hold spare parts for field repairs. Medicine cabinets hold bandages and antibiotics. Every airfield has a small town beside it with shops and houses to search. Roofs lift away when you step inside. Each shop stocks by its trade: the pharmacy has medicine, the hardware store has parts, the gun shop has ammo. Traders pay different prices for goods at each field. Old charts reveal fields and narrow down Haven. The dead sometimes drop rounds. When you run dry you fight with a machete. Red barrels explode when shot. Gunfire draws more of the dead the longer you stay. Night falls at 18:00, and the dead move faster in the dark. You can sleep in the cockpit from the hangar tab. Return to the plane to refuel, take jobs, and upgrade."],
 	["The goal", "Haven lies somewhere in the far northeast, across empty country no starter plane can cross. Earn a bigger airframe or bigger tanks first."],
-	["Keys", "M opens the chart. Esc or P pauses. Mouse wheel or + and − zoom the view, 0 resets it. Ctrl with + and − changes the interface size. F11 toggles fullscreen."]]
+	["Keys", "M opens the chart. Esc or P pauses. Mouse wheel or + and − zoom the view, 0 resets it. Ctrl with + and − changes the interface size. F11 toggles fullscreen; Esc leaves fullscreen."]]
 
 func help_content() -> void:
 	for it in HELP:
@@ -414,6 +415,9 @@ func open_pause() -> void:
 	_clear()
 	h2("Paused")
 	note(game.objective())
+	stack([["Resume", "go", "resume"], ["Display settings", "ghost", "settings"],
+		["Save and quit to desktop", "ghost", "save_quit_desktop"],
+		["Quit to desktop without saving", "ghost", "quit_desktop"]])
 	h4("Trinkets, %d of %d" % [G.trinkets.size(), D.TRINKETS.size()])
 	if G.trinkets.size():
 		for x in D.TRINKETS:
@@ -437,7 +441,7 @@ func open_pause() -> void:
 			h.add_child(b)
 		v.add_child(h)
 		v.add_child(_label(D.DIFFS[G.diff].desc, "400", 14, P("dim")))
-	stack([["Resume", "go", "resume"], diff_tabs, ["Display settings", "ghost", "settings"], ["Turn sound off" if game.synth.on else "Turn sound on", "ghost", "sound"], ["Save and quit to title", "ghost", "quit"]])
+	stack([diff_tabs, ["Turn sound off" if game.synth.on else "Turn sound on", "ghost", "sound"], ["Save and quit to title", "ghost", "quit"]])
 	show_panel("pause")
 
 func show_settings(_from = null) -> void:
@@ -448,7 +452,7 @@ func show_settings(_from = null) -> void:
 		[["−", "alt", "zoom", -1], ["Reset", "alt", "zoom", 0], ["+", "alt", "zoom", 1]])
 	row("Aa", "Interface size: %d%%" % roundi(gm.ui_scale * 100), "Text, buttons and gauges. Ctrl with + and −.",
 		[["−", "alt", "uiscale", -1], ["Reset", "alt", "uiscale", 0], ["+", "alt", "uiscale", 1]])
-	row("🖥", "Window: %s" % ("fullscreen" if gm.fullscreen else gm.window_label()), "Cycle window sizes, or go fullscreen with F11.",
+	row("🖥", "Window: %s" % ("fullscreen" if gm.fullscreen else gm.window_label()), "Cycle sizes. F11 toggles fullscreen; Esc leaves it.",
 		[["Next size", "alt", "winsize", null], ["Windowed" if gm.fullscreen else "Fullscreen", "alt", "fullscreen", null]])
 	stack([["Back", "go", "settingsback"]])
 	if gm.uist != "settings":

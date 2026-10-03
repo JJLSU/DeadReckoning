@@ -149,11 +149,22 @@ func new_state(seed_v: int) -> Dictionary:
 		"weapons": [0], "weapon": 0, "contracts": [], "known": [], "strip": wd.START, "looted": {}, "offers": [], "nav": -1, "visits": {}, "mayday": null,
 		"stats": {"flights": 0, "deliv": 0, "kills": 0, "dist": 0.0}}
 
-func save_game() -> void:
-	if G == null: return
+func save_game() -> bool:
+	if G == null: return true
 	G.known = known.keys()
 	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
-	if f: f.store_string(JSON.stringify(G))
+	if f == null: return false
+	f.store_string(JSON.stringify(G))
+	f.flush()
+	var ok := f.get_error() == OK
+	f.close()
+	return ok
+
+func quit_to_desktop(save_progress: bool) -> void:
+	if save_progress and not save_game():
+		toast("Could not save your game. Please try again.", "bad")
+		return
+	get_tree().quit()
 
 func load_save():
 	if not FileAccess.file_exists(SAVE_PATH): return null
@@ -231,6 +242,13 @@ func day() -> int: return int(floor(G.time / 1440.0)) + 1
 # ======================================================================
 func key(k: Key) -> bool:
 	return Input.is_physical_key_pressed(k)
+
+func _input(e: InputEvent) -> void:
+	# Escape leaves fullscreen before any menu or gameplay handles the key.
+	if fullscreen and e is InputEventKey and e.pressed and not e.echo and e.physical_keycode == KEY_ESCAPE:
+		set_fullscreen(false)
+		if ui: ui.refresh_settings()
+		get_viewport().set_input_as_handled()
 
 func _unhandled_input(e: InputEvent) -> void:
 	if not ready_done: return
@@ -2112,6 +2130,8 @@ func act(a: String, v = null) -> void:
 			st.hp = 100.0
 			resume_from(st)
 			toast("You wake up in the hangar with a headache and a lighter wallet.", "bad")
+		"save_quit_desktop": quit_to_desktop(true)
+		"quit_desktop": quit_to_desktop(false)
 		"quit":
 			save_game()
 			show_title()
