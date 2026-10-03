@@ -267,6 +267,9 @@ func _unhandled_input(e: InputEvent) -> void:
 			if c == KEY_E and S and S.nearPlane: ui.open_menu()
 			if c == KEY_SPACE: jump()
 			if c == KEY_Q: swap_weapon()
+			var weapon_slot := [KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7].find(c)
+			if weapon_slot < 0: weapon_slot = [KEY_KP_1, KEY_KP_2, KEY_KP_3, KEY_KP_4, KEY_KP_5, KEY_KP_6, KEY_KP_7].find(c)
+			if weapon_slot >= 0: select_weapon(weapon_slot)
 			if c == KEY_H: heal()
 			if c == KEY_G: throw_bomb()
 	elif e is InputEventMouseButton:
@@ -1368,7 +1371,7 @@ func roll_loot(k: String, ty: String) -> Variant:
 				return ["+30 rounds", "#efe6cf"]
 			var w: int = un[randi() % un.size()]
 			G.weapons.append(w)
-			G.weapon = w
+			toast("Picked up %s. Press %d to equip." % [D.WEAPONS[w].name, w + 1], "good")
 			return ["Found a %s!" % String(D.WEAPONS[w].name).to_lower(), "#ffd27a"]
 	return null
 
@@ -1448,14 +1451,25 @@ func upd_pickups(dt: float) -> void:
 				S.pk.remove_at(i)
 		i -= 1
 
+func select_weapon(index: int) -> void:
+	if G == null or index < 0 or index >= D.WEAPONS.size(): return
+	if not G.weapons.has(index):
+		toast("You don't own %s yet." % D.WEAPONS[index].name)
+		return
+	var changed: bool = G.weapon != index
+	G.weapon = index
+	toast("Equipped: %s [%d]" % [D.WEAPONS[index].name, index + 1], "good")
+	if changed:
+		sfx("click")
+		if S != null:
+			floater(S.p.x, S.p.y - 26, D.WEAPONS[index].name, "#efe6cf")
+			S.p.cd = maxf(S.p.cd, 0.25)
+
 func swap_weapon() -> void:
-	if mode != "ground" or S == null or G.weapons.size() < 2: return
+	if mode != "ground" or S == null or uist != "" or G.weapons.size() < 2: return
 	var own: Array = G.weapons.duplicate()
 	own.sort()
-	G.weapon = own[(own.find(G.weapon) + 1) % own.size()]
-	floater(S.p.x, S.p.y - 26, D.WEAPONS[G.weapon].name, "#efe6cf")
-	sfx("click")
-	S.p.cd = 0.25
+	select_weapon(own[(own.find(G.weapon) + 1) % own.size()])
 
 func jump() -> void:
 	if mode != "ground" or S == null or uist != "": return
@@ -2088,12 +2102,11 @@ func act(a: String, v = null) -> void:
 		"weapon":
 			var i := int(v)
 			var w: Dictionary = D.WEAPONS[i]
-			if G.weapons.has(i): G.weapon = i
+			if G.weapons.has(i): select_weapon(i)
 			elif G.cash >= w.price:
 				G.cash -= w.price
 				G.weapons.append(i)
-				G.weapon = i
-				toast("Bought the %s." % String(w.name).to_lower(), "good")
+				toast("Bought %s. Press %d to equip." % [w.name, i + 1], "good")
 			ui.render_menu()
 		"ammo":
 			if G.cash >= 35:

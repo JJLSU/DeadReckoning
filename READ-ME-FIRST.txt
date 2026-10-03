@@ -1,7 +1,18 @@
-Dead Reckoning — display and desktop exit update
+Dead Reckoning — weapon selection, display, and desktop exit update
 
 PLAY
 Extract this ZIP and open DeadReckoning-fixed/godot/DeadReckoning.exe. No Godot installation is needed.
+
+WEAPON CONTROLS
+New weapon pickups and purchases are added to your inventory without changing the weapon in hand. Pickup notifications name the new weapon and its number key.
+1: Revolver
+2: Pump shotgun
+3: Lever rifle
+4: Submachine gun
+5: Assault rifle
+6: Double-barrel
+7: Crossbow
+Q cycles all owned weapons. Number keys on the top row and numpad work while on foot with menus closed. Selecting an unowned weapon keeps your current weapon and explains that you do not own it. Switching shows an Equipped notification with the weapon name. Shop weapon entries show their number keys.
 
 EXIT CONTROLS
 Escape leaves fullscreen on any screen, keeping the current menu. While windowed, Escape keeps its existing pause behavior during gameplay. P also opens the pause menu.
@@ -25,10 +36,13 @@ UPDATE YOUR EXISTING REPOSITORY
 Close the game. Copy this package's godot folder contents into C:\Users\User\Desktop\DeadReckoning-main\godot, replacing the corresponding files. Keep the existing repository's .git folder. Run each command separately in that existing repository:
 
 git add godot/scripts/game.gd godot/scripts/ui.gd godot/DeadReckoning.exe godot/export_presets.cfg
-git commit -m "Add fullscreen Escape and desktop exit controls"
+git commit -m "Keep picked-up weapons unequipped and add weapon hotkeys"
 git push origin main
 
 Your existing .gitattributes tracks godot/DeadReckoning.exe with Git LFS.
 
 VALIDATION
 Exported with Godot 4.7.1. The game package embedded in the new Windows executable was rendered and tested using the same Godot version on Linux. Checks passed for display menu and shortcuts, resolution cycling, fullscreen toggles, Escape leaving fullscreen, both pause exit buttons visible without scrolling, title exit, and clean process exits. Save-and-quit wrote the changed progress; quit-without-saving left the prior save byte-for-byte unchanged. The Windows executable was not launched on Windows here.
+
+WEAPON VALIDATION
+The rebuilt embedded game package passed checks for real pickup collection, no automatic equip, named pickup notification with key, number keys 1–7, named equip notifications, Q cycling, numpad selection, unowned selection, pause gating, shot cooldown preservation, and purchases retaining the current weapon. Weapon controls were rendered and tested in Godot on Linux.
