@@ -3,6 +3,13 @@ extends RefCounted
 ## World generation and terrain queries (CPU side). The GPU shader mirrors terr().
 
 const WORLD := 30000.0
+# Small islands in the open ocean around the land (no roads, towns or airfields).
+# Mirrored exactly in shaders/terrain.gdshader isle().
+const ISLE_SCALE := 1800.0   # noise scale: bigger = bigger, fewer islands
+const ISLE_T := 0.76         # noise threshold for land: higher = rarer islands
+const ISLE_K := 3.2          # how fast islands rise from the shore (peaks / hills)
+const ISLE_GAP := 3000.0     # islands fade out this close to the mainland's edge
+const STORM_DENSITY := 5.0  # storms per WORLD x WORLD area, land and ocean alike (originally 20)
 
 var SEED := 1
 var HAVEN := Vector2.ZERO
@@ -14,12 +21,33 @@ var START := 0
 var TE := 0.5
 var TM := 0.5
 var game  # Game node, for G.time
+var PAD := 0.0   # open-ocean margin around the land, set by Game before gen_world()
+var _sp_t := -1.0
+var _sp := PackedVector2Array()
+
+## Ocean outside the land square: open water with the odd small island.
+func isle(x: float, y: float) -> int:
+	TM = 0.5
+	var f := U.fbm(x / ISLE_SCALE, y / ISLE_SCALE, SEED + 311, 4)
+	var dout := maxf(maxf(-x, x - WORLD), maxf(-y, y - WORLD))
+	if dout < ISLE_GAP: f -= (ISLE_GAP - dout) / ISLE_GAP * 0.2
+	var e := maxf(0.3, 0.36 + (f - ISLE_T) * ISLE_K)
+	TE = e
+	if e < 0.36: return 0
+	if e < 0.40: return 1
+	if e < 0.408: return 2
+	if e > 0.70: return 8 if e > 0.75 else 7
+	var m := U.fbm(x / 4500.0 + 40, y / 4500.0 + 40, SEED + 7, 4)
+	TM = m
+	if m > 0.62: return 6
+	if m > 0.53: return 5
+	if m < 0.43: return 4
+	return 3
 
 func terr(x: float, y: float) -> int:
 	TM = 0.5
 	if x < 0 or y < 0 or x > WORLD or y > WORLD:
-		TE = 0.3
-		return 0
+		return isle(x, y)
 	var dh := Vector2(x - HAVEN.x, y - HAVEN.y).length()
 	var e := U.fbm(x / 6500.0, y / 6500.0, SEED, 5)
 	var edge: float = min(min(x, y), min(WORLD - x, WORLD - y))
@@ -79,19 +107,27 @@ func road_at(x: float, y: float):
 			return {"r": r, "t": tt}
 	return null
 
+## Storms drift and wrap around the whole map, land plus ocean margin. Positions are
+## worked out once per game-time tick and cached (there are hundreds of storms now).
 func storm_pos(s: Dictionary) -> Vector2:
 	var tm: float = game.G.time if game and game.G else 420.0
-	var x := fmod(s.bx + s.vx * tm, WORLD)
-	var y := fmod(s.by + s.vy * tm, WORLD)
-	if x < 0: x += WORLD
-	if y < 0: y += WORLD
-	return Vector2(x, y)
+	if tm != _sp_t or _sp.size() != STORMS.size():
+		_sp_t = tm
+		_sp.resize(STORMS.size())
+		var span := WORLD + 2.0 * PAD
+		for i in STORMS.size():
+			var t: Dictionary = STORMS[i]
+			var x := fposmod(t.bx + t.vx * tm + PAD, span) - PAD
+			var y := fposmod(t.by + t.vy * tm + PAD, span) - PAD
+			_sp[i] = Vector2(x, y)
+	return _sp[int(s.i)]
 
 func storm_at(x: float, y: float) -> Dictionary:
 	var k := 0.0
 	var best = null
 	for s in STORMS:
 		var q := storm_pos(s)
+		if absf(q.x - x) > s.r or absf(q.y - y) > s.r: continue
 		var d := Vector2(q.x - x, q.y - y).length()
 		var v: float = 1.0 - d / s.r
 		if v > k:
@@ -120,6 +156,40 @@ func reachable(from: int, hop: float) -> Dictionary:
 				seen[b.id] = true
 				q.append(b.id)
 	return seen
+
+## Storms out over the ocean margin, at STORM_DENSITY like the land. Also adds any land
+## storms beyond the original 20 when the density is set above 20. Uses its own random
+## stream so the land (airfields, danger levels...) is unchanged.
+func _add_ocean_storms(extra_land: int, st: Dictionary) -> void:
+	var orng := U.Mulberry.new(SEED * 13 + 101)
+	var R := orng.next
+	var added := 0
+	var t := 0
+	while added < extra_land and t < extra_land * 10:
+		t += 1
+		var lx: float = R.call() * WORLD
+		var ly: float = R.call() * WORLD
+		if Vector2(lx - st.x, ly - st.y).length() < 5500: continue
+		var lvx: float = (R.call() - 0.5) * 30
+		var lvy: float = (R.call() - 0.5) * 30
+		STORMS.append({"bx": lx - lvx * 420, "by": ly - lvy * 420, "r": 1500 + R.call() * 1600, "vx": lvx, "vy": lvy, "i": STORMS.size()})
+		added += 1
+	_sp_t = -1.0
+	if PAD <= 0.0: return
+	var span := WORLD + 2.0 * PAD
+	var n := int(round(STORM_DENSITY * (span * span - WORLD * WORLD) / (WORLD * WORLD)))
+	var placed := 0
+	var q := 0
+	while placed < n and q < n * 4:
+		q += 1
+		var x: float = -PAD + R.call() * span
+		var y: float = -PAD + R.call() * span
+		if x > 0 and y > 0 and x < WORLD and y < WORLD: continue
+		var vx: float = (R.call() - 0.5) * 30
+		var vy: float = (R.call() - 0.5) * 30
+		STORMS.append({"bx": x - vx * 420, "by": y - vy * 420, "r": 1500 + R.call() * 1600, "vx": vx, "vy": vy, "i": STORMS.size()})
+		placed += 1
+	_sp_t = -1.0
 
 func gen_world(seed_v: int) -> void:
 	SEED = seed_v
@@ -200,6 +270,10 @@ func gen_world(seed_v: int) -> void:
 	STORMS = []
 	kk = 0
 	q = 0
+	# Land storms: STORM_DENSITY of them. This loop always draws the original 20 sets
+	# of random numbers so everything generated after it (airfield danger levels and
+	# types) stays the same for a given seed; it just keeps fewer when the density is lower.
+	var n_land := int(round(STORM_DENSITY))
 	while kk < 20 and q < 200:
 		q += 1
 		var x: float = R.call() * WORLD
@@ -207,8 +281,11 @@ func gen_world(seed_v: int) -> void:
 		if Vector2(x - st.x, y - st.y).length() < 5500: continue
 		var vx: float = (R.call() - 0.5) * 30
 		var vy: float = (R.call() - 0.5) * 30
-		STORMS.append({"bx": x - vx * 420, "by": y - vy * 420, "r": 1500 + R.call() * 1600, "vx": vx, "vy": vy})
+		var sr: float = 1500 + R.call() * 1600
+		if kk < n_land:
+			STORMS.append({"bx": x - vx * 420, "by": y - vy * 420, "r": sr, "vx": vx, "vy": vy, "i": STORMS.size()})
 		kk += 1
+	_add_ocean_storms(n_land - 20, st)
 	for s in strips:
 		if s.type == "haven": continue
 		var d := Vector2(s.x - st.x, s.y - st.y).length()

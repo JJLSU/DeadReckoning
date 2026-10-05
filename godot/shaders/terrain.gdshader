@@ -39,9 +39,34 @@ float fbm(float x, float y, int s, int o) {
 	return v / n;
 }
 
+// Ocean outside the land square: open water with the odd small island
+// (mirrors World.isle() in world.gd - keep the numbers in sync).
+const float ISLE_SCALE = 1800.0;
+const float ISLE_T = 0.76;
+const float ISLE_K = 3.2;
+const float ISLE_GAP = 3000.0;
+int isle(float x, float y, out float TE, out float TM) {
+	TM = 0.5;
+	float f = fbm(x / ISLE_SCALE, y / ISLE_SCALE, seed + 311, 4);
+	float dout = max(max(-x, x - WORLD), max(-y, y - WORLD));
+	if (dout < ISLE_GAP) f -= (ISLE_GAP - dout) / ISLE_GAP * 0.2;
+	float e = max(0.3, 0.36 + (f - ISLE_T) * ISLE_K);
+	TE = e;
+	if (e < 0.36) return 0;
+	if (e < 0.40) return 1;
+	if (e < 0.408) return 2;
+	if (e > 0.70) return e > 0.75 ? 8 : 7;
+	float m = fbm(x / 4500.0 + 40.0, y / 4500.0 + 40.0, seed + 7, 4);
+	TM = m;
+	if (m > 0.62) return 6;
+	if (m > 0.53) return 5;
+	if (m < 0.43) return 4;
+	return 3;
+}
+
 int terr(float x, float y, out float TE, out float TM) {
 	TM = 0.5;
-	if (x < 0.0 || y < 0.0 || x > WORLD || y > WORLD) { TE = 0.3; return 0; }
+	if (x < 0.0 || y < 0.0 || x > WORLD || y > WORLD) return isle(x, y, TE, TM);
 	float dh = distance(vec2(x, y), haven);
 	float e = fbm(x / 6500.0, y / 6500.0, seed, 5);
 	float edge = min(min(x, y), min(WORLD - x, WORLD - y));

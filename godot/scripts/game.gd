@@ -3,6 +3,14 @@ extends Node2D
 ## Dead Reckoning — main game controller. A close port of the HTML game's logic.
 
 const WORLD := 30000.0
+# Open ocean all the way around the landmass (which spans 0..WORLD). It is made wide
+# enough that the longest-ranged plane - best tanks, best engine, wings trinket, full
+# throttle and the strongest tailwind - can't reach the edge on one full tank, then
+# multiplied by OCEAN_SAFETY. Worked out from the plane data at start-up (ocean_pad()).
+const OCEAN_SAFETY := 1.2
+const MAX_ENGINE := 2       # engine upgrades available (see the "engine" purchase)
+const MAX_WIND := 22.0      # strongest wind rolled at takeoff
+var OCEAN_PAD := 0.0
 const TS := 32.0
 const SAVE_PATH := "user://deadreckoning_v1.json"
 
@@ -11,6 +19,7 @@ const ADS_MOVE := 0.5     # walk speed multiplier while aiming
 const ADS_SENS := 0.45     # mouse sensitivity multiplier while aiming
 const ADS_ZOOM := 0.25    # extra zoom at full aim (0.25 = 25% closer)
 const ADS_LEAD := 90.0    # how far (world px) the camera leans toward where you face
+const ADS_AUTO_SPREAD := 0.5  # automatic weapons' bullet spread multiplier while aiming
 const ADS_RATE := 4.0     # ease speed in/out (higher = snappier)
 const CAM_EDGE := 60.0    # player always stays at least this many screen px from the view's edge
 const CAM_TOP := 140.0    # ...and this far from the top (clears the status panel)
@@ -79,6 +88,7 @@ var ready_done := false
 # ======================================================================
 func _ready() -> void:
 	randomize()
+	OCEAN_PAD = ocean_pad()
 	wd.game = self
 	Tx.init_basic()
 	baker = Baker.new()
@@ -130,7 +140,7 @@ func _ready() -> void:
 	var sv = load_save()
 	wd.gen_world(int(sv.seed) if sv else randi() % 1000000000)
 	baker.set_world(wd)
-	await baker.build_overview()
+	await baker.build_overview(OCEAN_PAD)
 	await Tx.bake_all(baker)
 	var st: Dictionary = wd.strips[wd.START]
 	demo = {"x": st.x, "y": st.y, "h": -0.6}
@@ -219,6 +229,17 @@ func PS() -> Dictionary:
 	p.max = b.max * (1 + 0.08 * G.engine)
 	p.cruise = b.cruise * (1 + 0.08 * G.engine)
 	return p
+
+## Farthest any plane could fly on one full tank, with every upgrade, x OCEAN_SAFETY.
+## Full throttle gives the most distance per gallon, so that's the worst case.
+func ocean_pad() -> float:
+	var best := 0.0
+	for b in D.PLANES:
+		var gal: float = b.fuel + b.tankMax * b.tankStep
+		var burn: float = b.burn * 0.9                       # wings trinket
+		var spd: float = b.max * (1 + 0.08 * MAX_ENGINE) + MAX_WIND
+		best = maxf(best, gal / burn * spd)
+	return best * OCEAN_SAFETY
 
 func range_for(gal: float) -> float:
 	var P := PS()
@@ -630,8 +651,10 @@ func upd_flight(dt: float) -> void:
 	if dx != 0 or dy != 0: F.trk = atan2(dy, dx)
 	F.x += dx; F.y += dy
 	G.stats.dist += Vector2(dx, dy).length()
-	if F.x < 0 or F.y < 0 or F.x > WORLD or F.y > WORLD:
-		F.x = clampf(F.x, 0, WORLD); F.y = clampf(F.y, 0, WORLD)
+	var lo := -OCEAN_PAD
+	var hi := WORLD + OCEAN_PAD
+	if F.x < lo or F.y < lo or F.x > hi or F.y > hi:
+		F.x = clampf(F.x, lo, hi); F.y = clampf(F.y, lo, hi)
 		var toC := atan2(WORLD / 2 - F.y, WORLD / 2 - F.x)
 		F.hdg += U.ang_diff(toC, F.hdg) * dt * 2
 	if F.onGround:
@@ -933,7 +956,9 @@ func gen_site(s: Dictionary) -> Dictionary:
 				var z: Dictionary = S.zs[S.zs.size() - 1]
 				z.dormant = true; z.kind = ""; z.arm = false; z.da = randf() * TAU; z.hp = 45.0 + s.danger * 8
 	site.cap = int(round((8 if first else 10 + s.danger * 4) * DF().count))
-	site.noise = 0.0 if first else (6 + s.danger * 2) * DF().noise
+	# First visit to any site starts silent; return visits start with some noise.
+	var first_visit: bool = int(G.visits.get(str(s.id), 0)) <= 1
+	site.noise = 0.0 if first_visit else (6 + s.danger * 2) * DF().noise
 	for i in 4 + int(randf() * 5):
 		for q in 30:
 			var c := 1 + int(randf() * (cols - 2))
@@ -1371,10 +1396,12 @@ func shoot() -> void:
 		return
 	G.ammo -= 1
 	sfx(w.snd)
+	var spr: float = w.spr * (ADS_AUTO_SPREAD if ads and w.get("auto", false) else 1.0)
 	for i in w.pel:
-		var a: float = p.ang + (randf() - 0.5) * w.spr * 2
+		var a: float = p.ang + (randf() - 0.5) * spr * 2
 		S.bul.append({"x": p.x + cos(p.ang) * 16, "y": p.y + sin(p.ang) * 16, "vx": cos(a) * w.spd, "vy": sin(a) * w.spd, "life": w.life, "dmg": w.dmg * (1.2 if has("scope") else 1.0), "pl": true, "kb": w.kb, "bolt": w.bolt})
-	S.fx.append({"x": p.x + cos(p.ang) * 8, "y": p.y + sin(p.ang) * 8, "vx": cos(p.ang + 1.6) * 110 + (randf() - 0.5) * 40, "vy": sin(p.ang + 1.6) * 110 + (randf() - 0.5) * 40, "life": 0.7, "c": "#d9b35a", "sz": 2.2, "drag": true})
+	if not w.bolt:   # spent casing — guns only, the crossbow has none
+		S.fx.append({"x": p.x + cos(p.ang) * 8, "y": p.y + sin(p.ang) * 8, "vx": cos(p.ang + 1.6) * 110 + (randf() - 0.5) * 40, "vy": sin(p.ang + 1.6) * 110 + (randf() - 0.5) * 40, "life": 0.7, "c": "#d9b35a", "sz": 2.2, "drag": true})
 	add_noise(w.noise)
 	if not w.silent:
 		S.flash = 0.06
@@ -1576,6 +1603,16 @@ func dbg_all_trinkets() -> void:
 		if not G.trinkets.has(t[0]): G.trinkets.append(t[0])
 	sfx("click")
 	toast("Testing: all %d trinkets added." % D.TRINKETS.size(), "good")
+
+func dbg_best_plane() -> void:
+	if G == null: return
+	G.plane = D.PLANES.size() - 1
+	G.tanks = int(D.PLANES[G.plane].tankMax)
+	G.engine = MAX_ENGINE
+	G.fuel = PS().fuelCap
+	G.hull = 100.0
+	sfx("click")
+	toast("Testing: %s with full tanks and engine upgrades." % D.PLANES[G.plane].name, "good")
 
 func dbg_cash() -> void:
 	if G == null: return
@@ -1932,8 +1969,8 @@ func upd_ground(dt: float) -> void:
 				floater(d.x, d.y - 16, "+$%d" % d.n, "#9cc063")
 			S.drops.remove_at(i)
 		i -= 1
-	add_noise((0.35 + 0.05 * S.danger) * dt)
-	for wv in [[35, 5, "They heard the engine. More are coming."], [65, 9, "A crowd is gathering at the fence line."], [100, 14, "The horde is here. Get to the plane."]]:
+	# (no background noise: the meter only rises from what the player does)
+	for wv in [[35, 5, "They know you are here."], [65, 9, "A crowd is gathering at the fence line."], [100, 14, "The horde is here. Get to the plane."]]:
 		if S.noise >= wv[0] and not S.waves.has(wv[0]):
 			S.waves.append(wv[0])
 			toast(wv[2], "bad")
@@ -2327,10 +2364,11 @@ func show_title() -> void:
 	ui.show_title(load_save() != null)
 
 func _regen_world(seed_v: int) -> void:
+	wd.PAD = OCEAN_PAD
 	wd.gen_world(seed_v)
 	baker.set_world(wd)
 	TCACHE.clear()
-	baker.build_overview()
+	baker.build_overview(OCEAN_PAD)
 
 func start_new() -> void:
 	var seed_v := randi() % 1000000000

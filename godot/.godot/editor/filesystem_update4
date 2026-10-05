@@ -1,0 +1,5 @@
+res://scripts/game.gd
+res://scripts/render.gd
+res://scripts/ui.gd
+res://scripts/baker.gd
+res://scripts/world.gd

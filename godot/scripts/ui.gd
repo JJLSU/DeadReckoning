@@ -22,7 +22,7 @@ const DARK := {"paper": "#141a1c", "panel": "#1b2326", "panel2": "#243034", "ink
 ## Testing buttons (All weapons / 1,000 rounds / All trinkets / $1,000 / 1,000 gallons) in exploration mode.
 ## Set to false to hide them for a release build.
 const DEBUG_BUTTONS := true
-const DBG_KEYS := ["dbg_weapons", "dbg_ammo", "dbg_trinkets", "dbg_cash", "dbg_fuel"]
+const DBG_KEYS := ["dbg_weapons", "dbg_ammo", "dbg_trinkets", "dbg_cash", "dbg_fuel", "dbg_plane"]
 
 func P(k: String) -> Color: return Color.html(pal[k])
 
@@ -39,7 +39,7 @@ func _ready() -> void:
 	root.theme = th
 	# HUD buttons
 	for spec in [["map", "Map"], ["pause", "Pause"], ["heal", "Heal"], ["throw", "Throw bomb"], ["cruise", "Cruise ×3"], ["board", "Board plane"], ["taxi", "Taxi back to hangar"],
-			["dbg_weapons", "All Weapons"], ["dbg_ammo", "1,000 Rounds"], ["dbg_trinkets", "All Trinkets"], ["dbg_cash", "$1,000"], ["dbg_fuel", "1,000 Gallons"]]:
+			["dbg_weapons", "All Weapons"], ["dbg_ammo", "1,000 Rounds"], ["dbg_trinkets", "All Trinkets"], ["dbg_cash", "$1,000"], ["dbg_fuel", "1,000 Gallons"], ["dbg_plane", "Best Plane"]]:
 		var b := Button.new()
 		b.text = spec[1]
 		b.focus_mode = Control.FOCUS_NONE
@@ -670,6 +670,7 @@ func _hud_press(k: String) -> void:
 		"dbg_trinkets": gm.dbg_all_trinkets()
 		"dbg_cash": gm.dbg_cash()
 		"dbg_fuel": gm.dbg_fuel()
+		"dbg_plane": gm.dbg_best_plane()
 
 func update_buttons() -> void:
 	var gm := game
@@ -807,7 +808,8 @@ class MapView extends Control:
 			if ms > 420 or dests.has(s.id) or G.nav == s.id or s.id == G.strip:
 				g.text_base(s.name, x + r + 4, y + 4, 11, Color(20 / 255.0, 26 / 255.0, 28 / 255.0, 0.85), -1, "600")
 		g.save()
-		g.translate(me.x * k, me.y * k)
+		# out over the open ocean you can be off the chart: pin the marker to its edge
+		g.translate(clampf(me.x * k, 8, ms - 8), clampf(me.y * k, 8, ms - 8))
 		if has_h:
 			g.rotate(me.z)
 			var arr := PackedVector2Array([Vector2(9, 0), Vector2(-6, -6), Vector2(-3, 0), Vector2(-6, 6)])

@@ -15,8 +15,8 @@ const WEAPONS := [
 	{"name": "Revolver", "dmg": 30.0, "rate": 0.36, "pel": 1, "spr": 0.035, "spd": 950.0, "life": 0.55, "price": 0, "noise": 2.5, "snd": "pistol", "kb": 6.0, "len": 15, "silent": false, "bolt": false},
 	{"name": "Pump shotgun", "dmg": 15.0, "rate": 0.8, "pel": 6, "spr": 0.3, "spd": 820.0, "life": 0.36, "price": 650, "noise": 4.0, "snd": "shotgun", "kb": 8.0, "len": 23, "silent": false, "bolt": false},
 	{"name": "Lever rifle", "dmg": 65.0, "rate": 0.5, "pel": 1, "spr": 0.008, "spd": 1400.0, "life": 0.62, "price": 1100, "noise": 3.5, "snd": "rifle", "kb": 10.0, "len": 25, "silent": false, "bolt": false},
-	{"name": "Submachine gun", "dmg": 17.0, "rate": 0.085, "pel": 1, "spr": 0.1, "spd": 950.0, "life": 0.45, "price": 1500, "noise": 1.1, "snd": "smg", "kb": 3.0, "len": 18, "silent": false, "bolt": false},
-	{"name": "Assault rifle", "dmg": 30.0, "rate": 0.13, "pel": 1, "spr": 0.045, "spd": 1250.0, "life": 0.6, "price": 2400, "noise": 1.8, "snd": "rifle2", "kb": 6.0, "len": 25, "silent": false, "bolt": false},
+	{"name": "Submachine gun", "dmg": 17.0, "rate": 0.085, "pel": 1, "spr": 0.1, "spd": 950.0, "life": 0.45, "price": 1500, "noise": 1.1, "snd": "smg", "kb": 3.0, "len": 18, "silent": false, "bolt": false, "auto": true},
+	{"name": "Assault rifle", "dmg": 30.0, "rate": 0.13, "pel": 1, "spr": 0.045, "spd": 1250.0, "life": 0.6, "price": 2400, "noise": 1.8, "snd": "rifle2", "kb": 6.0, "len": 25, "silent": false, "bolt": false, "auto": true},
 	{"name": "Double-barrel", "dmg": 14.0, "rate": 1.05, "pel": 10, "spr": 0.4, "spd": 800.0, "life": 0.32, "price": 950, "noise": 6.0, "snd": "shotgun2", "kb": 15.0, "len": 21, "silent": false, "bolt": false},
 	{"name": "Crossbow", "dmg": 95.0, "rate": 0.95, "pel": 1, "spr": 0.01, "spd": 880.0, "life": 0.7, "price": 1300, "noise": 0.0, "snd": "bow", "kb": 12.0, "len": 18, "silent": true, "bolt": true},
 ]

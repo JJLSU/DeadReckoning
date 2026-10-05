@@ -3,6 +3,11 @@ class_name Render
 
 const TS := 32.0
 const CH := 1024.0
+# Fair-weather clouds in flight mode. The sky is split into 1,700-unit cells and this
+# is the share of cells that hold a cloud: 0 = clear skies, 1 = a cloud in every cell.
+# (Originally 0.33.) Covers land and ocean alike. Separate from storms (world.gd).
+const CLOUD_DENSITY := 1
+const SEA := "#1f3543"   # open-ocean colour, matches the terrain shader's deep water
 static var CC := {}
 
 static func hc(s: String) -> Color:
@@ -100,7 +105,7 @@ static func draw_world(gm, g: Pen, cx: float, cy: float, sc: float, t: float) ->
 	var H: float = gm.Hv
 	var wd: World = gm.wd
 	g.set_xf(Transform2D.IDENTITY)
-	g.rect(0, 0, W, H, hc("#2c4c58"))
+	g.rect(0, 0, W, H, hc(SEA))
 	var x0 := cx - W / 2 / sc
 	var x1 := cx + W / 2 / sc
 	var y0 := cy - H / 2 / sc
@@ -114,9 +119,12 @@ static func draw_world(gm, g: Pen, cx: float, cy: float, sc: float, t: float) ->
 		var sw := clampf((x1 - x0) * k + 2, 1, 300 - sx)
 		var sh := clampf((y1 - y0) * k + 2, 1, 300 - sy)
 		g.tex_region(ov, Rect2(sx / k, sy / k, sw / k, sh / k), Rect2(sx, sy, sw, sh))
+	# terrain chunks cover the land and the whole ocean margin around it
+	var cmin := int(floor(-gm.OCEAN_PAD / CH)) - 2
+	var cmax := int(floor((D.WORLD + gm.OCEAN_PAD) / CH)) + 2
 	for gy in range(int(floor(y0 / CH)), int(floor(y1 / CH)) + 1):
 		for gx in range(int(floor(x0 / CH)), int(floor(x1 / CH)) + 1):
-			if gx < -2 or gy < -2 or gx > 31 or gy > 31: continue
+			if gx < cmin or gy < cmin or gx > cmax or gy > cmax: continue
 			var c: Texture2D = gm.baker.get_chunk(gx, gy)
 			if c: g.tex(c, gx * CH, gy * CH, CH + 1, CH + 1)
 	if sc > 0.5:
@@ -328,7 +336,7 @@ static func draw_clouds(gm, g: Pen, cx: float, cy: float, sc: float, alpha: floa
 		var y1 := cy + H / 2 / s2 + pad
 		for gy in range(int(floor(y0 / C)), int(floor(y1 / C)) + 1):
 			for gx in range(int(floor(x0 / C)), int(floor(x1 / C)) + 1):
-				if U.hash3(gx, gy, seed_v + 91) > 0.33: continue
+				if U.hash3(gx, gy, seed_v + 91) > CLOUD_DENSITY: continue
 				var bx := (gx + U.hash3(gx, gy, seed_v + 92)) * C
 				var by := (gy + U.hash3(gx, gy, seed_v + 93)) * C
 				for i in 6:
@@ -554,22 +562,40 @@ static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 	var my := mr + 12
 	var R := 6000.0
 	var k := mr / R
-	g.circle(mx, my, mr, hc("#222233"))
+	# open sea beyond the map edge: same colour the main flight view uses there
+	g.circle(mx, my, mr, hc(SEA))
+	var ovw: Texture2D = gm.baker.overview_wide
 	var ov: Texture2D = gm.baker.overview
-	if ov:
-		var ok := 300.0 / D.WORLD
-		# draw the overview clipped to a circle: textured polygon
+	if ovw:
+		# real terrain and sea all the way out (the wide overview covers the ocean margin)
+		var o: float = gm.baker.wide_origin
+		var span: float = gm.baker.wide_span
 		var pts := PackedVector2Array()
 		var uvs := PackedVector2Array()
 		for i in 40:
 			var a := TAU * i / 40.0
-			var sx := mx + cos(a) * mr
-			var sy := my + sin(a) * mr
-			pts.append(Vector2(sx, sy))
-			var wx: float = F.x + (sx - mx) / k
-			var wy: float = F.y + (sy - my) / k
-			uvs.append(Vector2(wx * ok / 300.0, wy * ok / 300.0))
-		g.ci.draw_colored_polygon(pts, Color.WHITE, uvs, ov)
+			var sp := Vector2(mx + cos(a) * mr, my + sin(a) * mr)
+			pts.append(sp)
+			uvs.append(Vector2((F.x + (sp.x - mx) / k - o) / span, (F.y + (sp.y - my) / k - o) / span))
+		g.ci.draw_colored_polygon(pts, Color.WHITE, uvs, ovw)
+	elif ov:
+		# Draw the overview inside the circle, but only where it actually covers the
+		# world. Past the map edge the texture's UVs would run outside 0..1 and smear
+		# its edge pixels into streaks, so clip the circle to the world's rectangle.
+		var circ := PackedVector2Array()
+		for i in 40:
+			var a := TAU * i / 40.0
+			circ.append(Vector2(mx + cos(a) * mr, my + sin(a) * mr))
+		var wx0: float = mx + (0.0 - F.x) * k
+		var wy0: float = my + (0.0 - F.y) * k
+		var wx1: float = mx + (D.WORLD - F.x) * k
+		var wy1: float = my + (D.WORLD - F.y) * k
+		var wrect := PackedVector2Array([Vector2(wx0, wy0), Vector2(wx1, wy0), Vector2(wx1, wy1), Vector2(wx0, wy1)])
+		for pts in Geometry2D.intersect_polygons(circ, wrect):
+			var uvs := PackedVector2Array()
+			for sp in pts:
+				uvs.append(Vector2((F.x + (sp.x - mx) / k) / D.WORLD, (F.y + (sp.y - my) / k) / D.WORLD))
+			g.ci.draw_colored_polygon(pts, Color.WHITE, uvs, ov)
 	g.circle(mx, my, mr, rgba(10, 14, 12, 0.25))
 	for s in wd.STORMS:
 		var q: Vector2 = wd.storm_pos(s)

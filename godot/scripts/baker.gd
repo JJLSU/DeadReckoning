@@ -15,6 +15,11 @@ var queue: Array = []     # Vector2i
 var queued := {}
 var busy := false
 var overview: ImageTexture
+# Same scale as the overview, but also covering the ocean margin around the land
+# (used by the flight minimap so it shows real sea all the way out).
+var overview_wide: ImageTexture
+var wide_origin := 0.0     # world x/y of the texture's top-left corner
+var wide_span := 0.0       # world units the texture covers on each side
 var world_ver := 0
 
 func _ready() -> void:
@@ -64,13 +69,21 @@ func _render(origin: Vector2, step: float, grid: int, shade: bool) -> Image:
 		img.fill(Color(0.17, 0.3, 0.35))
 	return img
 
-func build_overview() -> void:
+func build_overview(pad: float = 0.0) -> void:
 	while busy: await get_tree().process_frame
 	busy = true
 	var ver := world_ver
-	var img: Image = await _render(Vector2.ZERO, D.WORLD / 300.0, 300, false)
+	var step := D.WORLD / 300.0
+	var img: Image = await _render(Vector2.ZERO, step, 300, false)
 	if ver == world_ver:
 		overview = ImageTexture.create_from_image(img)
+	if pad > 0.0:
+		var grid := int(ceil((D.WORLD + 2.0 * pad) / step))
+		var img2: Image = await _render(Vector2(-pad, -pad), step, grid, false)
+		if ver == world_ver:
+			overview_wide = ImageTexture.create_from_image(img2)
+			wide_origin = -pad
+			wide_span = grid * step
 	busy = false
 
 func get_chunk(cx: int, cy: int, want: bool = true) -> Texture2D:
