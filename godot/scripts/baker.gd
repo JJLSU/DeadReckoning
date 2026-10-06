@@ -5,6 +5,8 @@ extends Node
 
 const CH := 1024.0   # world units per chunk
 const CPX := 256     # pixels per chunk
+const OV_STEP := 100.0   # world units per pixel in the chart / minimap images (1 px = 1 km)
+const ROAD_SLOTS := 64   # must match road_p[] in terrain.gdshader
 
 var vp: SubViewport
 var rect: ColorRect
@@ -44,15 +46,16 @@ func set_world(w: World) -> void:
 	queued.clear()
 	mat.set_shader_parameter("seed", w.SEED)
 	mat.set_shader_parameter("haven", w.HAVEN)
+	mat.set_shader_parameter("WORLD", D.WORLD)
 	var rp := PackedVector4Array()
-	for i in 16:
+	for i in ROAD_SLOTS:
 		if i < w.ROADS.size():
 			var r = w.ROADS[i]
 			rp.append(Vector4(r.x1, r.y1, r.x2, r.y2))
 		else:
 			rp.append(Vector4.ZERO)
 	mat.set_shader_parameter("road_p", rp)
-	mat.set_shader_parameter("road_count", w.ROADS.size())
+	mat.set_shader_parameter("road_count", mini(w.ROADS.size(), ROAD_SLOTS))
 
 func _render(origin: Vector2, step: float, grid: int, shade: bool) -> Image:
 	vp.size = Vector2i(grid, grid)
@@ -73,8 +76,8 @@ func build_overview(pad: float = 0.0) -> void:
 	while busy: await get_tree().process_frame
 	busy = true
 	var ver := world_ver
-	var step := D.WORLD / 300.0
-	var img: Image = await _render(Vector2.ZERO, step, 300, false)
+	var step := OV_STEP
+	var img: Image = await _render(Vector2.ZERO, step, int(ceil(D.WORLD / step)), false)
 	if ver == world_ver:
 		overview = ImageTexture.create_from_image(img)
 	if pad > 0.0:

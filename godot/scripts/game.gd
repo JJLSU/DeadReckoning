@@ -2,7 +2,7 @@ class_name Game
 extends Node2D
 ## Dead Reckoning — main game controller. A close port of the HTML game's logic.
 
-const WORLD := 30000.0
+const WORLD := D.WORLD   # land size: set in data.gd
 # Open ocean all the way around the landmass (which spans 0..WORLD). It is made wide
 # enough that the longest-ranged plane - best tanks, best engine, wings trinket, full
 # throttle and the strongest tailwind - can't reach the edge on one full tank, then
@@ -11,6 +11,7 @@ const OCEAN_SAFETY := 1.2
 const MAX_ENGINE := 2       # engine upgrades available (see the "engine" purchase)
 const MAX_WIND := 22.0      # strongest wind rolled at takeoff
 var OCEAN_PAD := 0.0
+var old_save_warned := false
 const TS := 32.0
 const SAVE_PATH := "user://deadreckoning_v1.json"
 
@@ -138,6 +139,7 @@ func _ready() -> void:
 	_resize()
 	# world + textures
 	var sv = load_save()
+	wd.PAD = OCEAN_PAD
 	wd.gen_world(int(sv.seed) if sv else randi() % 1000000000)
 	baker.set_world(wd)
 	await baker.build_overview(OCEAN_PAD)
@@ -164,8 +166,8 @@ func _resize() -> void:
 # state helpers
 # ======================================================================
 func new_state(seed_v: int) -> Dictionary:
-	return {"v": 1, "seed": seed_v, "cash": 150, "plane": 0, "tanks": 0, "engine": 0, "fuel": 18.0, "time": 420.0, "hull": 100.0, "leak": 0.0, "roadStrips": [],
-		"band": 3, "parts": 1, "bombs": 1, "diff": 1, "armor": 0.0, "goods": {}, "rumor": 2600.0, "trinkets": [], "carried": 0.0, "ammo": 70, "med": 2, "hp": 100.0,
+	return {"v": 1, "world": WORLD, "seed": seed_v, "cash": 150, "plane": 0, "tanks": 0, "engine": 0, "fuel": 18.0, "time": 420.0, "hull": 100.0, "leak": 0.0, "roadStrips": [],
+		"band": 3, "parts": 1, "bombs": 1, "diff": 1, "armor": 0.0, "goods": {}, "rings": [], "trinkets": [], "carried": 0.0, "ammo": 70, "med": 2, "hp": 100.0,
 		"weapons": [0], "weapon": 0, "contracts": [], "known": [], "strip": wd.START, "looted": {}, "offers": [], "nav": -1, "visits": {}, "mayday": null,
 		"stats": {"flights": 0, "deliv": 0, "kills": 0, "dist": 0.0}}
 
@@ -191,7 +193,22 @@ func load_save():
 	var f := FileAccess.open(SAVE_PATH, FileAccess.READ)
 	if f == null: return null
 	var d = JSON.parse_string(f.get_as_text())
-	return d if d is Dictionary else null
+	if not (d is Dictionary): return null
+	if not save_fits(d): return null
+	return d
+
+## Saves record the land size they were made with (older saves have none = 30,000).
+## A save from a different land size describes a different map, so it can't be resumed.
+func save_fits(d: Dictionary) -> bool:
+	return absf(float(d.get("world", 30000.0)) - WORLD) < 1.0
+
+## True when there's a save file that can't be used with the current land size.
+func old_save_exists() -> bool:
+	if not FileAccess.file_exists(SAVE_PATH): return false
+	var f := FileAccess.open(SAVE_PATH, FileAccess.READ)
+	if f == null: return false
+	var d = JSON.parse_string(f.get_as_text())
+	return d is Dictionary and not save_fits(d)
 
 func clear_save() -> void:
 	if FileAccess.file_exists(SAVE_PATH): DirAccess.remove_absolute(ProjectSettings.globalize_path(SAVE_PATH))
@@ -219,6 +236,13 @@ func normalize(st: Dictionary) -> Dictionary:
 	for k in ["flights", "deliv", "kills"]: stt[k] = int(stt.get(k, 0))
 	stt["dist"] = float(stt.get("dist", 0))
 	st.stats = stt
+	# older saves may have more tank upgrades than the plane now allows
+	if st.has("plane") and st.has("tanks"):
+		var pi := clampi(int(st.plane), 0, D.PLANES.size() - 1)
+		st.tanks = mini(int(st.tanks), int(D.PLANES[pi].tankMax))
+		if st.has("fuel"):
+			var fcap: float = D.PLANES[pi].fuel + st.tanks * D.PLANES[pi].tankStep
+			st.fuel = minf(float(st.fuel), fcap)
 	return st
 
 func PS() -> Dictionary:
@@ -901,7 +925,9 @@ func objective() -> String:
 		return "Deliver %s to %s." % [c.what, strip(int(c.dest)).name]
 	if G.plane == 0:
 		return "You can afford a Heron. Find an airport with a dealer." if G.cash >= D.PLANES[1].price else "Take jobs and sell goods. A Heron costs $%d." % D.PLANES[1].price
-	if not known.has(0): return "Find Haven in the far northeast. Old charts narrow the search."
+	if not known.has(0):
+		if G.rings.is_empty(): return "Find Haven. Old charts may tell you where to look."
+		return "Haven is in one of the four rings on your chart. Old charts narrow them down."
 	return "Fly to Haven."
 
 func bearing(a: Dictionary, b: Dictionary) -> String:
@@ -1513,8 +1539,22 @@ func read_chart() -> Array:
 	un.sort_custom(func(a, b): return Vector2(a.x - s.x, a.y - s.y).length() < Vector2(b.x - s.x, b.y - s.y).length())
 	un = un.slice(0, 3)
 	for o in un: known[o.id] = true
-	G.rumor = maxf(500.0, G.rumor * 0.72)
-	return ["Old chart: %d field%s marked%s" % [un.size(), "" if un.size() == 1 else "s", "" if known.has(0) else ", Haven rumor sharpened"], "#f0c4dd"]
+	var tail := ""
+	if not known.has(0):
+		if G.rings.is_empty():
+			# first chart: the four rumour rings appear at full size
+			G.rings = wd.RING0.duplicate()
+			tail = ", four places Haven might be"
+		else:
+			# later charts: one ring that can still shrink, picked at random
+			var can: Array = []
+			for i in G.rings.size():
+				if float(G.rings[i]) > World.RING_MIN + 0.5: can.append(i)
+			if can.size():
+				var pick: int = can[randi() % can.size()]
+				G.rings[pick] = maxf(World.RING_MIN, float(G.rings[pick]) * World.RING_SHRINK)
+				tail = ", a Haven rumour narrowed"
+	return ["Old chart: %d field%s marked%s" % [un.size(), "" if un.size() == 1 else "s", tail], "#f0c4dd"]
 
 func loot_crate(c: Dictionary) -> void:
 	if c.ty == "safe" and not c.forced:
@@ -2362,6 +2402,9 @@ func show_title() -> void:
 	_free_site()
 	sat = 0.84; con = 1.07
 	ui.show_title(load_save() != null)
+	if old_save_exists() and not old_save_warned:
+		old_save_warned = true
+		toast_later(0.6, "Your saved run is from the old, smaller map and can't be continued. Start a new run to play on the new map.", "bad")
 
 func _regen_world(seed_v: int) -> void:
 	wd.PAD = OCEAN_PAD
@@ -2390,7 +2433,7 @@ func resume_from(st: Dictionary) -> void:
 	st = normalize(st)
 	if baker.overview == null or int(st.seed) != wd.SEED: _regen_world(int(st.seed))
 	G = st
-	for kv in [["time", 420.0], ["hull", 100.0], ["leak", 0.0], ["roadStrips", []], ["trinkets", []], ["diff", 1], ["band", 0], ["parts", 0], ["bombs", 0], ["armor", 0.0], ["rumor", 2600.0], ["goods", {}], ["looted", {}], ["visits", {}], ["mayday", null], ["offers", []]]:
+	for kv in [["time", 420.0], ["hull", 100.0], ["leak", 0.0], ["roadStrips", []], ["trinkets", []], ["diff", 1], ["band", 0], ["parts", 0], ["bombs", 0], ["armor", 0.0], ["rings", []], ["goods", {}], ["looted", {}], ["visits", {}], ["mayday", null], ["offers", []]]:
 		if not G.has(kv[0]) or (G[kv[0]] == null and kv[1] != null): G[kv[0]] = kv[1]
 	wd.strips = wd.strips.filter(func(s): return s.type != "road")
 	for r in G.roadStrips:

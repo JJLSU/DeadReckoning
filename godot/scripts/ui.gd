@@ -406,7 +406,7 @@ const HELP := [
 	["Weather and damage", "Storms drift across the map and show on your minimap as blue patches. Their cores shake the plane apart. Flying low over towns draws gunfire that can hole the hull or the fuel lines. Hard landings cost hull too. Mechanics patch everything for cash."],
 	["Noise", "Your landing, gunfire, running, explosions, and siphoning fuel all fill the noise meter. At each mark a new wave of the dead arrives from the edges of the map. When it fills, the horde comes and does not stop. The crossbow and machete make no noise. Loot what you can and leave in time."],
 	["On foot", "WASD to move, aim with the mouse and click to fire. Hold Shift to run, hold right mouse to aim down sights for steadier, slower aim, Space to jump, 1–5 to select Revolver, Pump shotgun, Lever rifle, Submachine gun, or Assault rifle; 6 for Double-barrel, 7 for Crossbow, Q to cycle owned weapons, H to heal, G to throw a pipe bomb, E to board the plane. Jumping clears sandbags and low fences inside the site, but not cars or the outer fence, and nothing can bite you in the air. Running is loud, and some of the bodies on the ground are not dead. Walk over containers to burst them open, then collect what spills out. Rarer finds glow green, blue, or gold. Locked safes take a spare part or a bomb and hold the best loot, including trinkets with permanent perks. Houses sometimes hide stashes under loose floorboards that only show up close. Footlockers hold ammo, bombs, and armor. Registers hold cash and jewelry. Toolboxes hold spare parts for field repairs. Medicine cabinets hold bandages and antibiotics. Every airfield has a small town beside it with shops and houses to search. Roofs lift away when you step inside. Each shop stocks by its trade: the pharmacy has medicine, the hardware store has parts, the gun shop has ammo. Traders pay different prices for goods at each field. Old charts reveal fields and narrow down Haven. The dead sometimes drop rounds. When you run dry you fight with a machete. Red barrels explode when shot. Gunfire draws more of the dead the longer you stay. Night falls at 18:00, and the dead move faster in the dark. You can sleep in the cockpit from the hangar tab. Return to the plane to refuel, take jobs, and upgrade."],
-	["The goal", "Haven lies somewhere in the far northeast, across empty country no starter plane can cross. Earn a bigger airframe or bigger tanks first."],
+	["The goal", "Haven lies in one of the far corners of the map, across empty country no starter plane can cross. Old charts narrow down which. Earn a bigger airframe or bigger tanks first."],
 	["Keys", "M opens the chart. Esc or P pauses. Mouse wheel or + and − zoom the view, 0 resets it. Ctrl with + and − changes the interface size. F11 toggles fullscreen; Esc leaves fullscreen."]]
 
 func help_content() -> void:
@@ -521,7 +521,7 @@ func render_menu() -> void:
 	if s.shop: tg.append(["Mechanic and trader", true])
 	if s.dealer: tg.append(["Aircraft dealer", true])
 	tags(tg)
-	note("Chalked on the hangar door: “%s”" % D.NOTES[int(s.seed) % D.NOTES.size()])
+	note("Chalked on the hangar door: “%s”" % String(D.NOTES[int(s.seed) % D.NOTES.size()]).replace("{Dir}", World.haven_dir_name().capitalize()))
 	stats([["$%d" % G.cash, "Cash"], ["%.1f/%d" % [G.fuel, int(Pp.fuelCap)], "Gallons aboard"], ["%d km" % U.km(game.range_now()), "Range now"], [str(int(floor(G.carried))), "Gallons in cans"], ["%d%%" % int(ceil(G.hull)), "Hull, leaking" if G.leak > 0 else "Hull"]])
 	var mt: String = game.menu_tab
 	tabs([["contracts", "Contracts", "tab", "contracts"], ["fuel", "Fuel", "tab", "fuel"], ["shop", "Trader", "tab", "shop"], ["hangar", "Hangar", "tab", "hangar"]], mt)
@@ -781,11 +781,13 @@ class MapView extends Control:
 			g.ring(q.x * k, q.y * k, s.r * k, Color(50 / 255.0, 60 / 255.0, 80 / 255.0, 0.5), 1)
 		var ink := Color.html("#1f2a2e")
 		if not gm.known.has(0):
-			var rq: float = 1 - G.rumor / 2600.0
-			var rmx := lerpf(wd.RUMOR.x, wd.HAVEN.x, rq)
-			var rmy := lerpf(wd.RUMOR.y, wd.HAVEN.y, rq)
-			g.dashed_arc(rmx * k, rmy * k, G.rumor * k, 0, TAU, Color(20 / 255.0, 30 / 255.0, 34 / 255.0, 0.8), 1.5, 5, 4)
-			g.text_base("Haven?", rmx * k, rmy * k + 4, 13, ink, 0, "700")
+			# one rumour ring per corner, shown once the first old chart has been read
+			var rings: Array = G.get("rings", [])
+			for i in mini(rings.size(), wd.RUMORS.size()):
+				var rr: float = float(rings[i])
+				var rc: Vector2 = wd.ring_center(i, rr)
+				g.dashed_arc(rc.x * k, rc.y * k, rr * k, 0, TAU, Color(20 / 255.0, 30 / 255.0, 34 / 255.0, 0.8), 1.5, 5, 4)
+				g.text_base("Haven?", rc.x * k, rc.y * k + 4, 13, ink, 0, "700")
 		var dests := {}
 		for c in G.contracts: dests[gm.contract_target(c)] = true
 		var mag := Color.html("#9b2a68")

@@ -5,13 +5,13 @@ shader_type canvas_item;
 uniform int seed = 1;
 uniform vec2 haven = vec2(0.0);
 uniform int road_count = 0;
-uniform vec4 road_p[16];
+uniform vec4 road_p[64];
 uniform vec2 origin = vec2(0.0);
 uniform float step_u = 4.0;
 uniform float grid = 256.0;
 uniform bool shade_on = true;
 
-const float WORLD = 30000.0;
+uniform float WORLD = 60000.0;   // land size, set from D.WORLD by baker.gd
 
 float hsh(int ix, int iy, int s) {
 	uint h = uint(ix) * 374761393u + uint(iy) * 668265263u + uint(s) * 1442695041u;
@@ -74,7 +74,7 @@ int terr(float x, float y, out float TE, out float TM) {
 	if (dh < 1700.0) e = max(e, 0.47);
 	TE = e;
 	if (e >= 0.36) {
-		for (int i = 0; i < 16; i++) {
+		for (int i = 0; i < 64; i++) {
 			if (i >= road_count) break;
 			vec4 r = road_p[i];
 			if (x < min(r.x, r.z) - 22.0 || x > max(r.x, r.z) + 22.0 || y < min(r.y, r.w) - 22.0 || y > max(r.y, r.w) + 22.0) continue;

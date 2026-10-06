@@ -113,11 +113,12 @@ static func draw_world(gm, g: Pen, cx: float, cy: float, sc: float, t: float) ->
 	g.set_view(sc, W / 2 - cx * sc, H / 2 - cy * sc)
 	var ov: Texture2D = gm.baker.overview
 	if ov:
-		var k := 300.0 / D.WORLD
-		var sx := clampf(x0 * k - 1, 0, 299)
-		var sy := clampf(y0 * k - 1, 0, 299)
-		var sw := clampf((x1 - x0) * k + 2, 1, 300 - sx)
-		var sh := clampf((y1 - y0) * k + 2, 1, 300 - sy)
+		var opx := float(ov.get_width())
+		var k := opx / D.WORLD
+		var sx := clampf(x0 * k - 1, 0, opx - 1)
+		var sy := clampf(y0 * k - 1, 0, opx - 1)
+		var sw := clampf((x1 - x0) * k + 2, 1, opx - sx)
+		var sh := clampf((y1 - y0) * k + 2, 1, opx - sy)
 		g.tex_region(ov, Rect2(sx / k, sy / k, sw / k, sh / k), Rect2(sx, sy, sw, sh))
 	# terrain chunks cover the land and the whole ocean margin around it
 	var cmin := int(floor(-gm.OCEAN_PAD / CH)) - 2

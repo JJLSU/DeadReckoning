@@ -2,18 +2,31 @@ class_name World
 extends RefCounted
 ## World generation and terrain queries (CPU side). The GPU shader mirrors terr().
 
-const WORLD := 30000.0
+const WORLD := D.WORLD   # land size: set in data.gd
+const AIRFIELDS := 180     # airfields generated, not counting Haven (one name each in D.NAMES)
+const ROAD_COUNT := 64     # roads generated (must not exceed baker.ROAD_SLOTS / road_p[] in the shader)
+const DEADZONE := 13500.0
+# Haven rumour rings (one per corner; only one corner really has Haven). Units: 100 = 1 km.
+const RING_START_MIN := 5000.0   # each ring starts with a random radius in this range
+const RING_START_MAX := 7500.0
+const RING_MIN := 1000.0         # rings never shrink below this
+const RING_SHRINK := 0.9         # each old chart shrinks one ring to this fraction
+const RUMOR_OFF_MIN := 1000.0    # rumour point's offset from the corner spot, per axis.
+const RUMOR_OFF_MAX := 3500.0    # (max offset x 1.414 must stay under RING_START_MIN so the spot starts inside)  # no airfields within this distance of each corner's Haven spot
 # Small islands in the open ocean around the land (no roads, towns or airfields).
 # Mirrored exactly in shaders/terrain.gdshader isle().
 const ISLE_SCALE := 1800.0   # noise scale: bigger = bigger, fewer islands
 const ISLE_T := 0.76         # noise threshold for land: higher = rarer islands
 const ISLE_K := 3.2          # how fast islands rise from the shore (peaks / hills)
 const ISLE_GAP := 3000.0     # islands fade out this close to the mainland's edge
-const STORM_DENSITY := 5.0  # storms per WORLD x WORLD area, land and ocean alike (originally 20)
+const STORM_DENSITY := 5.0  # storms per 300 x 300 km, land and ocean alike (originally 20)
+const STORM_AREA := 30000.0 * 30000.0
 
 var SEED := 1
 var HAVEN := Vector2.ZERO
-var RUMOR := Vector2.ZERO
+var RUMOR := Vector2.ZERO   # (old single rumour point, no longer shown)
+var RUMORS: Array = []      # rumour point per corner (same order as CORNERS)
+var RING0: Array = []       # starting ring radius per corner
 var ROADS: Array = []
 var STORMS: Array = []
 var strips: Array = []
@@ -21,6 +34,8 @@ var START := 0
 var TE := 0.5
 var TM := 0.5
 var game  # Game node, for G.time
+static var HAVEN_DIR := "NE"   # which corner Haven is in: NE, NW, SE or SW
+var CORNERS: Array = []         # Haven-style spot at each corner (one of them is Haven)
 var PAD := 0.0   # open-ocean margin around the land, set by Game before gen_world()
 var _sp_t := -1.0
 var _sp := PackedVector2Array()
@@ -177,7 +192,7 @@ func _add_ocean_storms(extra_land: int, st: Dictionary) -> void:
 	_sp_t = -1.0
 	if PAD <= 0.0: return
 	var span := WORLD + 2.0 * PAD
-	var n := int(round(STORM_DENSITY * (span * span - WORLD * WORLD) / (WORLD * WORLD)))
+	var n := int(round(STORM_DENSITY * (span * span - WORLD * WORLD) / STORM_AREA))
 	var placed := 0
 	var q := 0
 	while placed < n and q < n * 4:
@@ -191,22 +206,65 @@ func _add_ocean_storms(extra_land: int, st: Dictionary) -> void:
 		placed += 1
 	_sp_t = -1.0
 
+## A route number (2-98) not used by another road yet, if one is left.
+func _route_no(R: Callable, used: Dictionary) -> int:
+	var n := 2 + int(R.call() * 97)
+	for _t in 97:
+		if not used.has(n): break
+		n = 2 + (n - 1) % 97
+	used[n] = true
+	return n
+
+## Where ring i is drawn for current radius r: it slides from its rumour point toward
+## its corner's spot as it shrinks (the same for all four, so the real one doesn't stand out).
+func ring_center(i: int, r: float) -> Vector2:
+	var q: float = clampf(1.0 - r / float(RING0[i]), 0.0, 1.0)
+	return (RUMORS[i] as Vector2).lerp(CORNERS[i], q)
+
+## "northeast" etc. for Haven's corner, for notes and objectives.
+static func haven_dir_name() -> String:
+	return {"NE": "northeast", "NW": "northwest", "SE": "southeast", "SW": "southwest"}[HAVEN_DIR]
+
 func gen_world(seed_v: int) -> void:
 	SEED = seed_v
 	var rng := U.Mulberry.new(SEED * 7 + 3)
 	var R := rng.next
-	HAVEN = Vector2(WORLD - 2300 - R.call() * 700, 1900 + R.call() * 800)
-	RUMOR = Vector2(HAVEN.x - 600 - R.call() * 1400, HAVEN.y + 600 + R.call() * 1400)
+	# Haven sits near one of the four corners, picked at random. The same inset is used
+	# at every corner, and each corner gets the airfield-free dead zone around it.
+	var ix: float = 2300 + R.call() * 700
+	var iy: float = 1900 + R.call() * 800
+	CORNERS = [Vector2(WORLD - ix, iy), Vector2(ix, iy), Vector2(WORLD - ix, WORLD - iy), Vector2(ix, WORLD - iy)]
+	var hc := int(R.call() * 4) % 4
+	HAVEN = CORNERS[hc]
+	HAVEN_DIR = ["NE", "NW", "SE", "SW"][hc]
+	var inx := -1.0 if HAVEN.x > WORLD / 2 else 1.0   # pointing back toward the middle
+	var iny := -1.0 if HAVEN.y > WORLD / 2 else 1.0
+	RUMOR = Vector2(HAVEN.x + inx * (600 + R.call() * 1400), HAVEN.y + iny * (600 + R.call() * 1400))
+	# Rumour rings: one per corner, each with its own rumour point and starting size.
+	# Own random stream so the rest of the world generation is unaffected.
+	var hrng := U.Mulberry.new(SEED * 17 + 5)
+	var HR := hrng.next
+	RUMORS = []
+	RING0 = []
+	for c in CORNERS:
+		var sx := -1.0 if c.x > WORLD / 2 else 1.0
+		var sy := -1.0 if c.y > WORLD / 2 else 1.0
+		var ox: float = RUMOR_OFF_MIN + HR.call() * (RUMOR_OFF_MAX - RUMOR_OFF_MIN)
+		var oy: float = RUMOR_OFF_MIN + HR.call() * (RUMOR_OFF_MAX - RUMOR_OFF_MIN)
+		RUMORS.append(Vector2(c.x + sx * ox, c.y + sy * oy))
+		RING0.append(RING_START_MIN + HR.call() * (RING_START_MAX - RING_START_MIN))
 	ROADS = []
 	strips = [{"id": 0, "name": "Haven", "type": "haven", "x": HAVEN.x, "y": HAVEN.y, "ang": R.call() * PI, "len": 720.0, "wid": 80.0, "fuel": true, "shop": false, "dealer": false, "danger": 0, "fuelPrice": 0, "seed": 1, "arch": "farm", "home": false}]
 	var names := U.shuffle(D.NAMES.duplicate(), R)
 	var tries := 0
-	while strips.size() < 64 and tries < 9000:
+	while strips.size() < AIRFIELDS + 1 and tries < 30000:
 		tries += 1
 		var x: float = 1200 + R.call() * (WORLD - 2400)
 		var y: float = 1200 + R.call() * (WORLD - 2400)
-		if Vector2(x - HAVEN.x, y - HAVEN.y).length() < 13500: continue
 		var ok := true
+		for c in CORNERS:
+			if Vector2(x - c.x, y - c.y).length() < DEADZONE: ok = false
+		if not ok: continue
 		for s in strips:
 			if Vector2(s.x - x, s.y - y).length() < 2300:
 				ok = false
@@ -235,7 +293,7 @@ func gen_world(seed_v: int) -> void:
 	var best := 1e18
 	for s in strips:
 		if s.type == "haven": continue
-		var d := Vector2(s.x - 2600, s.y - (WORLD - 2600)).length()
+		var d := Vector2(s.x - WORLD / 2, s.y - WORLD / 2).length()   # start near the middle
 		if d < best:
 			best = d
 			START = s.id
@@ -246,7 +304,9 @@ func gen_world(seed_v: int) -> void:
 	var pool := strips.filter(func(s): return s.type != "haven")
 	var kk := 0
 	var q := 0
-	while kk < 16 and q < 300:
+	var linked := {}     # airfield pairs that already have a road
+	var route_nos := {}  # route numbers already used
+	while kk < ROAD_COUNT and q < 3000:
 		q += 1
 		var a = pool[int(R.call() * pool.size())]
 		var cands := pool.filter(func(b):
@@ -254,6 +314,9 @@ func gen_world(seed_v: int) -> void:
 			return b != a and d > 2500 and d < 7500)
 		if cands.is_empty(): continue
 		var b = cands[int(R.call() * cands.size())]
+		var pk := "%d-%d" % [mini(a.id, b.id), maxi(a.id, b.id)]
+		if linked.has(pk): continue
+		linked[pk] = true
 		var an := atan2(b.y - a.y, b.x - a.x)
 		var px := -sin(an) * 320
 		var py := cos(an) * 320
@@ -265,7 +328,7 @@ func gen_world(seed_v: int) -> void:
 		var dy := y2 - y1
 		var len2 := dx * dx + dy * dy
 		ROADS.append({"x1": x1, "y1": y1, "x2": x2, "y2": y2, "dx": dx, "dy": dy, "len2": len2, "len": sqrt(len2), "ang": atan2(dy, dx),
-			"minx": minf(x1, x2) - 22, "maxx": maxf(x1, x2) + 22, "miny": minf(y1, y2) - 22, "maxy": maxf(y1, y2) + 22, "name": "Route " + str(2 + int(R.call() * 97))})
+			"minx": minf(x1, x2) - 22, "maxx": maxf(x1, x2) + 22, "miny": minf(y1, y2) - 22, "maxy": maxf(y1, y2) + 22, "name": "Route " + str(_route_no(R, route_nos))})
 		kk += 1
 	STORMS = []
 	kk = 0
@@ -273,7 +336,7 @@ func gen_world(seed_v: int) -> void:
 	# Land storms: STORM_DENSITY of them. This loop always draws the original 20 sets
 	# of random numbers so everything generated after it (airfield danger levels and
 	# types) stays the same for a given seed; it just keeps fewer when the density is lower.
-	var n_land := int(round(STORM_DENSITY))
+	var n_land := int(round(STORM_DENSITY * WORLD * WORLD / STORM_AREA))
 	while kk < 20 and q < 200:
 		q += 1
 		var x: float = R.call() * WORLD

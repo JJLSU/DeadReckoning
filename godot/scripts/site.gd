@@ -694,7 +694,7 @@ static func bake_draw(g: Pen, st: Dictionary) -> void:
 		var v := G1[r * cols + cc]
 		if not (v == 11 or v == 14 or v == 3): continue
 		g.save(); g.translate(cc * TS + 16, r * TS + 16); g.rotate((H1.call(k, 5, 93) - .5) * .6)
-		g.text_base(D.TAGS[k % D.TAGS.size()], 0, 0, 18, U.rgb(160, 28, 20, .5) if H1.call(k, 6, 94) < .5 else U.rgb(15, 15, 15, .5), 0, "impact")
+		g.text_base(String(D.TAGS[k % D.TAGS.size()]).replace("{DIR}", World.HAVEN_DIR), 0, 0, 18, U.rgb(160, 28, 20, .5) if H1.call(k, 6, 94) < .5 else U.rgb(15, 15, 15, .5), 0, "impact")
 		g.restore()
 	for rm in st.rooms:
 		if rm.kind != "house" or H1.call(rm.c, rm.r, 95) > .6: continue
