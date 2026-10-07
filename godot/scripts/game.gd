@@ -20,6 +20,21 @@ const ADS_MOVE := 0.5     # walk speed multiplier while aiming
 const ADS_SENS := 0.45     # mouse sensitivity multiplier while aiming
 const ADS_ZOOM := 0.25    # extra zoom at full aim (0.25 = 25% closer)
 const ADS_LEAD := 90.0    # how far (world px) the camera leans toward where you face
+# Survivor-held strips (see World.HOSTILE_CHANCE)
+const GARRISON_MIN := 8        # total armed survivors at one of these strips...
+const GARRISON_MAX := 14
+const GARRISON_OUT_MIN := 3    # ...of which this many start outside; the rest wait in buildings
+const GARRISON_OUT_MAX := 5
+# Armed survivors' guns. Chance of each weapon ~ exp(-price / (SV_GUN_BASE + SV_GUN_STEP x danger)):
+# cheaper guns are always more common (scarcity), but dearer ones show up more where danger is high.
+const SV_GUN_BASE := 300.0
+const SV_GUN_STEP := 250.0
+const SV_DMG_REF := 30.0
+const SV_GUN_DROP := 0.15     # chance a killed survivor also drops their gun
+# Survivor body armour: chance by danger (index = danger), and how much it holds. Like
+# the player's armour, it soaks up half of each hit until it's used up.
+const SV_ARMOR_CHANCE := [0.0, 0.05, 0.15, 0.25, 0.35, 0.45]
+const SV_ARMOR := 50.0      # survivor bullet damage scales with gun damage / this (revolver = 1x)
 const ADS_AUTO_SPREAD := 0.5  # automatic weapons' bullet spread multiplier while aiming
 const ADS_RATE := 4.0     # ease speed in/out (higher = snappier)
 const CAM_EDGE := 60.0    # player always stays at least this many screen px from the view's edge
@@ -699,7 +714,7 @@ func upd_flight(dt: float) -> void:
 			var rn := range_now()
 			var cand := wd.strips.filter(func(s):
 				var d := Vector2(s.x - F.x, s.y - F.y).length()
-				return s.type != "haven" and s.type != "road" and s.id != G.strip and d > 1200 and d < minf(5500, rn * 0.9))
+				return s.type != "haven" and s.type != "road" and not s.get("hostile", false) and s.id != G.strip and d > 1200 and d < minf(5500, rn * 0.9))
 			if cand.size():
 				var s: Dictionary = cand[randi() % cand.size()]
 				known[s.id] = true
@@ -716,7 +731,7 @@ func upd_flight(dt: float) -> void:
 		for s in wd.strips:
 			if not known.has(s.id) and Vector2(s.x - F.x, s.y - F.y).length() < 2200:
 				known[s.id] = true
-				toast("Runway lights on the coast. Haven is real." if s.type == "haven" else "Spotted a field: " + s.name, "mag")
+				toast("Runway lights on the coast. Haven is real." if s.type == "haven" else ("Spotted a field: " + s.name + (". Armed survivors hold it." if s.get("hostile", false) else "")), "mag")
 
 func align_to(sang: float, a: float) -> bool:
 	var d := fmod(fmod(a - sang, PI) + PI, PI)
@@ -881,12 +896,13 @@ func nav_target():
 # contracts
 # ======================================================================
 func gen_offers(s: Dictionary) -> Array:
+	if s.get("hostile", false): return []
 	var R := range_full()
 	var n := 2 if s.type == "dirt" else (3 if s.type == "regional" else 4)
 	var c: Array = []
 	if s.type != "road":
 		c = wd.strips.filter(func(o):
-			if o.id == s.id or o.type == "haven" or o.type == "road": return false
+			if o.id == s.id or o.type == "haven" or o.type == "road" or o.get("hostile", false): return false
 			var d := Vector2(o.x - s.x, o.y - s.y).length()
 			return d > 1400 and d < R * 0.95)
 	c.shuffle()
@@ -971,9 +987,14 @@ func gen_site(s: Dictionary) -> Dictionary:
 			break
 	var first: bool = s.get("home", false) and int(G.visits.get(str(s.id), 0)) <= 1
 	S = site
+	var hostile: bool = s.get("hostile", false)
+	site.hostile = hostile
+	site.svh = []        # garrison members still inside buildings
+	site.alarm = false   # set once the garrison is alerted
 	var nz := int(round(DF().count * (3 if first else 2 + s.danger * 3 + (3 if site.arch == "town" else 0) + (4 if site.arch == "road" else 0) + 4) + round(dark() * 3)))
+	if hostile: nz = 0
 	for i in nz: spawn_z(true)
-	if not first:
+	if not first and not hostile:
 		var nd2 := int(round((1 + s.danger * 0.8) * DF().count))
 		for i in nd2:
 			var n0: int = S.zs.size()
@@ -981,7 +1002,7 @@ func gen_site(s: Dictionary) -> Dictionary:
 			if S.zs.size() > n0:
 				var z: Dictionary = S.zs[S.zs.size() - 1]
 				z.dormant = true; z.kind = ""; z.arm = false; z.da = randf() * TAU; z.hp = 45.0 + s.danger * 8
-	site.cap = int(round((8 if first else 10 + s.danger * 4) * DF().count))
+	site.cap = 0 if hostile else int(round((8 if first else 10 + s.danger * 4) * DF().count))
 	# First visit to any site starts silent; return visits start with some noise.
 	var first_visit: bool = int(G.visits.get(str(s.id), 0)) <= 1
 	site.noise = 0.0 if first_visit else (6 + s.danger * 2) * DF().noise
@@ -996,16 +1017,140 @@ func gen_site(s: Dictionary) -> Dictionary:
 			blood(x, y, 5)
 			stamp_corpse({"x": x, "y": y, "a": randf() * TAU, "shirt": D.ZSHIRT[randi() % D.ZSHIRT.size()], "skin": ["#c69c74", "#8a5f40", "#e0b894", "#8c9a78"][randi() % 4]})
 			break
-	if not first and randf() < 0.2 + 0.08 * s.danger + (0.25 if site.arch == "military" else 0.0) and site.rooms.size():
+	if hostile:
+		spawn_garrison(site)
+	elif not first and randf() < 0.2 + 0.08 * s.danger + (0.25 if site.arch == "military" else 0.0) and site.rooms.size():
 		var n := 1 + int(randf() * mini(3, s.danger))
 		for i in n:
 			var o: Dictionary = site.rooms[randi() % site.rooms.size()]
 			var x: float = (o.c + 1.5 + randf() * (o.w - 3)) * TS
 			var y: float = (o.r + 1.5 + randf() * (o.h - 3)) * TS
 			if Vector2(x - site.p.x, y - site.p.y).length() > 320 and not solid(x, y):
-				site.sv.append({"x": x, "y": y, "shirt": ["#5a5f3a", "#4a3a2a", "#3f4f5f"][randi() % 3], "skin": ["#c69c74", "#8a5f40", "#e0b894"][randi() % 3],
-					"cap": "#3a3226" if randf() < 0.5 else "", "wk": 0.0, "hp": 70.0, "cd": 1 + randf(), "ang": 0.0, "alert": false, "hit": 0.0, "sw": 0.0, "sd": 1.0, "dead": false})
+				site.sv.append(new_sv(x, y))
 	return site
+
+## Pick a gun for an armed survivor at this danger level (index into D.WEAPONS).
+func pick_sv_weapon(danger: int) -> int:
+	var sc := SV_GUN_BASE + SV_GUN_STEP * maxi(1, danger)
+	var ws: Array = []
+	var tot := 0.0
+	for w in D.WEAPONS:
+		var x := exp(-float(w.price) / sc)
+		ws.append(x)
+		tot += x
+	var r := randf() * tot
+	for i in ws.size():
+		r -= ws[i]
+		if r <= 0: return i
+	return 0
+
+## One armed survivor.
+func new_sv(x: float, y: float) -> Dictionary:
+	var dg: int = int(S.danger) if S else 1
+	var arm: float = SV_ARMOR if randf() < float(SV_ARMOR_CHANCE[clampi(dg, 0, SV_ARMOR_CHANCE.size() - 1)]) else 0.0
+	return {"x": x, "y": y, "w": pick_sv_weapon(dg), "burst": 0, "armor": arm, "shirt": ["#5a5f3a", "#4a3a2a", "#3f4f5f"][randi() % 3], "skin": ["#c69c74", "#8a5f40", "#e0b894"][randi() % 3],
+		"cap": "#3a3226" if randf() < 0.5 else "", "wk": 0.0, "hp": 70.0, "cd": 1 + randf(), "ang": 0.0, "alert": false, "hit": 0.0, "sw": 0.0, "sd": 1.0, "dead": false}
+
+## Is (x, y) open ground a person can stand on, away from the player's start?
+func _garrison_spot_ok(site: Dictionary, x: float, y: float) -> bool:
+	return not solid(x, y) and Vector2(x - site.p.x, y - site.p.y).length() > 450
+
+## Garrison for a survivor-held strip: a few posted outside near building doors, the
+## rest inside the buildings until the shooting starts (see upd_garrison()).
+func spawn_garrison(site: Dictionary) -> void:
+	var total := GARRISON_MIN + randi() % (GARRISON_MAX - GARRISON_MIN + 1)
+	var outside := mini(total, GARRISON_OUT_MIN + randi() % (GARRISON_OUT_MAX - GARRISON_OUT_MIN + 1))
+	var rooms: Array = site.rooms
+	for i in total:
+		var out_now := i < outside
+		for t in 40:
+			var x: float
+			var y: float
+			if rooms.size():
+				# the tile just outside a building's door
+				var rm: Dictionary = rooms[randi() % rooms.size()]
+				var top: bool = rm.door[2]
+				var dirn := -1.0 if top else 1.0
+				x = (rm.door[0] + 1.0) * TS
+				y = (rm.door[1] + 0.5 + dirn) * TS
+				if out_now:   # posted a little way off from the door
+					x += (randf() - 0.5) * 6.0 * TS
+					y += dirn * randf() * 3.0 * TS
+				else:         # comes out right at the door
+					x += (randf() - 0.5) * TS
+			else:
+				x = (1.5 + randf() * (site.cols - 3)) * TS
+				y = (1.5 + randf() * (site.ry - 3)) * TS
+			if not _garrison_spot_ok(site, x, y): continue
+			if out_now: site.sv.append(new_sv(x, y))
+			else: site.svh.append({"x": x, "y": y, "out": 1e9})
+			break
+
+## Garrison behaviour each frame: once any survivor is alerted, the ones inside
+## come out of their buildings a few at a time to join the fight.
+func upd_garrison() -> void:
+	if not S.alarm:
+		for v in S.sv:
+			if v.alert:
+				S.alarm = true
+				break
+		if S.alarm and S.svh.size():
+			toast("Doors bang open. More of them are coming out of the buildings.", "bad")
+			for h in S.svh: h.out = S.t + 1.0 + randf() * 9.0
+		return
+	var i: int = S.svh.size() - 1
+	while i >= 0:
+		var h: Dictionary = S.svh[i]
+		if S.t >= h.out:
+			var v := new_sv(h.x, h.y)
+			v.alert = true
+			S.sv.append(v)
+			S.svh.remove_at(i)
+		i -= 1
+
+## Damage to a zombie or survivor; armoured survivors soak up half of each hit
+## until their armour runs out (same rule as the player's armour).
+func dmg_enemy(e: Dictionary, d: float) -> void:
+	var ar: float = e.get("armor", 0.0)
+	if ar > 0:
+		var a := minf(ar, d * 0.5)
+		e.armor = ar - a
+		d -= a
+	e.hp -= d
+
+## A survivor fires their gun. Automatics fire short bursts; shotguns fire a spread of
+## pellets. Damage per bullet is the normal survivor damage x (gun damage / SV_DMG_REF).
+func sv_fire(v: Dictionary) -> void:
+	var w: Dictionary = D.WEAPONS[int(v.get("w", 0))]
+	var auto: bool = w.get("auto", false)
+	var dmg: float = (8 + S.danger) * DF().dmg * float(w.dmg) / SV_DMG_REF
+	var aim: float = v.ang + (randf() - 0.5) * 0.22 * (1.6 if auto and v.burst > 0 else 1.0)
+	for k in int(w.pel):
+		var a: float = aim + (randf() - 0.5) * float(w.spr) * 2.0
+		S.bul.append({"x": v.x + cos(a) * 14, "y": v.y + sin(a) * 14, "vx": cos(a) * w.spd * 0.65, "vy": sin(a) * w.spd * 0.65,
+			"life": w.life * 1.6, "dmg": dmg, "pl": false, "kb": 0.0, "bolt": w.bolt})
+	sfx("bow" if w.silent else "enemy")
+	if auto:
+		if v.burst <= 0: v.burst = 3 + randi() % 3
+		v.burst -= 1
+		if v.burst > 0:
+			v.cd = w.rate * 2.0          # next shot in the burst
+			return
+	v.cd = (0.75 + w.rate) * (1.0 + randf() * 0.6)
+
+## Reinforcement survivor arriving from the edge of the map (noise waves at held strips).
+func spawn_edge_sv() -> void:
+	for t2 in 40:
+		var side := randi() % 4
+		var c: int = 1 if side == 0 else (S.cols - 2 if side == 1 else 1 + int(randf() * (S.cols - 2)))
+		var r: int = 1 if side == 2 else (S.ry - 2 if side == 3 else 1 + int(randf() * (S.rows - 2)))
+		var x: float = (c + 0.5) * TS
+		var y: float = (r + 0.5) * TS
+		if solid(x, y) or Vector2(x - S.p.x, y - S.p.y).length() < 380: continue
+		var v := new_sv(x, y)
+		v.alert = true
+		S.sv.append(v)
+		return
 
 func enter_ground(s: Dictionary) -> void:
 	_free_site()
@@ -1015,7 +1160,9 @@ func enter_ground(s: Dictionary) -> void:
 	ui.close_ui()
 	clear_input()
 	F = null
-	if dark() > 0.5: toast("It is dark. The dead move faster at night.", "bad")
+	if s.get("hostile", false):
+		toast("Armed survivors hold this strip. No fuel, no trade, no jobs. Keep your head down.", "bad")
+	elif dark() > 0.5: toast("It is dark. The dead move faster at night.", "bad")
 
 func spawn_npc(s: Dictionary) -> void:
 	var c = null
@@ -1374,7 +1521,7 @@ func explode(br: Dictionary) -> void:
 	for v in S.sv:
 		var d := Vector2(v.x - br.x, v.y - br.y).length()
 		if d < R:
-			v.hp -= 160 * (1 - d / R / 1.3)
+			dmg_enemy(v, 160 * (1 - d / R / 1.3))
 			if v.hp <= 0 and not v.dead:
 				v.dead = true
 				G.stats.kills += 1
@@ -1405,7 +1552,7 @@ func shoot() -> void:
 		for e in enemies():
 			var d := Vector2(e.x - p.x, e.y - p.y).length()
 			if d < 44 and absf(U.ang_diff(atan2(e.y - p.y, e.x - p.x), p.ang)) < 1.1:
-				e.hp -= 67 if has("boots") else 42
+				dmg_enemy(e, 67.0 if has("boots") else 42.0)
 				e.hit = 0.12
 				e.alert = true
 				move_c(e, cos(p.ang) * 18, sin(p.ang) * 18, 10)
@@ -1574,6 +1721,7 @@ func loot_crate(c: Dictionary) -> void:
 	if c.ty == "safe": rolls = 2 + (1 if randf() < 0.5 else 0)
 	else: rolls = 1 + (1 if randf() < (0.6 if (c.ty == "locker" or c.ty == "desk") else 0.35) + 0.06 * (S.danger - 1) + (0.25 if has("rabbit") else 0.0) else 0)
 	if c.ty != "jerry" and randf() < 0.04 * S.danger: rolls += 1
+	if S.get("hostile", false): rolls += 1   # survivor-held strips are well stocked
 	var n := 0
 	for i in rolls:
 		var k := D.wpick(tab, func(): return randf())
@@ -1653,6 +1801,18 @@ func dbg_best_plane() -> void:
 	G.hull = 100.0
 	sfx("click")
 	toast("Testing: %s with full tanks and engine upgrades." % D.PLANES[G.plane].name, "good")
+
+func dbg_reveal_map() -> void:
+	if G == null: return
+	var n := 0
+	for s in wd.strips:
+		if s.type == "haven": continue   # Haven stays hidden so the rumour rings can be tested
+		if not known.has(s.id):
+			known[s.id] = true
+			n += 1
+	G.known = known.keys()
+	sfx("click")
+	toast("Testing: map revealed, %d new fields charted. Haven is still hidden." % n, "good")
 
 func dbg_cash() -> void:
 	if G == null: return
@@ -1822,7 +1982,7 @@ func upd_ground(dt: float) -> void:
 				if not dead:
 					for v in S.sv:
 						if not v.dead and pow(v.x - b.x, 2) + pow(v.y - b.y, 2) < 144:
-							v.hp -= b.dmg
+							dmg_enemy(v, b.dmg)
 							v.hit = 0.1
 							v.alert = true
 							blood(v.x, v.y, 1)
@@ -1832,6 +1992,8 @@ func upd_ground(dt: float) -> void:
 								blood(v.x, v.y, 6)
 								var am := randf() < 0.6
 								S.drops.append({"x": v.x, "y": v.y, "k": "ammo" if randf() < 0.6 else "cash", "n": (10 + randi() % 10) if am else (30 + randi() % 60)})
+								if randf() < SV_GUN_DROP:
+									S.drops.append({"x": v.x + 14, "y": v.y + 6, "k": "gun", "w": int(v.get("w", 0)), "n": 0})
 							dead = true
 							break
 			elif pow(p.x - b.x, 2) + pow(p.y - b.y, 2) < 110:
@@ -1958,6 +2120,7 @@ func upd_ground(dt: float) -> void:
 			hurt(z.dmg, "bitten")
 			if uist != "": return
 	# survivors
+	if S.get("hostile", false): upd_garrison()
 	for v in S.sv:
 		var dx: float = p.x - v.x
 		var dy: float = p.y - v.y
@@ -1972,9 +2135,13 @@ func upd_ground(dt: float) -> void:
 		if v.alert:
 			v.ang = atan2(dy, dx)
 			if see:
-				if d > 300:
+				# preferred distance depends on the gun: shotguns close in, rifles hang back
+				var wd2: Dictionary = D.WEAPONS[int(v.get("w", 0))]
+				var near := 110.0 if wd2.pel > 1 else (260.0 if (wd2.spr < 0.02) else 180.0)
+				var far := 200.0 if wd2.pel > 1 else (380.0 if (wd2.spr < 0.02) else 300.0)
+				if d > far:
 					vx = dx / d; vy = dy / d
-				elif d < 180:
+				elif d < near:
 					vx = -dx / d; vy = -dy / d
 				v.sw -= dt
 				if v.sw <= 0:
@@ -1982,11 +2149,7 @@ func upd_ground(dt: float) -> void:
 					v.sd = 1.0 if randf() < 0.5 else -1.0
 				vx += -dy / d * v.sd * 0.7
 				vy += dx / d * v.sd * 0.7
-				if v.cd <= 0:
-					v.cd = 1.1 + randf() * 0.7
-					var a: float = v.ang + (randf() - 0.5) * 0.22
-					S.bul.append({"x": v.x + cos(a) * 14, "y": v.y + sin(a) * 14, "vx": cos(a) * 620, "vy": sin(a) * 620, "life": 0.9, "dmg": (8 + S.danger) * DF().dmg, "pl": false, "kb": 0.0, "bolt": false})
-					sfx("enemy")
+				if v.cd <= 0: sv_fire(v)
 			else:
 				vx = dx / d; vy = dy / d
 		var vx0: float = v.x
@@ -2004,21 +2167,44 @@ func upd_ground(dt: float) -> void:
 				d.n = int(round(d.n * (1.3 if has("bandolier") else 1.0)))
 				G.ammo += d.n
 				floater(d.x, d.y - 16, "+%d rounds" % d.n)
+			elif d.k == "gun":
+				var wi: int = int(d.w)
+				var wn: String = D.WEAPONS[wi].name
+				if not G.weapons.has(wi):
+					G.weapons.append(wi)
+					floater(d.x, d.y - 16, wn + "!", "#ffd27a")
+					toast("Picked up %s. Press %d to equip." % [wn, wi + 1], "good")
+					sfx("jackpot")
+				else:
+					# already have one: strip it for its rounds
+					var n := int(round(12 * (1.3 if has("bandolier") else 1.0)))
+					G.ammo += n
+					floater(d.x, d.y - 16, "+%d rounds (spare %s)" % [n, String(wn).to_lower()])
 			else:
 				G.cash += d.n
 				floater(d.x, d.y - 16, "+$%d" % d.n, "#9cc063")
 			S.drops.remove_at(i)
 		i -= 1
 	# (no background noise: the meter only rises from what the player does)
-	for wv in [[35, 5, "They know you are here."], [65, 9, "A crowd is gathering at the fence line."], [100, 14, "The horde is here. Get to the plane."]]:
+	var held: bool = S.get("hostile", false)
+	# At survivor-held strips the noise waves are armed reinforcements, not the dead.
+	var waves := [[35, 2, "Shouts from the treeline. More of them are coming."], [65, 3, "Engines on the road. They are bringing friends."], [100, 4, "Everyone they have is coming. Get to the plane."]] if held \
+		else [[35, 5, "They know you are here."], [65, 9, "A crowd is gathering at the fence line."], [100, 14, "The horde is here. Get to the plane."]]
+	for wv in waves:
 		if S.noise >= wv[0] and not S.waves.has(wv[0]):
 			S.waves.append(wv[0])
 			toast(wv[2], "bad")
 			sfx("horde")
 			S.shake = maxf(S.shake, 5)
-			for k in int(round(wv[1] * DF().count)): spawn_edge(wv[0] >= 100 and G.diff != 0)
+			for k in maxi(1, int(round(wv[1] * DF().count))):
+				if held: spawn_edge_sv()
+				else: spawn_edge(wv[0] >= 100 and G.diff != 0)
 	S.spawnT -= dt
-	if S.spawnT <= 0:
+	if held and S.spawnT <= 0:
+		# no dead here; once the meter is full, a reinforcement every 10-16 s
+		S.spawnT = 10.0 + randf() * 6.0
+		if S.noise >= 100 and S.sv.size() < 20: spawn_edge_sv()
+	elif S.spawnT <= 0:
 		var nf: float = S.noise / 100.0
 		S.spawnT = maxf(0.7, (8 - S.danger * 1.1) * (1 - nf * 0.8)) * (0.7 + randf() * 0.6)
 		var capn := mini(60, S.cap + int(floor(S.noise / 8.0)))

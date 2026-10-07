@@ -843,6 +843,14 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 			for d in S.drops:
 				var pl := 0.5 + 0.5 * sin(T * 5 + d.x)
 				g.rect(d.x - 5, d.y - 3, 14, 10, Color(0, 0, 0, 0.3))
+				if d.k == "gun":
+					# a dropped gun: barrel and stock (short for the revolver), gold glow
+					var lg: bool = int(d.get("w", 0)) != 0
+					g.rect(d.x - (11.0 if lg else 6.0), d.y - 2, 22.0 if lg else 12.0, 4, hc("#161615"))
+					if lg: g.rect(d.x - 13, d.y - 2.5, 8, 5, hc("#5a3e26"))
+					else: g.rect(d.x - 7, d.y - 1, 4, 6, hc("#5a3e26"))
+					g.ring(d.x, d.y, 15, rgba(255, 210, 122, 0.3 + 0.4 * pl), 1.5)
+					continue
 				if d.k == "ammo":
 					g.rect(d.x - 7, d.y - 5, 14, 10, hc("#4f5530"))
 					for q in 4: g.rect(d.x - 5 + q * 3, d.y - 3, 2, 6, hc("#d9b35a"))
@@ -863,7 +871,7 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 			g.save(); g.translate(S.plane.x, S.plane.y); draw_plane(g, P, 190, 0, false); g.restore()
 			if S.nearPlane: g.dashed_arc(S.plane.x, S.plane.y, 130, 0, TAU, rgba(212, 90, 157, 0.8), 2, 8, 6)
 			for z in S.zs: draw_zombie(gm, g, z)
-			for v in S.sv: draw_person(g, v.x, v.y, v.ang, {"body": v.shirt, "skin": v.skin, "hair": "#2b2118", "cap": v.cap, "gun": true, "long": true, "walk": v.wk, "hit": v.hit > 0})
+			for v in S.sv: draw_person(g, v.x, v.y, v.ang, {"body": v.shirt, "skin": v.skin, "hair": "#2b2118", "cap": v.cap, "gun": true, "long": int(v.get("w", 1)) != 0, "vest": float(v.get("armor", 0.0)) > 0, "walk": v.wk, "hit": v.hit > 0})
 			if S.npc:
 				var n: Dictionary = S.npc
 				draw_person(g, n.x, n.y, n.ang, {"body": "#3f7a7a", "skin": "#e0b894", "hair": "#5a3a22", "walk": n.wk, "hit": n.hit > 0})
@@ -1302,6 +1310,10 @@ static func draw_person(g: Pen, x: float, y: float, a: float, o: Dictionary) -> 
 		g.rect(-12, -6, 6, 12, hc("#4a4232"))
 		g.rect(-12, -6, 2, 12, Color(0, 0, 0, 0.25))
 	g.ellipse(0, 0, 7.5, 11.5, 0, body)
+	if o.get("vest", false) and not hit:
+		# body armour: grey plate vest over the shirt
+		g.ellipse(0, 0, 6.2, 9.6, 0, hc("#4b5259"))
+		g.rect(-3.2, -6, 6.4, 12, hc("#5f676f"))
 	g.stroke_ellipse(0, 0, 7.5, 11.5, 0, Color(0, 0, 0, 0.35), 1)
 	g.ellipse(-2, -3.5, 4, 6, 0, Color(1, 1, 1, 0.13))
 	g.circle(1, 0, 5.8, skin)

@@ -6,6 +6,9 @@ const WORLD := D.WORLD   # land size: set in data.gd
 const AIRFIELDS := 180     # airfields generated, not counting Haven (one name each in D.NAMES)
 const ROAD_COUNT := 64     # roads generated (must not exceed baker.ROAD_SLOTS / road_p[] in the shader)
 const DEADZONE := 13500.0
+# Survivor-held strips: no dead, an armed garrison, no fuel/trade/jobs.
+# Chance per strip by danger level (index = danger; 0 is Haven, 1 is the lowest tier).
+const HOSTILE_CHANCE := [0.0, 0.0, 0.1, 0.2, 0.3, 0.4]
 # Haven rumour rings (one per corner; only one corner really has Haven). Units: 100 = 1 km.
 const RING_START_MIN := 5000.0   # each ring starts with a random radius in this range
 const RING_START_MAX := 7500.0
@@ -386,3 +389,17 @@ func gen_world(seed_v: int) -> void:
 		if pick:
 			pick.type = "airport"; pick.dealer = true; pick.shop = true; pick.fuel = true; pick.fuelPrice = 3; pick.len = 600.0; pick.wid = 64.0
 			pick.name = pick.name.split(" ")[0] + " Regional"
+	# Survivor-held strips. Never the home field or an airport you can reach from it
+	# (so a new run always has somewhere to refuel). Own random stream, so the rest
+	# of the world is unaffected.
+	var hrng2 := U.Mulberry.new(SEED * 23 + 11)
+	var HH := hrng2.next
+	for s in strips:
+		s.hostile = false
+		if s.type == "haven" or s.id == START: continue
+		if s.type == "airport" and reach.has(s.id): continue
+		if HH.call() < float(HOSTILE_CHANCE[clampi(int(s.danger), 0, HOSTILE_CHANCE.size() - 1)]):
+			s.hostile = true
+			s.fuel = false
+			s.shop = false
+			s.dealer = false

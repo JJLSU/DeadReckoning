@@ -19,10 +19,10 @@ var pal := {}
 const LIGHT := {"paper": "#ebe3cb", "panel": "#f4eedd", "panel2": "#e3d9bd", "ink": "#1f2a2e", "dim": "#5f665f", "line": "#c8bb95", "magenta": "#9b2a68", "chart": "#2f5d7c", "good": "#4d6b2a", "bad": "#a3301f", "btn": "#1f2a2e", "btnink": "#f4eedd"}
 const DARK := {"paper": "#141a1c", "panel": "#1b2326", "panel2": "#243034", "ink": "#e8e1cc", "dim": "#9aa39a", "line": "#34443f", "magenta": "#d45a9d", "chart": "#79a9c9", "good": "#9cc063", "bad": "#e3644c", "btn": "#e8e1cc", "btnink": "#141a1c"}
 
-## Testing buttons (All weapons / 1,000 rounds / All trinkets / $1,000 / 1,000 gallons) in exploration mode.
+## Testing buttons (All weapons / 1,000 rounds / All trinkets / $1,000 / 1,000 gallons / Best plane / Reveal map) in exploration mode.
 ## Set to false to hide them for a release build.
 const DEBUG_BUTTONS := true
-const DBG_KEYS := ["dbg_weapons", "dbg_ammo", "dbg_trinkets", "dbg_cash", "dbg_fuel", "dbg_plane"]
+const DBG_KEYS := ["dbg_weapons", "dbg_ammo", "dbg_trinkets", "dbg_cash", "dbg_fuel", "dbg_plane", "dbg_map"]
 
 func P(k: String) -> Color: return Color.html(pal[k])
 
@@ -39,7 +39,7 @@ func _ready() -> void:
 	root.theme = th
 	# HUD buttons
 	for spec in [["map", "Map"], ["pause", "Pause"], ["heal", "Heal"], ["throw", "Throw bomb"], ["cruise", "Cruise ×3"], ["board", "Board plane"], ["taxi", "Taxi back to hangar"],
-			["dbg_weapons", "All Weapons"], ["dbg_ammo", "1,000 Rounds"], ["dbg_trinkets", "All Trinkets"], ["dbg_cash", "$1,000"], ["dbg_fuel", "1,000 Gallons"], ["dbg_plane", "Best Plane"]]:
+			["dbg_weapons", "All Weapons"], ["dbg_ammo", "1,000 Rounds"], ["dbg_trinkets", "All Trinkets"], ["dbg_cash", "$1,000"], ["dbg_fuel", "1,000 Gallons"], ["dbg_plane", "Best Plane"], ["dbg_map", "Reveal Map"]]:
 		var b := Button.new()
 		b.text = spec[1]
 		b.focus_mode = Control.FOCUS_NONE
@@ -520,6 +520,7 @@ func render_menu() -> void:
 	tg.append(["Fuel pump, $%d/gal" % s.fuelPrice, true] if s.fuel else ["No fuel pump", false])
 	if s.shop: tg.append(["Mechanic and trader", true])
 	if s.dealer: tg.append(["Aircraft dealer", true])
+	if s.get("hostile", false): tg.append(["Held by armed survivors", false])
 	tags(tg)
 	note("Chalked on the hangar door: “%s”" % String(D.NOTES[int(s.seed) % D.NOTES.size()]).replace("{Dir}", World.haven_dir_name().capitalize()))
 	stats([["$%d" % G.cash, "Cash"], ["%.1f/%d" % [G.fuel, int(Pp.fuelCap)], "Gallons aboard"], ["%d km" % U.km(game.range_now()), "Range now"], [str(int(floor(G.carried))), "Gallons in cans"], ["%d%%" % int(ceil(G.hull)), "Hull, leaking" if G.leak > 0 else "Hull"]])
@@ -671,6 +672,7 @@ func _hud_press(k: String) -> void:
 		"dbg_cash": gm.dbg_cash()
 		"dbg_fuel": gm.dbg_fuel()
 		"dbg_plane": gm.dbg_best_plane()
+		"dbg_map": gm.dbg_reveal_map()
 
 func update_buttons() -> void:
 	var gm := game
@@ -723,7 +725,7 @@ func toggle_map() -> void:
 	var ms := maxf(220, minf(minf(vs.x - 48, vs.y - 170), 760))
 	map_cv.custom_minimum_size = Vector2(ms, ms)
 	map_note.custom_minimum_size.x = ms
-	map_note.text = "Click a charted field to set your course. Magenta rings are fields, filled ones sell fuel. Amber rings are delivery stops. Gray squares are road landings you made. Blue patches are storms, which drift. The dashed circle is how far your fuel reaches now."
+	map_note.text = "Click a charted field to set your course. Magenta rings are fields, filled ones sell fuel. Amber rings are delivery stops. Red rings with a cross are held by armed survivors: no fuel, no trade. Gray squares are road landings you made. Blue patches are storms, which drift. The dashed circle is how far your fuel reaches now."
 	map_cv.queue_redraw()
 
 
@@ -803,6 +805,16 @@ class MapView extends Control:
 				g.text_base("Haven", x, y - 12, 12, Color.WHITE, 0, "700")
 				continue
 			var r := 6.0 if s.type == "airport" else (5.0 if s.type == "regional" else 4.0)
+			if s.get("hostile", false):
+				# survivor-held: red ring with a cross
+				var red := Color.html("#a3301f")
+				g.ring(x, y, r, red, 2)
+				g.line(x - r * 0.7, y - r * 0.7, x + r * 0.7, y + r * 0.7, red, 2)
+				g.line(x - r * 0.7, y + r * 0.7, x + r * 0.7, y - r * 0.7, red, 2)
+				if G.nav == s.id: g.line(me.x * k, me.y * k, x, y, Color.WHITE, 1.5)
+				if ms > 420 or G.nav == s.id or s.id == G.strip:
+					g.text_base(s.name, x + r + 4, y + 4, 11, Color(20 / 255.0, 26 / 255.0, 28 / 255.0, 0.85), -1, "600")
+				continue
 			g.ring(x, y, r, mag, 2)
 			if s.fuel: g.circle(x, y, r - 2.5, mag)
 			if dests.has(s.id): g.ring(x, y, r + 5, Color.html("#d9a441"), 2.5)
