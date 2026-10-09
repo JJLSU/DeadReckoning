@@ -21,7 +21,7 @@ const WEAPONS := [
 	{"name": "Submachine gun", "dmg": 17.0, "rate": 0.085, "pel": 1, "spr": 0.1, "spd": 950.0, "life": 0.45, "price": 1500, "noise": 1.1, "snd": "smg", "kb": 3.0, "len": 18, "silent": false, "bolt": false, "auto": true},
 	{"name": "Assault rifle", "dmg": 30.0, "rate": 0.13, "pel": 1, "spr": 0.045, "spd": 1250.0, "life": 0.6, "price": 2400, "noise": 1.8, "snd": "rifle2", "kb": 6.0, "len": 25, "silent": false, "bolt": false, "auto": true},
 	{"name": "Double-barrel", "dmg": 14.0, "rate": 1.05, "pel": 10, "spr": 0.4, "spd": 800.0, "life": 0.32, "price": 950, "noise": 6.0, "snd": "shotgun2", "kb": 15.0, "len": 21, "silent": false, "bolt": false},
-	{"name": "Crossbow", "dmg": 65.0, "rate": 0.95, "pel": 1, "spr": 0.01, "spd": 880.0, "life": 0.7, "price": 1300, "noise": 0.0, "snd": "bow", "kb": 12.0, "len": 18, "silent": true, "bolt": true},
+	{"name": "Crossbow", "dmg": 65.0, "ads_dmg": 100.0, "rate": 0.95, "pel": 1, "spr": 0.01, "spd": 880.0, "life": 0.7, "price": 1300, "noise": 0.0, "snd": "bow", "kb": 12.0, "len": 18, "silent": true, "bolt": true},
 ]
 
 const NAMES := ["Miller", "Cold Creek", "Harlan", "Pine Hollow", "Dry Fork", "Kessler", "Black Rock", "Owl Ridge", "Beaver Dam", "Grady", "Stillwater", "Red Oak", "Hatchet Lake", "Coyote", "Mercy", "Deadwood", "Fairchild", "Lonesome", "Iron Gap", "Juniper", "Sutter", "Bramble", "Cutbank", "Wolf Creek", "Tamarack", "Halcyon", "Burnt Mill", "Cedar Bluff", "Crowley", "Garnet", "Hollis", "Muddy Gap", "Pickett", "Quarry Hill", "Sawtooth", "Thistle", "Vesper", "Wick", "Yarrow", "Alder Bend", "Bitterroot", "Copper Run", "Doyle", "Elk Horn", "Fallow", "Gilead", "Hobb", "Ironwood", "Jericho", "Kettle", "Larkin", "Moss Point", "Norrel", "Oxbow", "Pruitt", "Rook", "Shiloh", "Tolliver", "Umber", "Vail", "Wren", "Ashby", "Bexley", "Calloway", "Prosper", "Lockhart", "Gallow", "Ashford", "Badger Flats", "Barlow", "Bear Paw", "Bellwether", "Birch Run", "Blackwater", "Bluestem", "Bodie", "Bonner", "Boulder Gap", "Brushy Creek", "Buckhorn", "Calico", "Canby", "Carver", "Chalk Bluff", "Cheney", "Cinder Cone", "Clearwater", "Colfax", "Cordell", "Cottonwood", "Coulter", "Cripple Creek", "Winslow", "Darby", "Deer Lodge", "Dillard", "Driftwood", "Dunmore", "Eagle Butte", "Easton", "Ember", "Fairview", "Fenwick", "Flint Ridge", "Fort Lyle", "Foxboro", "Glory", "Goshen", "Granite Falls", "Graves", "Greer", "Halfway", "Harmony", "Hartsel", "Haskell", "Hayden", "Hickory Flat", "High Lonesome", "Holloway", "Hope", "Horsetail", "Idlewild", "Yellow Jacket", "Jasper", "Kearney", "Kinsey", "Lamar", "Larch", "Last Chance", "Ledger", "Lone Pine", "Lowell", "Magpie", "Marrow", "Meeker", "Millbrook", "Mosby", "Needles", "New Bethel", "Nickel Plate", "North Fork", "Odell", "Ophir", "Paradise", "Pardee", "Pinto", "Plainview", "Quill", "Ransom", "Rattlesnake Butte", "Redmond", "Renner", "Ridgway", "Rimrock", "Rio Seco", "Rosebud", "Ruby Valley", "Saddle Butte", "Salt Lick", "Scofield", "Sentinel", "Silver Bow", "Slate Creek", "Sorrow", "Spearfish", "Stony Point", "Sulphur", "Sweetwater", "Tabor", "Tenmile", "Thatcher", "Timber Lake", "Tincup", "Truth", "Two Dot", "Upton", "Vantage", "Gunnison", "Whitehall", "Willow Bend"]
@@ -58,6 +58,15 @@ const RAR := {"fuel": 0, "ammo": 0, "cash": 0, "band": 0, "med": 1, "parts": 1, 
 const RCOL := ["#e8e2d0", "#9cc063", "#7fb2f0", "#ffd27a"]
 const ZSHIRT := ["#5a4a3a", "#3d4a55", "#6b3b34", "#4b5a3b", "#6a6258", "#2f3a2f", "#5b4b5e"]
 const ZSKIN := ["#8c9a78", "#9aa58a", "#7d8a6e"]
+## Hostile survivor skin tones, lightest to darkest. Add, remove or edit entries freely; one is picked at random per survivor.
+const SVSKIN := ["#d4ab84", "#b88a63", "#9a6b47", "#74492e", "#4f2f1d"]
+const SVSKIN_LIGHT_CHANCE := 2.0 / 3.0   # how often a survivor's tone comes from the lighter half of SVSKIN
+
+## Random survivor skin tone: lighter half of SVSKIN with SVSKIN_LIGHT_CHANCE, darker half otherwise.
+## With an odd count the middle tone straddles both halves.
+static func sv_skin() -> String:
+	var t := randf() * 0.5 if randf() < SVSKIN_LIGHT_CHANCE else 0.5 + randf() * 0.5
+	return SVSKIN[mini(int(t * SVSKIN.size()), SVSKIN.size() - 1)]
 
 const DIFFS := [
 	{"name": "Relaxed", "noise": 0.55, "dmg": 0.55, "count": 0.65, "lunge": 1.6, "desc": "Fewer and weaker dead, slow noise. For enjoying the trip."},

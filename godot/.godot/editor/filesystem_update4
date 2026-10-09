@@ -1,0 +1,5 @@
+res://scripts/game.gd
+res://scripts/synth.gd
+res://scripts/data.gd
+res://scripts/render.gd
+res://scripts/site_bg.gd

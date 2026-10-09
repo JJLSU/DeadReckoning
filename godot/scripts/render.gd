@@ -96,6 +96,20 @@ static func draw_objective(gm, g: Pen, y: float) -> void:
 	g.poly(PackedVector2Array([Vector2(21, y + 6), Vector2(26, y + 12), Vector2(21, y + 18), Vector2(16, y + 12)]), hc("#f0c4dd"))
 	for i in lines.size():
 		g.text(lines[i], 32, y + 12 + i * 16, 12, hc("#f6e8ef"), -1, "600", 0, Color.BLACK, w - 38)
+	# mayday: its own bright red line under your destination, for as long as it lasts
+	var mt = gm.mayday_target() if (gm.mode == "flight" and gm.F) else null
+	if mt:
+		var F: Dictionary = gm.F
+		var md := Vector2(mt.x - F.x, mt.y - F.y).length()
+		var mq := rad_to_deg(U.ang_diff(atan2(mt.y - F.y, mt.x - F.x), F.hdg))
+		var mtxt := "MAYDAY at %s, %d min left. %d km, %s%s." % [mt.name, maxi(0, int(round(gm.G.mayday.until - gm.G.time))), U.km(md),
+			"straight ahead" if absf(mq) < 12 else ("turn right" if mq > 0 else "turn left"), ", not enough fuel" if md > gm.range_now() else ""]
+		var my2 := y + hh + 6
+		var mw2 := minf(BW, Pen.measure(mtxt, 12) + 40)
+		var flash := 0.5 + 0.5 * sin(gm.T * 6)
+		g.rr(10, my2, mw2, 24, 5, rgba(130, 10, 10, 0.82))
+		g.poly(PackedVector2Array([Vector2(21, my2 + 6), Vector2(26, my2 + 12), Vector2(21, my2 + 18), Vector2(16, my2 + 12)]), rgba(255, 70 + 80 * flash, 60, 1))
+		g.text(mtxt, 32, my2 + 12, 12, hc("#ffe3df"), -1, "700", 0, Color.BLACK, mw2 - 38)
 
 # =====================================================================
 # flight world
@@ -191,12 +205,16 @@ static func draw_world(gm, g: Pen, cx: float, cy: float, sc: float, t: float) ->
 				if Tx.TREES.size(): g.tex(Tx.TREES[int(h * 30) % 3], wx - sz / 2, wy - sz / 2, sz, sz)
 		g.ga = 1.0
 	var tgt = gm.nav_target() if (gm.mode == "flight" and gm.G and gm.F) else null
+	var mdt = gm.mayday_target() if (gm.mode == "flight" and gm.G and gm.F) else null
 	for s in wd.strips:
 		if s.x < x0 - 800 or s.x > x1 + 800 or s.y < y0 - 800 or s.y > y1 + 800: continue
 		draw_strip(gm, g, s)
 		if tgt != null and s.id == tgt.id:
 			var pl := 0.5 + 0.5 * sin(t * 3)
 			g.dashed_arc(s.x, s.y, s.len / 2 + 90 + pl * 20, 0, TAU, rgba(242, 182, 74, 0.45 + 0.4 * pl), 4 / sc, 18 / sc, 12 / sc)
+		if mdt != null and s.id == mdt.id:
+			var pm := 0.5 + 0.5 * sin(t * 6)
+			g.dashed_arc(s.x, s.y, s.len / 2 + 150 + pm * 25, 0, TAU, rgba(255, 40, 30, 0.55 + 0.45 * pm), 5 / sc, 18 / sc, 12 / sc)
 	draw_smoke(gm, g, x0, y0, x1, y1, t)
 	return {"x0": x0, "y0": y0, "x1": x1, "y1": y1}
 
@@ -608,6 +626,7 @@ static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 	var rn: float = gm.range_now() * k
 	if rn < mr: g.dashed_arc(mx, my, rn, 0, TAU, rgba(212, 90, 157, 0.9), 1, 3, 3)
 	var nt = gm.nav_target()
+	var mdt2 = gm.mayday_target()
 	for s in wd.strips:
 		if not gm.known.has(s.id): continue
 		var dx: float = (s.x - F.x) * k
@@ -615,6 +634,8 @@ static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 		if dx * dx + dy * dy > mr * mr * 0.9: continue
 		var isnt: bool = nt != null and nt.id == s.id
 		g.ring(mx + dx, my + dy, 4.5 if isnt else 3.0, hc("#9cc063") if s.type == "haven" else hc("#e07ab3"), 2.5 if isnt else 1.5)
+		if mdt2 != null and mdt2.id == s.id:
+			g.ring(mx + dx, my + dy, 7.0, hc("#ff2a1e"), 2.5)
 	g.save(); g.translate(mx, my); g.rotate(F.hdg)
 	g.poly(PackedVector2Array([Vector2(6, 0), Vector2(-4, -4), Vector2(-4, 4)]), Color.WHITE)
 	g.restore()
@@ -677,6 +698,37 @@ static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 			g.poly(arrow, hc("#ff8a70") if short else hc("#f2b64a"))
 			var ac := arrow.duplicate(); ac.append(arrow[0])
 			g.polyline(ac, Color(0, 0, 0, 0.65), 2.5)
+			g.restore()
+	var mt = gm.mayday_target()
+	if mt:
+		var ma := atan2(mt.y - F.y, mt.x - F.x)
+		var md := Vector2(mt.x - F.x, mt.y - F.y).length()
+		if md > 250:
+			var mrd := minf(W, H) * 0.2 + 64
+			var mpl := 0.5 + 0.5 * sin(T * 6)
+			var max2 := psx + cos(ma) * mrd
+			var may2 := psy + sin(ma) * mrd
+			var mlbl := "MAYDAY %s %d km" % [String(mt.name).split(" ")[0], U.km(md)]
+			var mlw := Pen.measure(mlbl, 14, "700") + 16
+			var mlh := 22.0
+			var mplace := func(sgn: float) -> Vector2:
+				var off := 26 + absf(cos(ma)) * mlw / 2 + absf(sin(ma)) * mlh / 2
+				return Vector2(psx + cos(ma) * (mrd + sgn * off), psy + sin(ma) * (mrd + sgn * off))
+			var mfits := func(v: Vector2) -> bool: return v.x - mlw / 2 >= 6 and v.x + mlw / 2 <= W - 66 and v.y - mlh / 2 >= 150 and v.y + mlh / 2 <= H - 110
+			var mtp: Vector2 = mplace.call(1.0)
+			if not mfits.call(mtp):
+				var malt: Vector2 = mplace.call(-1.0)
+				if mfits.call(malt): mtp = malt
+				else: mtp = Vector2(clampf(mtp.x, mlw / 2 + 6, W - mlw / 2 - 66), clampf(mtp.y, 150 + mlh / 2, H - 110 - mlh / 2))
+			if absf(mtp.x - max2) < mlw / 2 + 18 and absf(mtp.y - may2) < mlh / 2 + 18: mtp.y = may2 + (-1 if may2 > H / 2 else 1) * (mlh / 2 + 22)
+			g.rr(mtp.x - mlw / 2, mtp.y - mlh / 2, mlw, mlh, 5, rgba(12, 16, 14, 0.72))
+			g.text(mlbl, mtp.x, mtp.y, 14, hc("#ff5a4a"), 0, "700")
+			g.dashed_arc(psx, psy, mrd, ma - 0.5, ma + 0.5, rgba(255, 40, 30, 0.35 + 0.3 * mpl), 2, 4, 8)
+			g.save(); g.translate(max2, may2); g.rotate(ma); var mk := 1.25 + mpl * 0.15; g.scale(mk, mk)
+			var marrow := PackedVector2Array([Vector2(16, 0), Vector2(-9, -12), Vector2(-3, 0), Vector2(-9, 12)])
+			g.poly(marrow, hc("#ff2a1e"))
+			var mac := marrow.duplicate(); mac.append(marrow[0])
+			g.polyline(mac, Color(0, 0, 0, 0.65), 2.5)
 			g.restore()
 	# throttle
 	var tb: Dictionary = gm.thr_bar
@@ -866,6 +918,17 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 				g.ring(br.x, br.y, 8, rgba(40, 8, 4, 0.6), 1.5)
 				g.circle(br.x + 4, br.y - 3, 2.2, hc("#2a2a28"))
 				g.poly(PackedVector2Array([Vector2(br.x - 3.5, br.y + 4), Vector2(br.x, br.y - 2), Vector2(br.x + 3.5, br.y + 4)]), hc("#e8c74a"))
+			for car in S.cars:
+				# burning car (out of hitpoints, waiting to blow): drawn like the campfires on the
+				# map (draw_smoke), a flickering hot core under a drifting plume, at the car's hot end
+				if car.dead or car.fuse < 0: continue
+				var grow := minf(1.0, float(car.burnT) / 1.5)
+				g.ga = 0.55 * grow
+				g.tex(Tx.glow("255,110,40"), car.x - 46, car.y - 46, 92, 92)
+				g.ga = 1.0
+				for q in 3:
+					g.circle(car.x + (randf() - 0.5) * 8, car.y + (randf() - 0.5) * 6, (5 + randf() * 3) * (0.5 + 0.5 * grow), rgba(255, 120 + randf() * 60, 40, 0.8))
+				g.circle(car.x, car.y, 2.5 + randf() * 1.5, rgba(255, 230, 170, 0.85 * grow))
 			var P: Dictionary = gm.PS()
 			g.save(); g.translate(S.plane.x + 10, S.plane.y + 14); draw_plane(g, P, 190, 0, true); g.restore()
 			g.save(); g.translate(S.plane.x, S.plane.y); draw_plane(g, P, 190, 0, false); g.restore()
@@ -874,7 +937,7 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 			for v in S.sv: draw_person(g, v.x, v.y, v.ang, {"body": v.shirt, "skin": v.skin, "hair": "#2b2118", "cap": v.cap, "gun": true, "long": int(v.get("w", 1)) != 0, "vest": float(v.get("armor", 0.0)) > 0, "walk": v.wk, "hit": v.hit > 0})
 			if S.npc:
 				var n: Dictionary = S.npc
-				draw_person(g, n.x, n.y, n.ang, {"body": "#3f7a7a", "skin": "#e0b894", "hair": "#5a3a22", "walk": n.wk, "hit": n.hit > 0})
+				draw_person(g, n.x, n.y, n.ang, {"body": "#3f7a7a", "skin": "#e0b894", "hair": "#5a3a22", "gun": true, "long": int(n.get("w", 0)) != 0, "walk": n.wk, "hit": n.hit > 0})
 				if not n.follow:
 					var pl := 0.5 + 0.5 * sin(T * 5)
 					g.ring(n.x, n.y, 22 + pl * 6, rgba(240, 160, 210, 0.3 + 0.5 * pl), 2)
@@ -912,6 +975,21 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 				g.ga = clampf(m.life / m.max, 0, 1) * 0.6
 				g.tex(Tx.GPUFF if m.g else Tx.DPUFF, m.x - m.r, m.y - m.r, m.r * 2, m.r * 2)
 			g.ga = 1.0
+			for car in S.cars:
+				# smoke plume like the map campfires' (draw_smoke) at ground scale: while burning,
+				# and bigger over the wreck after it blows, thinning out over CAR_SMOLDER seconds
+				if car.dead:
+					if car.burnT <= 0: continue
+					var fade: float = minf(1.0, car.burnT / car.burnMax * 1.5)
+					for i in 10:
+						var k := fmod(T * 0.22 + i / 10.0 + float(car.c) * 0.13, 1.0)
+						g.circle(car.x + k * 200, car.y - k * 120, 12 + k * 70, rgba(40, 38, 36, 0.55 * (1 - k) * fade))
+					continue
+				if car.fuse < 0: continue
+				var grow := minf(1.0, float(car.burnT) / 1.5)
+				for i in 8:
+					var k := fmod(T * 0.35 + i / 8.0 + float(car.c) * 0.13, 1.0)
+					g.circle(car.x + k * 90, car.y - k * 55, (5 + k * 30) * grow, rgba(46, 44, 42, 0.45 * (1 - k)))
 			draw_roofs(gm, g)
 			for cw in S.crows:
 				if cw.gone: continue
@@ -1036,7 +1114,9 @@ static func draw_ads_reticle(gm, g: Pen) -> void:
 	g.ring(c.x, c.y, r, ink, 1.5)
 	for d in [Vector2(1, 0), Vector2(-1, 0), Vector2(0, 1), Vector2(0, -1)]:
 		g.line(c.x + d.x * (r + 3), c.y + d.y * (r + 3), c.x + d.x * (r + 9), c.y + d.y * (r + 9), ink, 1.5)
-	g.circle(c.x, c.y, 1.6, rgba(227, 100, 76, a))
+	# red dot only while a shot would actually get there (range, walls, cars, barrels)
+	var wp: Vector2 = gm.s2w_g(c.x, c.y)
+	if gm.shot_reaches(wp.x, wp.y): g.circle(c.x, c.y, 1.6, rgba(227, 100, 76, a))
 
 # =====================================================================
 # ground sprites
@@ -1047,7 +1127,8 @@ static func draw_roofs(gm, g: Pen) -> void:
 	var sid: int = S.s.id
 	for rm in S.rooms:
 		var inside: bool = p.x > rm.c * TS and p.x < (rm.c + rm.w) * TS and p.y > rm.r * TS and p.y < (rm.r + rm.h) * TS
-		rm.ra = lerpf(rm.ra, 0.05 if inside else 1.0, 0.18)
+		var goal := 0.05 if inside else (PEEK_ALPHA if peeking(S, p, rm) else 1.0)
+		rm.ra = lerpf(rm.ra, goal, 0.18)
 		if rm.ra < 0.02: continue
 		var x: float = rm.c * TS + 10
 		var y: float = rm.r * TS + 10
@@ -1071,6 +1152,47 @@ static func draw_roofs(gm, g: Pen) -> void:
 		g.rect(x - tw / 2, y - 8, tw, 14, hc("#e8dcc0"))
 		g.stroke_rect(x - tw / 2 + 1.5, y - 6.5, tw - 3, 11, hc("#3a3028"), 1)
 		g.text(rm.sign, x, y - 0.5, 8, hc("#2a221a"), 0, "700")
+
+## Looking in through a doorway: standing near one of the building's door openings
+## (outside, or in the doorway) and facing that opening makes the roof see-through.
+const PEEK_DIST := 3.0    # tiles from the door opening's centre
+const PEEK_CONE := 60.0   # degrees either side of looking straight at the door opening
+const PEEK_ALPHA := 0.3   # roof opacity while peeking (inside the building it's 0.05)
+
+static func peeking(S: Dictionary, p: Dictionary, rm: Dictionary) -> bool:
+	var c0: int = rm.c
+	var r0: int = rm.r
+	var c1: int = rm.c + rm.w - 1
+	var r1: int = rm.r + rm.h - 1
+	var reach := PEEK_DIST * TS
+	# quick reject: player nowhere near this building
+	if p.x < c0 * TS - reach or p.x > (c1 + 1) * TS + reach or p.y < r0 * TS - reach or p.y > (r1 + 1) * TS + reach: return false
+	var fx := cos(p.ang)
+	var fy := sin(p.ang)
+	var cone := cos(deg_to_rad(PEEK_CONE))
+	var cols: int = S.cols
+	for r in range(r0, r1 + 1):
+		for c in range(c0, c1 + 1):
+			var edge_c := c == c0 or c == c1
+			var edge_r := r == r0 or r == r1
+			if not (edge_c or edge_r) or (edge_c and edge_r): continue   # perimeter only, skip corners
+			if S.g[r * cols + c] != 2: continue   # not an opening
+			var ix := 0.0
+			var iy := 0.0
+			if r == r0: iy = 1.0
+			elif r == r1: iy = -1.0
+			elif c == c0: ix = 1.0
+			else: ix = -1.0
+			var dx: float = p.x - (c + 0.5) * TS
+			var dy: float = p.y - (r + 0.5) * TS
+			if dx * dx + dy * dy > reach * reach: continue
+			if dx * ix + dy * iy > 0.5 * TS: continue   # already past the doorway (inside test handles that)
+			# facing the opening itself; when standing right in it, facing in through it
+			var dl := sqrt(dx * dx + dy * dy)
+			var tx := -dx / dl if dl > 0.4 * TS else ix
+			var ty := -dy / dl if dl > 0.4 * TS else iy
+			if fx * tx + fy * ty >= cone: return true
+	return false
 
 static func draw_roof(g: Pen, rm: Dictionary, sid: int, w: float, h: float) -> void:
 	var col := hc(rm.roof if rm.roof else "#6b5a4a")
@@ -1549,4 +1671,11 @@ static func hud_ground(gm, g: Pen) -> void:
 			g.save(); g.translate(clampf(sx, 30, W - 30), clampf(sy, 170, H - 40)); g.rotate(a)
 			g.poly(PackedVector2Array([Vector2(12, 0), Vector2(-7, -8), Vector2(-7, 8)]), hc("#e07ab3"))
 			g.restore()
-	if W > 480: g.text(S.s.name, W - 14, py + 17, 13, hc("#f0c4dd"), 1, "700")
+	if W > 480:
+		g.text(S.s.name, W - 14, py + 17, 13, hc("#f0c4dd"), 1, "700")
+		# danger level under the name: five dots, filled up to the danger level
+		var dg: int = clampi(int(S.danger), 0, 5)
+		for i in 5:
+			var cxp: float = W - 18 - (4 - i) * 12
+			if i < dg: g.circle(cxp, py + 31, 4.2, hc("#f0c4dd"))
+			else: g.ring(cxp, py + 31, 3.8, rgba(240, 196, 221, 0.6), 1.3)

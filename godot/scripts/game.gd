@@ -25,17 +25,72 @@ const GARRISON_MIN := 8        # total armed survivors at one of these strips...
 const GARRISON_MAX := 14
 const GARRISON_OUT_MIN := 3    # ...of which this many start outside; the rest wait in buildings
 const GARRISON_OUT_MAX := 5
+# Unalerted survivors pace around their post (see sv_patrol()).
+const SV_PATROL_MIN := 2.0     # wander radius from their post, tiles (each picks one in this range)
+const SV_PATROL_MAX := 6.0
+const SV_PATROL_SPD := 0.4     # walking speed while patrolling, fraction of their normal 85 px/s
+const SV_PAUSE_MIN := 1.5      # seconds standing and looking around between legs
+const SV_PAUSE_MAX := 4.5
+# Alerted survivors only know where you were when they last saw or heard you. Out of
+# sight they head there, search around it, and give up after SV_FORGET seconds.
+const SV_FORGET := 12.0        # seconds without seeing/hearing you before they stand down
+const SV_SEARCH_R := 5.0       # search radius around your last known spot, tiles
+# When the alarm goes up, the ones waiting indoors come out unaware of exactly where you
+# are and sweep toward where you were, then patrol that area.
+const SV_ALARM_R := 1500.0     # a survivor spotting you sends everyone within this many px (of them) searching
+const SV_SWEEP_SPREAD := 6.0   # how far off your actual position they aim, tiles
+const SV_SWEEP_SPD := 0.6      # sweep walking speed, fraction of 85 px/s
+const SV_SWEEP_R := 7.0        # patrol radius once they get there, tiles
+# On first spotting you (since they last stood down) a survivor stops, turns on you and
+# yells before opening fire. The yell is noise like a gunshot (revolver = 2.5).
+const SV_YELL_MIN := 0.7       # seconds between the yell and their first shot
+const SV_YELL_MAX := 1.0
+const SV_YELL_NOISE := 3.0
 # Armed survivors' guns. Chance of each weapon ~ exp(-price / (SV_GUN_BASE + SV_GUN_STEP x danger)):
 # cheaper guns are always more common (scarcity), but dearer ones show up more where danger is high.
 const SV_GUN_BASE := 300.0
 const SV_GUN_STEP := 250.0
 const SV_DMG_REF := 30.0
+# Flight: automatic help on the runway (keeps you on the centreline during the takeoff and
+# landing roll) and on approach (steers you onto the runway and works the throttle).
+# Off for now; the approach guides on screen are still drawn. Set true to turn it back on.
+const LANDING_ASSIST := false
+
+# Rescue survivor (pickup missions)
+const NPC_GUNS := [0, 1, 2, 5]    # revolver, pump shotgun, lever rifle, double-barrel
+const NPC_DMG := 0.7              # their shots do this fraction of the gun's normal damage
+const NPC_FIRE_WINDOW := 8.0      # they keep shooting this long after your last loud shot
+const NPC_RANGE := 380.0          # how far they'll engage
 const SV_GUN_DROP := 0.15     # chance a killed survivor also drops their gun
 # Survivor body armour: chance by danger (index = danger), and how much it holds. Like
 # the player's armour, it soaks up half of each hit until it's used up.
 const SV_ARMOR_CHANCE := [0.0, 0.05, 0.15, 0.25, 0.35, 0.45]
 const SV_ARMOR := 50.0      # survivor bullet damage scales with gun damage / this (revolver = 1x)
+# Screamers: must see you (clear line of sight) within SCREAM_RANGE px, roughly facing you
+# (within SCREAM_CONE degrees), for SCREAM_WINDUP seconds straight before they scream.
+# They stop and snarl while winding up; break line of sight or kill them to stop it.
+const SCREAM_RANGE := 300.0
+const SCREAM_CONE := 70.0
+const SCREAM_WINDUP := 1.0
 const ADS_AUTO_SPREAD := 0.5  # automatic weapons' bullet spread multiplier while aiming
+# Cars on the ground (exploration mode). Any bullet that hits one, and any blast that
+# reaches it, takes hitpoints off. Somewhere between CAR_SMOKE_MIN and CAR_SMOKE_MAX of its
+# hitpoints gone (picked per car) it starts smoking; at 0 it catches fire and blows up after
+# a random CAR_FUSE_MIN to CAR_FUSE_MAX seconds. Smoke, fire and the blast all come from one end of the
+# car (the middle of its front or rear third, picked per car). The burnt-out wreck stays put and still blocks.
+# For scale: revolver 30 a shot, lever rifle 95, a red barrel up close 160.
+const CAR_HP := 600.0
+const CAR_SMOKE_MIN := 0.6
+const CAR_SMOKE_MAX := 0.8
+const CAR_FUSE_MIN := 4.0
+const CAR_FUSE_MAX := 10.0
+const CAR_BLAST_R := 260.0       # px (a red barrel is 130)
+const CAR_BLAST_DMG := 320.0     # to zombies and survivors at the centre (a barrel does 160)
+const CAR_BLAST_PDMG := 90.0     # to you at the centre, plus 15 anywhere in range (a barrel: 40 + 8)
+const CAR_BLAST_NOISE := 40.0    # added to the noise meter (a barrel adds 18)
+const CAR_SCORCH_R := 44.0       # scorch mark left on the ground, px (a barrel's is 62)
+const CAR_SCORCH_A := 0.4        # and how dark at the centre (a barrel's is 0.75)
+const CAR_SMOLDER := 30.0        # seconds the wreck's smoke plume rises afterwards, thinning out
 const ADS_RATE := 4.0     # ease speed in/out (higher = snappier)
 const CAM_EDGE := 60.0    # player always stays at least this many screen px from the view's edge
 const CAM_TOP := 140.0    # ...and this far from the top (clears the status panel)
@@ -562,12 +617,12 @@ func upd_flight(dt: float) -> void:
 		if p.role == "steer": steer += clampf((p.x - p.sx) / 70.0, -1, 1)
 	steer = clampf(steer, -1, 1)
 	F.assist = false
-	if F.onGround and F.rollStrip and absf(steer) < 0.05 and F.spd > 3:
+	if LANDING_ASSIST and F.onGround and F.rollStrip and absf(steer) < 0.05 and F.spd > 3:
 		var rs: Dictionary = F.rollStrip
 		var dir: float = rs.ang if absf(U.ang_diff(rs.ang, F.hdg)) < PI / 2 else rs.ang + PI
 		var lat: float = -(F.x - rs.x) * sin(dir) + (F.y - rs.y) * cos(dir)
 		steer = clampf(U.ang_diff(dir, F.hdg) * 3 - lat * 0.02, -1, 1)
-	if not F.onGround and F.alt < 70 and absf(steer) < 0.05:
+	if LANDING_ASSIST and not F.onGround and F.alt < 70 and absf(steer) < 0.05:
 		var best = null
 		var bd := 2600.0
 		for s in wd.strips:
@@ -762,6 +817,7 @@ func approach_info():
 		if holder[0] == null or td < holder[0].td:
 			holder[0] = {"s": s, "dir": dir, "cx": cx, "cy": cy, "along": along, "lat": lat, "td": td}
 	cand2.call(nt)
+	cand2.call(mayday_target())
 	if holder[0] == null:
 		for s in wd.strips: cand2.call(s)
 	best = holder[0]
@@ -886,11 +942,16 @@ func arrive(s: Dictionary) -> void:
 	enter_ground(s)
 	checkpoint()
 
+## Your destination (course you set, or the current job). Maydays have their own marker.
 func nav_target():
-	if G.mayday: return strip(int(G.mayday.id))
 	if G.nav >= 0: return strip(G.nav)
 	if G.contracts.size(): return strip(contract_target(G.contracts[0]))
 	return null
+
+## The airfield sending an active mayday, if any (shown in red alongside your destination).
+func mayday_target():
+	if G == null or G.mayday == null: return null
+	return strip(int(G.mayday.id))
 
 # ======================================================================
 # contracts
@@ -930,9 +991,6 @@ func objective() -> String:
 		return "No job yet. Board the plane to see the job board."
 	if S and S.npc:
 		return ("Lead %s back to the plane." % S.npc.name) if S.npc.follow else ("Find %s in %s." % [S.npc.name, D.WHERE[S.npc.where]])
-	if G.mayday and mode == "flight":
-		var s := strip(int(G.mayday.id))
-		return "Mayday at %s. %d minutes left." % [s.name, maxi(0, int(round(G.mayday.until - G.time)))]
 	for k in G.contracts:
 		if k.get("type", "") == "rescue":
 			return ("Rescue %s at %s." % [k.who, strip(int(k.pickup)).name]) if k.stage == "pickup" else ("Fly %s to %s." % [k.who, strip(int(k.dest)).name])
@@ -966,7 +1024,7 @@ func gen_site(s: Dictionary) -> Dictionary:
 	site.merge({"noise": 0.0, "waves": [], "splat": [], "flick": 0.0, "hbT": 0.0, "nd": 1e9, "band": -1, "smoke": [], "swing": 0.0, "thrown": [], "crows": [], "pk": [],
 		"s": s, "pump": Vector2(plane.x + 260, (ry - 1) * TS + 14) if s.fuel else null,
 		"p": {"x": plane.x + 150, "y": plane.y - 8, "ang": 0.0, "cd": 0.0, "stam": 100.0, "jt": 0.0, "jcd": 0.0, "safe": Vector2(plane.x + 150, plane.y - 8), "jx": 0, "wk": 0.0, "sprint": false},
-		"zs": [], "sv": [], "bul": [], "drops": [], "fx": [], "fl": [], "t": 0.0, "spawnT": 5.0, "danger": s.danger,
+		"zs": [], "sv": [], "bul": [], "drops": [], "fx": [], "fl": [], "t": 0.0, "spawnT": 5.0, "danger": s.danger, "scrN": 0,
 		"cx": plane.x + 150, "cy": plane.y, "shake": 0.0, "flash": 0.0, "hurt": 0.0, "nearPlane": false, "scorch": [], "flow": PackedInt32Array(), "flowT": 0.0,
 		"boomFlash": 0.0, "rain": minf(1.0, wd.storm_at(s.x, s.y).k * 1.6), "npc": null, "air": false, "tSprint": false, "noAmmoT": -9.0, "flN": 0, "cawT": -9.0, "sipT": -9.0, "tkHint": false,
 		"rcx": 0.0, "rcy": 0.0, "adsK": 0.0, "cap": 0, "rooms_ra": []})
@@ -987,6 +1045,7 @@ func gen_site(s: Dictionary) -> Dictionary:
 			break
 	var first: bool = s.get("home", false) and int(G.visits.get(str(s.id), 0)) <= 1
 	S = site
+	init_cars()
 	var hostile: bool = s.get("hostile", false)
 	site.hostile = hostile
 	site.svh = []        # garrison members still inside buildings
@@ -1001,6 +1060,7 @@ func gen_site(s: Dictionary) -> Dictionary:
 			spawn_z(true)
 			if S.zs.size() > n0:
 				var z: Dictionary = S.zs[S.zs.size() - 1]
+				if z.kind == "scream": S.scrN -= 1
 				z.dormant = true; z.kind = ""; z.arm = false; z.da = randf() * TAU; z.hp = 45.0 + s.danger * 8
 	site.cap = 0 if hostile else int(round((8 if first else 10 + s.danger * 4) * DF().count))
 	# First visit to any site starts silent; return visits start with some noise.
@@ -1015,7 +1075,7 @@ func gen_site(s: Dictionary) -> Dictionary:
 			var x := (c + 0.5) * TS
 			var y := (r + 0.5) * TS
 			blood(x, y, 5)
-			stamp_corpse({"x": x, "y": y, "a": randf() * TAU, "shirt": D.ZSHIRT[randi() % D.ZSHIRT.size()], "skin": ["#c69c74", "#8a5f40", "#e0b894", "#8c9a78"][randi() % 4]})
+			stamp_corpse({"x": x, "y": y, "a": randf() * TAU, "shirt": D.ZSHIRT[randi() % D.ZSHIRT.size()], "skin": "#8c9a78" if randf() < 1.0 / 6.0 else D.sv_skin()})
 			break
 	if hostile:
 		spawn_garrison(site)
@@ -1048,15 +1108,138 @@ func pick_sv_weapon(danger: int) -> int:
 func new_sv(x: float, y: float) -> Dictionary:
 	var dg: int = int(S.danger) if S else 1
 	var arm: float = SV_ARMOR if randf() < float(SV_ARMOR_CHANCE[clampi(dg, 0, SV_ARMOR_CHANCE.size() - 1)]) else 0.0
-	return {"x": x, "y": y, "w": pick_sv_weapon(dg), "burst": 0, "armor": arm, "shirt": ["#5a5f3a", "#4a3a2a", "#3f4f5f"][randi() % 3], "skin": ["#c69c74", "#8a5f40", "#e0b894"][randi() % 3],
+	return {"x": x, "y": y, "w": pick_sv_weapon(dg), "burst": 0, "armor": arm, "shirt": ["#5a5f3a", "#4a3a2a", "#3f4f5f"][randi() % 3], "skin": D.sv_skin(),
 		"cap": "#3a3226" if randf() < 0.5 else "", "wk": 0.0, "hp": 70.0, "cd": 1 + randf(), "ang": 0.0, "alert": false, "hit": 0.0, "sw": 0.0, "sd": 1.0, "dead": false}
+
+## Unalerted survivors pace around their post: walk to a nearby spot they can see,
+## stop and look around for a few seconds, pick another. Returns a steer vector
+## (length = speed fraction of the normal 85 px/s).
+func sv_patrol_init(v: Dictionary) -> void:
+	if not v.has("hx"):
+		v.hx = v.x; v.hy = v.y
+	if not v.has("pr"):
+		v.pr = (SV_PATROL_MIN + randf() * (SV_PATROL_MAX - SV_PATROL_MIN)) * TS   # how far this one wanders
+		v.pt = randf() * 3.0   # pause timer (staggered so they don't all move at once)
+		v.go = false; v.tx = v.x; v.ty = v.y
+		v.lx = v.x; v.ly = v.y; v.stk = 0.0
+
+## Start patrolling around (x, y) with at least radius r tiles, after a short pause.
+func sv_repost(v: Dictionary, x: float, y: float, r: float) -> void:
+	sv_patrol_init(v)
+	v.hx = x; v.hy = y
+	v.pr = maxf(v.pr, r * TS)
+	v.go = false
+	v.pt = 0.3 + randf() * 1.2
+
+## A survivor hears or feels something at (x, y): alerted, and that's where they think you are.
+func sv_hear(v: Dictionary, x: float, y: float) -> void:
+	v.alert = true
+	v.lkx = x; v.lky = y
+	v.lost = 0.0
+	v.srch = false
+	v.trav = false
+
+## Could a 10px-radius body walk in a straight line from (x0, y0) to (x1, y1)? Unlike
+## los() this uses the body's width and what blocks walking, not sight: a line that only
+## grazes a wall corner fails, and so does one across a fence you can see over.
+func walk_clear(x0: float, y0: float, x1: float, y1: float) -> bool:
+	var d := Vector2(x1 - x0, y1 - y0).length()
+	var n := int(ceil(d / 8.0))
+	for i in range(1, n + 1):
+		var t := float(i) / n
+		if hit_box(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, 10): return false
+	return true
+
+## Steer toward (tx, ty): straight if the body fits along the line, otherwise along an A*
+## path round the walls (cached per survivor, recomputed when the target tile changes).
+## Both checks use walk_clear(), not los(): with the thin sight line a survivor at a
+## corner could "see" a way through, bump the corner, slide out of sight, turn back to
+## the path, and repeat every frame, flicking between two headings.
+func sv_nav(v: Dictionary, tx: float, ty: float) -> Vector2:
+	var dx: float = tx - v.x
+	var dy: float = ty - v.y
+	var dl := Vector2(dx, dy).length()
+	if dl < 1: return Vector2.ZERO
+	if walk_clear(v.x, v.y, tx, ty):
+		v.path = PackedVector2Array()
+		return Vector2(dx / dl, dy / dl)
+	var tc := Vector2i(int(floor(tx / TS)), int(floor(ty / TS)))
+	var path: PackedVector2Array = v.get("path", PackedVector2Array())
+	if path.is_empty() or v.get("ptc", Vector2i(-1, -1)) != tc:
+		path = astar_path(v.x, v.y, tc)
+		v.ptc = tc
+	while path.size() and Vector2(path[0].x - v.x, path[0].y - v.y).length() < 10: path.remove_at(0)
+	# skip ahead to the next waypoint or the one after if it can walk straight there, so
+	# a fresh path doesn't send it back to the centre of the tile it's standing in
+	for j in range(mini(path.size() - 1, 2), 0, -1):
+		if walk_clear(v.x, v.y, path[j].x, path[j].y):
+			path = path.slice(j)
+			break
+	v.path = path
+	if path.is_empty(): return Vector2(dx / dl, dy / dl)
+	var wx: float = path[0].x - v.x
+	var wy: float = path[0].y - v.y
+	var wl := Vector2(wx, wy).length()
+	if wl < 0.01: return Vector2.ZERO
+	return Vector2(wx / wl, wy / wl)
+
+## Path (tile centres, px) from (x, y) to tile tc over walkable ground; built once per site.
+func astar_path(x: float, y: float, tc: Vector2i) -> PackedVector2Array:
+	var a: AStarGrid2D = S.get("astar", null)
+	if a == null:
+		a = AStarGrid2D.new()
+		a.region = Rect2i(0, 0, S.cols, S.rows)
+		a.cell_size = Vector2(TS, TS)
+		a.offset = Vector2(TS / 2, TS / 2)
+		a.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_ONLY_IF_NO_OBSTACLES
+		a.update()
+		var g: PackedByteArray = S.g
+		var cols: int = S.cols
+		for r in S.rows:
+			for c in cols:
+				if MOVE[g[r * cols + c]] == 1: a.set_point_solid(Vector2i(c, r))
+		S.astar = a
+	var fc := Vector2i(int(floor(x / TS)), int(floor(y / TS)))
+	if not a.is_in_boundsv(fc) or not a.is_in_boundsv(tc) or a.is_point_solid(tc): return PackedVector2Array()
+	return a.get_point_path(fc, tc, true)
+
+func sv_patrol(v: Dictionary, dt: float) -> Vector2:
+	sv_patrol_init(v)
+	if not v.go:
+		v.pt -= dt
+		if randf() < dt * 0.6: v.ang += (randf() - 0.5) * 2.0   # glance around while standing
+		if v.pt > 0: return Vector2.ZERO
+		for t in 8:   # a spot near the post, open ground, in a straight line from here
+			var a := randf() * TAU
+			var r: float = v.pr * (0.3 + randf() * 0.7)
+			var tx: float = v.hx + cos(a) * r
+			var ty: float = v.hy + sin(a) * r
+			if solid(tx, ty) or not los(v.x, v.y, tx, ty): continue
+			v.tx = tx; v.ty = ty; v.stk = 0.0; v.go = true
+			break
+		if not v.go:
+			v.pt = 1.0
+			return Vector2.ZERO
+	var ddx: float = v.tx - v.x
+	var ddy: float = v.ty - v.y
+	var dl := Vector2(ddx, ddy).length()
+	# arrived, or stuck against something for a while: stop and wait
+	var mv := Vector2(v.x - v.lx, v.y - v.ly).length()
+	v.lx = v.x; v.ly = v.y
+	v.stk = v.stk + dt if mv < SV_PATROL_SPD * 85.0 * dt * 0.3 else 0.0
+	if dl < 10 or v.stk > 0.8:
+		v.go = false
+		v.pt = SV_PAUSE_MIN + randf() * (SV_PAUSE_MAX - SV_PAUSE_MIN)
+		return Vector2.ZERO
+	v.ang = atan2(ddy, ddx)
+	return Vector2(ddx / dl, ddy / dl) * SV_PATROL_SPD
 
 ## Is (x, y) open ground a person can stand on, away from the player's start?
 func _garrison_spot_ok(site: Dictionary, x: float, y: float) -> bool:
 	return not solid(x, y) and Vector2(x - site.p.x, y - site.p.y).length() > 450
 
 ## Garrison for a survivor-held strip: a few posted outside near building doors, the
-## rest inside the buildings until the shooting starts (see upd_garrison()).
+## rest inside the buildings until someone nearby spots the player (see sv_raise()).
 func spawn_garrison(site: Dictionary) -> void:
 	var total := GARRISON_MIN + randi() % (GARRISON_MAX - GARRISON_MIN + 1)
 	var outside := mini(total, GARRISON_OUT_MIN + randi() % (GARRISON_OUT_MAX - GARRISON_OUT_MIN + 1))
@@ -1086,27 +1269,48 @@ func spawn_garrison(site: Dictionary) -> void:
 			else: site.svh.append({"x": x, "y": y, "out": 1e9})
 			break
 
-## Garrison behaviour each frame: once any survivor is alerted, the ones inside
-## come out of their buildings a few at a time to join the fight.
+## Garrison behaviour each frame: ones called out by sv_raise() leave their buildings
+## when their time comes and sweep toward where the player was spotted.
 func upd_garrison() -> void:
-	if not S.alarm:
-		for v in S.sv:
-			if v.alert:
-				S.alarm = true
-				break
-		if S.alarm and S.svh.size():
-			toast("Doors bang open. More of them are coming out of the buildings.", "bad")
-			for h in S.svh: h.out = S.t + 1.0 + randf() * 9.0
-		return
 	var i: int = S.svh.size() - 1
 	while i >= 0:
 		var h: Dictionary = S.svh[i]
 		if S.t >= h.out:
 			var v := new_sv(h.x, h.y)
-			v.alert = true
+			sv_patrol_init(v)
+			sv_sweep(v, h.tx, h.ty)
 			S.sv.append(v)
 			S.svh.remove_at(i)
 		i -= 1
+
+## A survivor has just spotted the player at (px, py): everyone within SV_ALARM_R px of
+## the spotter (indoors or out) who isn't already fighting heads out to search near there.
+func sv_raise(ox: float, oy: float, px: float, py: float) -> void:
+	var doors := false
+	for h in S.svh:
+		if h.out < 1e8 or Vector2(h.x - ox, h.y - oy).length() >= SV_ALARM_R: continue
+		h.out = S.t + 1.0 + randf() * 9.0
+		h.tx = px; h.ty = py
+		doors = true
+	if doors: toast("Doors bang open. More of them are coming out of the buildings.", "bad")
+	for o in S.sv:
+		if o.dead or o.alert or Vector2(o.x - ox, o.y - oy).length() >= SV_ALARM_R: continue
+		sv_patrol_init(o)
+		sv_sweep(o, px, py)
+
+## Send a survivor (unaware of exactly where the player is) toward a random open spot
+## within SV_SWEEP_SPREAD tiles of (px, py); they patrol there once they arrive.
+func sv_sweep(v: Dictionary, px: float, py: float) -> void:
+	var spr := SV_SWEEP_SPREAD * TS
+	var sx := px
+	var sy := py
+	for t in 12:
+		var ox: float = px + (randf() - 0.5) * 2.0 * spr
+		var oy: float = py + (randf() - 0.5) * 2.0 * spr
+		if not solid(ox, oy):
+			sx = ox; sy = oy
+			break
+	v.trav = true; v.sx = sx; v.sy = sy; v.travT = 0.0
 
 ## Damage to a zombie or survivor; armoured survivors soak up half of each hit
 ## until their armour runs out (same rule as the player's armour).
@@ -1191,8 +1395,45 @@ func spawn_npc(s: Dictionary) -> void:
 		y = (rm.r + 1.5 + randf() * (rm.h - 3)) * TS
 		q += 1
 	var where: String = c.where if rm.kind == c.where else "house"
-	S.npc = {"x": x, "y": y, "ang": PI / 2, "hp": 60.0, "name": c.who, "where": where, "cid": c.id, "follow": false, "wk": 0.0, "hit": 0.0}
+	S.npc = {"x": x, "y": y, "ang": PI / 2, "hp": 60.0, "name": c.who, "where": where, "cid": c.id, "follow": false, "wk": 0.0, "hit": 0.0,
+		"w": NPC_GUNS[randi() % NPC_GUNS.size()], "cd": 0.0, "fire_t": -1.0}
+	# The building they're hiding in is safe for the mission: nothing spawns in it,
+	# zombies can't walk in, and anything already inside is removed.
+	S.safe = Rect2(rm.c * TS, rm.r * TS, rm.w * TS, rm.h * TS)
+	S.zs = S.zs.filter(func(z): return not in_safe(z.x, z.y))
+	S.sv = S.sv.filter(func(v): return not in_safe(v.x, v.y))
 	toast_later(0.7, "%s is hiding in %s." % [c.who, D.WHERE[where]], "mag")
+
+## Inside the rescue survivor's hiding place (while that mission is running here)?
+func in_safe(x: float, y: float) -> bool:
+	return S != null and S.get("safe") != null and (S.safe as Rect2).has_point(Vector2(x, y))
+
+## The rescue survivor shoots back: only once they're following you, and only for a
+## while after you fire something loud (crossbow shots keep them quiet too).
+func npc_fight(n: Dictionary, dt: float) -> void:
+	if not n.follow or S.t > float(n.get("fire_t", -1.0)): return
+	n.cd = float(n.get("cd", 0.0)) - dt
+	var best = null
+	var bd := NPC_RANGE
+	for e in S.zs + S.sv:
+		if e.dead or e.get("dormant", false) or e.get("rise", 0.0) > 0: continue
+		var d := Vector2(e.x - n.x, e.y - n.y).length()
+		if d < bd and los(n.x, n.y, e.x, e.y):
+			bd = d
+			best = e
+	if best == null: return
+	var aim := atan2(best.y - n.y, best.x - n.x)
+	n.ang = aim
+	if n.cd > 0: return
+	var w: Dictionary = D.WEAPONS[int(n.w)]
+	var a0: float = aim + (randf() - 0.5) * 0.16
+	for k in int(w.pel):
+		var a: float = a0 + (randf() - 0.5) * float(w.spr) * 2.0
+		S.bul.append({"x": n.x + cos(a) * 14, "y": n.y + sin(a) * 14, "vx": cos(a) * w.spd, "vy": sin(a) * w.spd, "life": w.life,
+			"dmg": float(w.dmg) * NPC_DMG, "pl": true, "kb": float(w.kb) * 0.5, "bolt": false})
+	sfx(w.snd)
+	add_noise(float(w.noise) * 0.5)
+	n.cd = (0.75 + float(w.rate)) * (1.0 + randf() * 0.4)
 
 func npc_hurt(d: float) -> void:
 	var n = S.npc
@@ -1206,6 +1447,7 @@ func npc_hurt(d: float) -> void:
 		G.contracts = G.contracts.filter(func(k): return k.id != n.cid)
 		toast("%s did not make it. The job is gone." % cap(n.name), "bad")
 		S.npc = null
+		S.safe = null
 
 func upd_npc(dt: float) -> void:
 	var n = S.npc
@@ -1233,6 +1475,7 @@ func upd_npc(dt: float) -> void:
 		move_c(n, vx * sp * dt, vy * sp * dt, 9)
 		n.wk += Vector2(n.x - ox, n.y - oy).length() * 0.22
 		n.ang = atan2(vy, vx)
+	npc_fight(n, dt)
 	if n.follow and (Vector2(n.x - S.plane.x, n.y - S.plane.y).length() < 160 or (S.nearPlane and d < 120)):
 		for c in G.contracts:
 			if c.id == n.cid:
@@ -1242,6 +1485,7 @@ func upd_npc(dt: float) -> void:
 				sfx("cash")
 				break
 		S.npc = null
+		S.safe = null
 
 # ======================================================================
 # ground: helpers
@@ -1301,6 +1545,33 @@ func los(x0: float, y0: float, x1: float, y1: float) -> bool:
 	for i in range(1, n):
 		var t := float(i) / n
 		if solid_b(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t): return false
+	return true
+## Would a shot fired now reach world point (tx, ty)? Drives the red dot in the
+## exploration cursor. Mirrors shoot() and the bullet loop: same muzzle point
+## (16px out from the player), same range (spd x life), same walls/cars (solid_b)
+## and red barrels. Spread is ignored. Pointing straight at a wall or barrel counts
+## as reaching it. Out of ammo it uses the machete's 44px reach instead.
+func shot_reaches(tx: float, ty: float) -> bool:
+	var p: Dictionary = S.p
+	var to := Vector2(tx - p.x, ty - p.y)
+	var d := to.length()
+	if G.ammo <= 0: return d < 44.0
+	var w: Dictionary = D.WEAPONS[G.weapon]
+	var travel := d - 16.0   # distance from the muzzle to the cursor
+	if travel <= 0.0: return true
+	if travel > float(w.spd) * float(w.life): return false
+	var dir := to / d
+	var o := Vector2(p.x, p.y) + dir * 16.0
+	var tc := int(floor(tx / TS))
+	var tr := int(floor(ty / TS))
+	var n := int(ceil(travel / 4.0))   # about the bullet's own sub-step
+	for i in range(1, n + 1):
+		var q := o + dir * (travel * float(i) / n)
+		if solid_b(q.x, q.y):
+			return int(floor(q.x / TS)) == tc and int(floor(q.y / TS)) == tr
+		for br in S.barrels:
+			if not br.dead and pow(br.x - q.x, 2) + pow(br.y - q.y, 2) < 150:
+				return pow(br.x - tx, 2) + pow(br.y - ty, 2) < 150
 	return true
 func passable(c: int, r: int) -> bool:
 	if c < 0 or r < 0 or c >= S.cols or r >= S.rows: return false
@@ -1433,14 +1704,16 @@ func spawn_z(initial: bool) -> void:
 		var x := (c + 0.5) * TS
 		var y := (r + 0.5) * TS
 		if Vector2(x - S.p.x, y - S.p.y).length() < (380 if initial else 460): continue
+		if in_safe(x, y): continue
 		var arm: bool = S.arch == "military" and randf() < 0.5
 		var run: bool = not arm and randf() < 0.07 * S.danger
 		var kind := ""
 		if not arm and not run:
 			var q := randf()
 			if S.danger >= 2 and q < 0.08: kind = "bloat"
-			elif S.danger >= 2 and q < 0.13: kind = "scream"
+			elif initial and S.scrN < S.danger - 1 and q < 0.13: kind = "scream"   # at most danger-1 per visit, none spawned later
 			elif q < 0.16: kind = "crawler"
+		if kind == "scream": S.scrN += 1
 		var km2: Array = [2.0, 0.7] if kind == "bloat" else ([0.8, 1.1] if kind == "scream" else ([0.6, 0.72] if kind == "crawler" else [1.0, 1.0]))
 		S.zs.append({"x": x, "y": y, "arm": arm, "kind": kind, "var": randi() % 4, "lcd": randf() * 2, "wind": 0.0, "lng": 0.0, "rise": 0.0,
 			"shirt": D.ZSHIRT[randi() % D.ZSHIRT.size()], "skin": D.ZSKIN[randi() % 3], "wk": randf() * 6,
@@ -1488,49 +1761,119 @@ func killed(e: Dictionary, isZ: bool) -> void:
 		S.fx.append({"x": e.x, "y": e.y, "vx": cos(a) * v, "vy": sin(a) * v, "life": 0.4, "c": "#6e120d", "sz": 3.0, "drag": true})
 	if isZ and randf() < 0.25: S.drops.append({"x": e.x, "y": e.y, "k": "ammo", "n": 3 + randi() % 6})
 
-func explode(br: Dictionary) -> void:
+## A red barrel, thrown bomb, or (big = true) a car blowing up.
+func explode(br: Dictionary, big: bool = false) -> void:
 	if br.dead: return
 	br.dead = true
-	add_noise(18)
+	add_noise(CAR_BLAST_NOISE if big else 18.0)
+	var R := CAR_BLAST_R if big else 130.0
+	var zd := CAR_BLAST_DMG if big else 160.0
+	var k := R / 130.0   # visual scale
 	for c in S.crates:
-		if not c.open and c.ty == "safe" and Vector2(c.x - br.x, c.y - br.y).length() < 120:
+		if not c.open and c.ty == "safe" and Vector2(c.x - br.x, c.y - br.y).length() < R * 0.92:
 			c.forced = true
 			loot_crate(c)
-	var R := 130.0
-	sfx("boom")
-	S.shake = 16.0
-	S.boomFlash = 0.3
-	S.scorch.append({"x": br.x, "y": br.y})
-	stamp_scorch(br.x, br.y)
-	for i in 9:
-		S.smoke.append({"x": br.x + (randf() - 0.5) * 60, "y": br.y + (randf() - 0.5) * 60, "r": 30 + randf() * 30, "life": 2 + randf() * 2, "max": 4.0, "g": false})
-	for i in 40:
+	sfx("bigboom" if big else "boom")
+	S.shake = 26.0 if big else 16.0
+	S.boomFlash = 0.5 if big else 0.3
+	S.scorch.append({"x": br.x, "y": br.y})   # also where the blast's light flash is drawn
+	if big: S.bg.stamp(["scorch", br.x, br.y, CAR_SCORCH_R, CAR_SCORCH_A])
+	else: stamp_scorch(br.x, br.y)
+	for i in (18 if big else 9):
+		S.smoke.append({"x": br.x + (randf() - 0.5) * 60 * k, "y": br.y + (randf() - 0.5) * 60 * k, "r": (30 + randf() * 30) * sqrt(k), "life": 2 + randf() * 2 * k, "max": 2.0 + 2.0 * k, "g": false})
+	for i in (110 if big else 40):
 		var a := randf() * TAU
-		var v := 60 + randf() * 260
-		S.fx.append({"x": br.x, "y": br.y, "vx": cos(a) * v, "vy": sin(a) * v, "life": 0.3 + randf() * 0.5, "c": "#ffb347" if randf() < 0.5 else "#e3644c", "sz": 3.0, "drag": false})
+		var v := (60 + randf() * 260) * sqrt(k)
+		S.fx.append({"x": br.x, "y": br.y, "vx": cos(a) * v, "vy": sin(a) * v, "life": 0.3 + randf() * 0.5 * k, "c": "#ffb347" if randf() < 0.5 else ("#e3644c" if randf() < 0.7 else "#fff0b0"), "sz": 4.0 if big and randf() < 0.4 else 3.0, "drag": false})
+	if big:
+		for i in 14:   # flying wreckage
+			var a := randf() * TAU
+			var v := 120 + randf() * 220
+			S.fx.append({"x": br.x, "y": br.y, "vx": cos(a) * v, "vy": sin(a) * v, "life": 0.6 + randf() * 0.6, "c": "#2a2624", "sz": 5.0, "drag": true})
 	for z in S.zs:
 		var d := Vector2(z.x - br.x, z.y - br.y).length()
 		if d < R:
-			z.hp -= 160 * (1 - d / R / 1.3)
+			z.hp -= zd * (1 - d / R / 1.3)
 			z.hit = 0.15
 			if z.hp <= 0 and not z.dead:
 				z.dead = true
 				G.stats.kills += 1
 				blood(z.x, z.y, 6)
-		if d < 700: z.alert = true
+		if d < (900 if big else 700): z.alert = true
 	for v in S.sv:
 		var d := Vector2(v.x - br.x, v.y - br.y).length()
 		if d < R:
-			dmg_enemy(v, 160 * (1 - d / R / 1.3))
+			dmg_enemy(v, zd * (1 - d / R / 1.3))
 			if v.hp <= 0 and not v.dead:
 				v.dead = true
 				G.stats.kills += 1
 				blood(v.x, v.y, 6)
-		v.alert = true
+		if d < (900 if big else 700): sv_hear(v, br.x, br.y)
 	for o in S.barrels:
-		if not o.dead and o.fuse < 0 and Vector2(o.x - br.x, o.y - br.y).length() < 110: o.fuse = 0.15
+		if not o.dead and o.fuse < 0 and Vector2(o.x - br.x, o.y - br.y).length() < R * 0.85: o.fuse = 0.15
+	# blasts damage cars too, so a barrel or a burning car can set off the ones nearby
+	for car in S.cars:
+		if car == br or car.dead: continue
+		var d := maxf(0.0, Vector2(car.x - br.x, car.y - br.y).length() - 28.0)   # car body, not just its hot end
+		if d < R: car_hit(car, zd * (1 - d / R / 1.3))
 	var pd := Vector2(S.p.x - br.x, S.p.y - br.y).length()
-	if pd < R: hurt(40 * (1 - pd / R) + 8, "blast")
+	if pd < R:
+		if big: hurt(CAR_BLAST_PDMG * (1 - pd / R) + 15, "blast")
+		else: hurt(40 * (1 - pd / R) + 8, "blast")
+
+# ---------------- cars ----------------
+## Gives the site's parked cars hitpoints, and maps their tiles so bullets can find them.
+func init_cars() -> void:
+	S["carAt"] = {}
+	for car in S.cars:
+		# x, y is the hot end, not the middle: the centre of the front or rear third
+		var end := (1.0 if randf() < 0.5 else -1.0) * 2.0 * TS / 3.0
+		var hz: bool = car.w > car.h
+		car.merge({"x": (car.c + car.w * 0.5) * TS + (end if hz else 0.0), "y": (car.r + car.h * 0.5) * TS + (0.0 if hz else end), "hp": CAR_HP,
+			"smokeAt": CAR_HP * (1.0 - randf_range(CAR_SMOKE_MIN, CAR_SMOKE_MAX)),
+			"fuse": -1.0, "dead": false, "puff": 0.0, "burnT": 0.0, "burnMax": CAR_SMOLDER})
+		for r in range(car.r, car.r + car.h):
+			for c in range(car.c, car.c + car.w):
+				S.carAt[r * S.cols + c] = car
+## The car (if any) parked on the tile under world point (x, y).
+func car_at(x: float, y: float):
+	var c := int(floor(x / TS))
+	var r := int(floor(y / TS))
+	if c < 0 or r < 0 or c >= S.cols or r >= S.rows: return null
+	return S.carAt.get(r * S.cols + c)
+func car_hit(car: Dictionary, d: float) -> void:
+	if car.dead or car.fuse >= 0: return
+	car.hp -= d
+	if car.hp <= 0:
+		car.fuse = randf_range(CAR_FUSE_MIN, CAR_FUSE_MAX)
+		sfx("pop")
+		for i in 12: S.fx.append({"x": car.x, "y": car.y, "vx": (randf() - 0.5) * 160, "vy": (randf() - 0.5) * 160, "life": 0.4, "c": "#ffb347", "sz": 3.0, "drag": true})
+## Smoke from damaged cars, the countdown on burning ones, smouldering wrecks.
+func update_cars(dt: float) -> void:
+	for car in S.cars:
+		var rate := 0.0
+		if car.dead:
+			car.burnT -= dt   # the plume itself is drawn in render.gd
+		elif car.fuse >= 0:
+			rate = 3.0
+			car.burnT += dt
+		elif car.hp <= car.smokeAt:
+			# thin grey wisps at first, thicker as it nears 0
+			rate = 1.5 + 4.0 * (1.0 - car.hp / maxf(1.0, car.smokeAt))
+		if rate > 0:
+			car.puff -= dt * rate
+			while car.puff <= 0:
+				car.puff += 1.0
+				var hot: bool = car.fuse >= 0 and not car.dead
+				S.smoke.append({"x": car.x + (randf() - 0.5) * 12, "y": car.y + (randf() - 0.5) * 12, "r": (8 + randf() * 8) * (1.6 if hot else 1.0), "life": 1.6 + randf() * 1.4, "max": 3.0, "g": false})
+		if car.fuse >= 0 and not car.dead:
+			car.fuse -= dt
+			if car.fuse <= 0:
+				car.burnT = CAR_SMOLDER
+				car.burnMax = CAR_SMOLDER
+				S.bg.stamp(["wreck", car])
+				explode(car, true)
+				if S == null or uist == "dead": return
 
 func shoot() -> void:
 	var w: Dictionary = D.WEAPONS[G.weapon]
@@ -1569,10 +1912,14 @@ func shoot() -> void:
 		return
 	G.ammo -= 1
 	sfx(w.snd)
+	if S.npc and S.npc.follow and not w.silent:
+		S.npc.fire_t = S.t + NPC_FIRE_WINDOW   # your rescue joins in
 	var spr: float = w.spr * (ADS_AUTO_SPREAD if ads and w.get("auto", false) else 1.0)
+	# some weapons hit harder when aimed down sights ("ads_dmg" in D.WEAPONS, e.g. the crossbow)
+	var base_dmg: float = float(w.get("ads_dmg", w.dmg)) if ads else float(w.dmg)
 	for i in w.pel:
 		var a: float = p.ang + (randf() - 0.5) * spr * 2
-		S.bul.append({"x": p.x + cos(p.ang) * 16, "y": p.y + sin(p.ang) * 16, "vx": cos(a) * w.spd, "vy": sin(a) * w.spd, "life": w.life, "dmg": w.dmg * (1.2 if has("scope") else 1.0), "pl": true, "kb": w.kb, "bolt": w.bolt})
+		S.bul.append({"x": p.x + cos(p.ang) * 16, "y": p.y + sin(p.ang) * 16, "vx": cos(a) * w.spd, "vy": sin(a) * w.spd, "life": w.life, "dmg": base_dmg * (1.2 if has("scope") else 1.0), "pl": true, "kb": w.kb, "bolt": w.bolt})
 	if not w.bolt:   # spent casing — guns only, the crossbow has none
 		S.fx.append({"x": p.x + cos(p.ang) * 8, "y": p.y + sin(p.ang) * 8, "vx": cos(p.ang + 1.6) * 110 + (randf() - 0.5) * 40, "vy": sin(p.ang + 1.6) * 110 + (randf() - 0.5) * 40, "life": 0.7, "c": "#d9b35a", "sz": 2.2, "drag": true})
 	add_noise(w.noise)
@@ -1581,8 +1928,8 @@ func shoot() -> void:
 		S.shake = minf(8, S.shake + (7.0 if w.pel > 6 else (5.0 if w.pel > 1 else (1.2 if w.rate < 0.15 else 2.0))))
 		for z in S.zs:
 			if not z.dormant and Vector2(z.x - p.x, z.y - p.y).length() < 520: z.alert = true
-	for v in S.sv:
-		if Vector2(v.x - p.x, v.y - p.y).length() < 700: v.alert = true
+		for v in S.sv:
+			if Vector2(v.x - p.x, v.y - p.y).length() < 700: sv_hear(v, p.x, p.y)
 
 func hurt(d: float, cause: String) -> void:
 	if uist != "": return
@@ -1947,13 +2294,16 @@ func upd_ground(dt: float) -> void:
 			b.y += b.vy * dt / 3
 			if solid_b(b.x, b.y):
 				for n in 3: S.fx.append({"x": b.x, "y": b.y, "vx": (randf() - 0.5) * 120, "vy": (randf() - 0.5) * 120, "life": 0.25, "c": "#e8c77a", "sz": 3.0, "drag": false})
+				var car = car_at(b.x, b.y)
+				if car and not b.bolt: car_hit(car, b.dmg)   # crossbow bolts just stick in
 				dead = true
 				break
 			var hb := false
 			for br in S.barrels:
 				if not br.dead and pow(br.x - b.x, 2) + pow(br.y - b.y, 2) < 150:
-					br.hp -= b.dmg
-					if br.hp <= 0: explode(br)
+					if not b.bolt:   # crossbow bolts stop in the barrel without setting it off
+						br.hp -= b.dmg
+						if br.hp <= 0: explode(br)
 					hb = true
 					break
 			if hb:
@@ -1984,7 +2334,7 @@ func upd_ground(dt: float) -> void:
 						if not v.dead and pow(v.x - b.x, 2) + pow(v.y - b.y, 2) < 144:
 							dmg_enemy(v, b.dmg)
 							v.hit = 0.1
-							v.alert = true
+							sv_hear(v, p.x, p.y)
 							blood(v.x, v.y, 1)
 							if v.hp <= 0:
 								v.dead = true
@@ -2029,17 +2379,19 @@ func upd_ground(dt: float) -> void:
 			z.rise -= dt
 			continue
 		if z.alert and d < S.nd: S.nd = d
-		if d < 250: z.alert = true
+		if d < 250 and not z.alert and los(z.x, z.y, p.x, p.y): z.alert = true   # sight only; sound alerts are separate
 		var vx: float
 		var vy: float
 		var sp: float
 		if z.alert:
 			vx = dx / d; vy = dy / d; sp = z.spd
-			if d > 150 and not (d < 420 and los(z.x, z.y, p.x, p.y)):
+			# straight at you only if the body fits along the line too (walk_clear()); the thin
+			# sight line that grazes a corner made them flick between this and the flow field
+			if d > 150 and not (d < 420 and los(z.x, z.y, p.x, p.y) and walk_clear(z.x, z.y, p.x, p.y)):
 				var fd = flow_dir(z.x, z.y)
 				if fd:
 					vx = fd.x; vy = fd.y
-			if S.npc:
+			if S.npc and not in_safe(S.npc.x, S.npc.y):   # don't mob the hiding place
 				var nx: float = S.npc.x - z.x
 				var ny: float = S.npc.y - z.y
 				var nd := Vector2(nx, ny).length()
@@ -2080,10 +2432,13 @@ func upd_ground(dt: float) -> void:
 			z.lng -= dt
 			sp *= DF().lunge
 			vx = dx / d; vy = dy / d
+		if z.get("scr", 0.0) > 0: sp = 0   # screamer winding up: stands still
 		sp *= nk
 		var zx: float = z.x
 		var zy: float = z.y
 		move_c(z, vx * sp * dt, vy * sp * dt, 10)
+		if in_safe(z.x, z.y) and not in_safe(zx, zy):
+			z.x = zx; z.y = zy   # can't walk into the rescue survivor's hiding place
 		var blocked := body_block(z, p, zx, zy, vx, vy)
 		var moved := Vector2(z.x - zx, z.y - zy).length()
 		z.wk += moved * 0.22
@@ -2095,10 +2450,18 @@ func upd_ground(dt: float) -> void:
 				z.st = 0.0
 		else:
 			z.st = 0.0
-		z.ang = atan2(vy, vx)
+		if z.get("scr", 0.0) <= 0: z.ang = atan2(vy, vx)   # (a winding-up screamer keeps staring at you)
 		z.cd -= dt
 		z.hit -= dt
-		if z.kind == "scream" and not z.screamed and d < 420 and los(z.x, z.y, p.x, p.y):
+		var sees: bool = z.kind == "scream" and not z.screamed and d < SCREAM_RANGE \
+			and absf(U.ang_diff(atan2(dy, dx), z.ang)) < deg_to_rad(SCREAM_CONE) and los(z.x, z.y, p.x, p.y)
+		if not sees: z["scr"] = 0.0
+		else:
+			if z.get("scr", 0.0) <= 0: sfx("snarl", 0.2)   # the tell: it's about to scream
+			z["scr"] = z.get("scr", 0.0) + dt
+			z.ang = atan2(dy, dx)
+		if sees and z.scr >= SCREAM_WINDUP:
+			z["scr"] = 0.0
 			z.screamed = true
 			sfx("scream")
 			S.shake = 6.0
@@ -2110,8 +2473,8 @@ func upd_ground(dt: float) -> void:
 			for k in 4: spawn_z(false)
 		if S.npc:
 			var nd := Vector2(S.npc.x - z.x, S.npc.y - z.y).length()
-			if nd < 250: z.alert = true
-			if nd < 22 and z.cd <= 0:
+			if nd < 250 and not z.alert and los(z.x, z.y, S.npc.x, S.npc.y): z.alert = true
+			if nd < 22 and z.cd <= 0 and not in_safe(S.npc.x, S.npc.y):
 				z.cd = 0.85
 				npc_hurt(z.dmg)
 				if S == null: return
@@ -2127,14 +2490,25 @@ func upd_ground(dt: float) -> void:
 		var d := Vector2(dx, dy).length()
 		if d == 0: d = 1
 		var see := d < 520 and los(v.x, v.y, p.x, p.y)
-		if see and d < 420: v.alert = true
+		if see and (d < 420 or v.alert):   # seen: alerted, knows exactly where you are
+			sv_hear(v, p.x, p.y)
+			if not v.get("called", false):   # first sighting (since they last stood down): raise the alarm
+				v.called = true
+				sv_raise(v.x, v.y, p.x, p.y)
+				v.yell = SV_YELL_MIN + randf() * (SV_YELL_MAX - SV_YELL_MIN)
+				v.cd = maxf(v.cd, v.yell)
+				sfx("yell")
+				add_noise(SV_YELL_NOISE)
 		v.cd -= dt
+		v.yell = maxf(0.0, v.get("yell", 0.0) - dt)
 		v.hit -= dt
 		var vx := 0.0
 		var vy := 0.0
 		if v.alert:
-			v.ang = atan2(dy, dx)
-			if see:
+			if see and v.yell > 0:
+				v.ang = atan2(dy, dx)   # just spotted you: standing and yelling, not shooting yet
+			elif see:
+				v.ang = atan2(dy, dx)
 				# preferred distance depends on the gun: shotguns close in, rifles hang back
 				var wd2: Dictionary = D.WEAPONS[int(v.get("w", 0))]
 				var near := 110.0 if wd2.pel > 1 else (260.0 if (wd2.spr < 0.02) else 180.0)
@@ -2151,7 +2525,57 @@ func upd_ground(dt: float) -> void:
 				vy += dx / d * v.sd * 0.7
 				if v.cd <= 0: sv_fire(v)
 			else:
-				vx = dx / d; vy = dy / d
+				# can't see you: go to where they last saw/heard you, search there, then give up
+				if not v.has("lkx"): sv_hear(v, p.x, p.y)   # alerted by a hit: they know where it came from
+				v.lost = v.get("lost", 0.0) + dt
+				if v.lost > SV_FORGET:
+					v.alert = false
+					v.called = false
+					v.erase("lkx")
+					v.srch = false
+					sv_repost(v, v.x, v.y, SV_SEARCH_R)
+				elif not v.get("srch", false) and Vector2(v.lkx - v.x, v.lky - v.y).length() > 24:
+					var nv := sv_nav(v, v.lkx, v.lky)
+					vx = nv.x; vy = nv.y
+					# for a moment after losing sight they keep their gun on where you were,
+					# so stepping in and out of view at a doorway doesn't spin them back and forth
+					if v.lost < 0.6: v.ang = atan2(v.lky - v.y, v.lkx - v.x)
+					elif nv.length() > 0: v.ang = atan2(vy, vx)
+				else:
+					if not v.get("srch", false):
+						v.srch = true
+						sv_repost(v, v.lkx, v.lky, SV_SEARCH_R)
+					var pv := sv_patrol(v, dt)
+					vx = pv.x; vy = pv.y
+		elif v.get("trav", false):
+			# sweeping out toward where the player was when the alarm went up
+			v.travT += dt
+			if Vector2(v.sx - v.x, v.sy - v.y).length() < 24 or v.travT > 40.0:
+				v.trav = false
+				sv_repost(v, v.x, v.y, SV_SWEEP_R)
+			else:
+				var nv := sv_nav(v, v.sx, v.sy) * SV_SWEEP_SPD
+				vx = nv.x; vy = nv.y
+				if nv.length() > 0: v.ang = atan2(vy, vx)
+		else:
+			var pv := sv_patrol(v, dt)
+			vx = pv.x; vy = pv.y
+		# keep clear of other survivors and of zombies: the same soft push zombies use
+		# on each other (bodies within 20 px steer apart)
+		for others in [S.sv, S.zs]:
+			for o in others:
+				if o == v or o.dead: continue
+				var ox2: float = v.x - o.x
+				var oy2: float = v.y - o.y
+				var dd := ox2 * ox2 + oy2 * oy2
+				if dd < 400:
+					if dd > 0.01:
+						var q := sqrt(dd)
+						vx += ox2 / q * 0.8
+						vy += oy2 / q * 0.8
+					else:   # exactly on top of each other (e.g. two out of the same door)
+						vx += randf() - 0.5
+						vy += randf() - 0.5
 		var vx0: float = v.x
 		var vy0: float = v.y
 		move_c(v, vx * 85 * dt, vy * 85 * dt, 10)
@@ -2219,6 +2643,8 @@ func upd_ground(dt: float) -> void:
 			br.fuse -= dt
 			if br.fuse <= 0: explode(br)
 			if S == null or uist == "dead": return
+	update_cars(dt)
+	if S == null or uist == "dead": return
 	if randf() < dt * 0.4:
 		var nd := 1e9
 		for z in S.zs:

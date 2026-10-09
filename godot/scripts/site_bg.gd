@@ -58,7 +58,24 @@ func _draw_stamps(g: Pen) -> void:
 				g.circle(14, 1, 5.5, U.shade(sk, .7))
 				g.restore()
 			"scorch":
-				g.radial(rec[1], rec[2], [[4.0, U.rgb(8, 6, 4, .75)], [62.0, U.rgb(8, 6, 4, 0)]], 32)
+				# optional radius and centre darkness (car blasts use a smaller, fainter mark)
+				var sr: float = rec[3] if rec.size() > 3 else 62.0
+				var sa: float = rec[4] if rec.size() > 4 else 0.75
+				g.radial(rec[1], rec[2], [[4.0, U.rgb(8, 6, 4, sa)], [sr, U.rgb(8, 6, 4, 0)]], 32)
+			"wreck":
+				# burnt-out shell over the baked car: charred body, blown-out glass, bare rims
+				var k: Dictionary = rec[1]
+				var x: float = k.c * SiteGen.TS + 3
+				var y: float = k.r * SiteGen.TS + 3
+				var w: float = k.w * SiteGen.TS - 6
+				var h: float = k.h * SiteGen.TS - 6
+				g.rr(x - 1, y - 1, w + 2, h + 2, 8, U.rgb(22, 19, 17, 1))
+				g.rr(x + 2, y + 2, w - 4, h - 4, 6, U.rgb(48, 40, 34, 1))
+				if w > h:
+					g.rect(x + w * .22, y + 4, w * .56, h - 8, U.rgb(14, 12, 11, 1))
+				else:
+					g.rect(x + 4, y + h * .22, w - 8, h * .56, U.rgb(14, 12, 11, 1))
+				for q in 5: g.circle(x + randf() * w, y + randf() * h, 2 + randf() * 4, U.rgb(110, 58, 30, .55))
 			"streaks":
 				for s in rec[1]:
 					g.line(s[0], s[1], s[2], s[3], U.rgb(95, 10, 6, .5), s[4])

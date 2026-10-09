@@ -705,7 +705,7 @@ func update_buttons() -> void:
 	btns.board.position = Vector2((vs.x - btns.board.size.x) / 2, vs.y - 22 - btns.board.size.y)
 	btns.taxi.position = Vector2((vs.x - btns.taxi.size.x) / 2, vs.y - 22 - btns.taxi.size.y)
 	# testing buttons: right side, stacked under the place name
-	var dy := 38.0
+	var dy := 54.0   # below the place name and its danger dots
 	for k in DBG_KEYS:
 		var b: Button = btns[k]
 		b.visible = DEBUG_BUTTONS and gr
@@ -805,6 +805,8 @@ class MapView extends Control:
 				g.text_base("Haven", x, y - 12, 12, Color.WHITE, 0, "700")
 				continue
 			var r := 6.0 if s.type == "airport" else (5.0 if s.type == "regional" else 4.0)
+			if G.mayday and int(G.mayday.id) == s.id:
+				g.ring(x, y, r + 8, Color.html("#ff2a1e"), 2.5)   # active mayday
 			if s.get("hostile", false):
 				# survivor-held: red ring with a cross
 				var red := Color.html("#a3301f")

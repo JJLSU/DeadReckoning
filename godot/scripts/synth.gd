@@ -150,6 +150,7 @@ func _render(kind: String) -> PackedFloat32Array:
 		"scream": _noise(b, .9, 2300, 3, .35); _tone(b, 700, 1350, .7, .07, "square"); _tone(b, 520, 900, .7, .05, "sawtooth")
 		"pop": _noise(b, .6, 280, .6, .8, "lowpass"); _tone(b, 150, 45, .4, .3)
 		"boom": _noise(b, 1.1, 200, .4, 1.2, "lowpass"); _tone(b, 80, 25, .8, .6)
+		"bigboom": _noise(b, 2.2, 150, .3, 1.5, "lowpass"); _tone(b, 62, 16, 1.6, .75); _noise(b, .5, 1400, .6, .35); _noise(b, 1.4, 500, .4, .4, "lowpass", .15)
 		"thump": _noise(b, .25, 300, .7, .5, "lowpass"); _noise(b, .3, 3000, 2, .12)
 		"crash": _noise(b, 1.4, 400, .3, 1.2, "lowpass"); _noise(b, .8, 2000, .5, .4)
 		"open": _noise(b, .16, 900, 1.2, .22); _tone(b, 210, 130, .14, .08, "triangle")
@@ -182,6 +183,17 @@ func _render(kind: String) -> PackedFloat32Array:
 			elif kind.begins_with("snarl"):
 				var v := 0.12
 				_noise(b, .55, 900, 2.2, v * 2.2); _tone(b, 190, 85, .5, v, "sawtooth")
+			elif kind.begins_with("yell"):
+				# a shouted "Hey!": buzzy voice through two vowel formants, pitch up then down
+				var v := 0.14
+				var f := 105.0 + randf() * 30.0
+				# the three variants are full, medium and short: "Heyyy!", "Hey!", "Hy!"
+				var d: float = [0.42, 0.3, 0.2][int(kind.substr(4)) % 3] + randf() * 0.06
+				var f1 := _coef("bandpass", 480 + randf() * 100, 3.0)
+				var f2 := _coef("bandpass", 1100 + randf() * 200, 4.0)
+				_tone(b, f * 1.25, f * 0.8, d, v * 2.5, "sawtooth", 0.0, 4.0, 6.0, false, 0.05, f1)
+				_tone(b, f * 1.25, f * 0.8, d, v * 1.5, "sawtooth", 0.0, 4.0, 6.0, false, 0.05, f2)
+				_noise(b, minf(.12, d * .4), 1400, 1.5, v * .4)
 			elif kind.begins_with("heart"):
 				var v := 0.2
 				_tone(b, 58, 40, .14, v); _tone(b, 52, 36, .16, v * .8, "sine", .2)
@@ -200,7 +212,7 @@ func _to_stream(b: PackedFloat32Array) -> AudioStreamWAV:
 	w.data = data
 	return w
 
-const REF := {"groan": 0.06, "snarl": 0.12, "heart": 0.2}
+const REF := {"groan": 0.06, "snarl": 0.12, "heart": 0.2, "yell": 0.14}
 
 func sfx(kind: String, vv: float = -1.0) -> void:
 	if not on: return
@@ -221,7 +233,7 @@ func sfx(kind: String, vv: float = -1.0) -> void:
 
 ## Pre-render common sounds so the first gunshot does not hitch.
 func warm() -> void:
-	for k in ["pistol", "hit", "hurt", "loot", "open", "click", "thump", "enemy", "cash", "swing"]:
+	for k in ["pistol", "hit", "hurt", "loot", "open", "click", "thump", "enemy", "cash", "swing", "boom", "bigboom"]:
 		if not sounds.has(k): sounds[k] = _to_stream(_render(k))
 		await get_tree().process_frame
 
