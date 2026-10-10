@@ -32,12 +32,12 @@ static func draw_plane(g: Pen, P: Dictionary, size: float, prop: float, shadow: 
 	if shadow: g.ga *= 0.3
 	g.tex(Tx.PSPR.get(P.name + ("_s" if shadow else "")), -0.64, -0.64, 1.28, 1.28)
 	if not shadow:
-		var blades: Array = [[0.45, -0.255], [0.45, 0.255]] if P.twin else [[0.52, 0.0]]
-		for b in blades:
+		for b in P.props:   # [x, y, radius] per propeller, set per airframe in D.PLANES
 			var bx: float = b[0]
 			var by: float = b[1]
-			g.ellipse(bx, by, 0.025, 0.17, 0, Color(225 / 255.0, 225 / 255.0, 215 / 255.0, 0.13))
-			g.line(bx, by + sin(prop) * 0.16, bx, by - sin(prop) * 0.16, Color(30 / 255.0, 30 / 255.0, 30 / 255.0, 0.7), 0.016)
+			var br: float = b[2]
+			g.ellipse(bx, by, 0.025, br, 0, Color(225 / 255.0, 225 / 255.0, 215 / 255.0, 0.13))
+			g.line(bx, by + sin(prop) * (br - 0.01), bx, by - sin(prop) * (br - 0.01), Color(30 / 255.0, 30 / 255.0, 30 / 255.0, 0.7), 0.016)
 			g.circle(bx, by, 0.018, hc("#2a2a2a"))
 	g.restore()
 
@@ -69,10 +69,10 @@ static func grade(gm, g: Pen) -> void:
 	if k > 0.01: g.rect(0, 0, gm.Wv, gm.Hv, rgba(255, 150, 70, 0.13 * k))
 
 static func draw_objective(gm, g: Pen, y: float) -> void:
-	var txt: String = gm.objective()
+	var txt: String = gm.menu.objective()
 	var BW: float = gm.Wv - 24
 	if gm.mode == "flight" and gm.F:
-		var nt = gm.nav_target()
+		var nt = gm.flight.nav_target()
 		if nt:
 			var F: Dictionary = gm.F
 			var d := Vector2(nt.x - F.x, nt.y - F.y).length()
@@ -97,7 +97,7 @@ static func draw_objective(gm, g: Pen, y: float) -> void:
 	for i in lines.size():
 		g.text(lines[i], 32, y + 12 + i * 16, 12, hc("#f6e8ef"), -1, "600", 0, Color.BLACK, w - 38)
 	# mayday: its own bright red line under your destination, for as long as it lasts
-	var mt = gm.mayday_target() if (gm.mode == "flight" and gm.F) else null
+	var mt = gm.flight.mayday_target() if (gm.mode == "flight" and gm.F) else null
 	if mt:
 		var F: Dictionary = gm.F
 		var md := Vector2(mt.x - F.x, mt.y - F.y).length()
@@ -204,8 +204,8 @@ static func draw_world(gm, g: Pen, cx: float, cy: float, sc: float, t: float) ->
 				g.tex(Tx.SPUFF, wx - sz * 0.45 + 8, wy - sz * 0.45 + 11, sz * 0.9, sz * 0.9)
 				if Tx.TREES.size(): g.tex(Tx.TREES[int(h * 30) % 3], wx - sz / 2, wy - sz / 2, sz, sz)
 		g.ga = 1.0
-	var tgt = gm.nav_target() if (gm.mode == "flight" and gm.G and gm.F) else null
-	var mdt = gm.mayday_target() if (gm.mode == "flight" and gm.G and gm.F) else null
+	var tgt = gm.flight.nav_target() if (gm.mode == "flight" and gm.G and gm.F) else null
+	var mdt = gm.flight.mayday_target() if (gm.mode == "flight" and gm.G and gm.F) else null
 	for s in wd.strips:
 		if s.x < x0 - 800 or s.x > x1 + 800 or s.y < y0 - 800 or s.y > y1 + 800: continue
 		draw_strip(gm, g, s)
@@ -441,16 +441,16 @@ static func flight_layer(gm, idx: int, g: Pen) -> void:
 			g.save(); g.translate(F.x + alt * 0.7, F.y + alt * 1.1); g.rotate(F.hdg); draw_plane(g, P, P.size * 1.7, 0, true, F.bank); g.restore()
 			g.save(); g.translate(F.x, F.y); g.rotate(F.hdg); draw_plane(g, P, P.size * 1.7 * grow, F.prop, false, F.bank); g.restore()
 			if not F.onGround and not F.crashed and (F.vs < -0.5 or F.alt < 30):
-				var pt = gm.predict_touchdown()
+				var pt = gm.flight.predict_touchdown()
 				if pt and pt.t < 45:
 					var s = gm.wd.strip_at(pt.x, pt.y, 1)
 					var c := hc("#d9a441")
 					if pt.vs <= -15: c = hc("#e3644c")
 					else:
-						var ok: bool = s != null and gm.align_to(s.ang, F.trk)
+						var ok: bool = s != null and gm.flight.align_to(s.ang, F.trk)
 						if not ok:
 							var rd = gm.wd.road_at(pt.x, pt.y)
-							ok = rd != null and gm.align_to(rd.r.ang, F.trk)
+							ok = rd != null and gm.flight.align_to(rd.r.ang, F.trk)
 						if ok: c = hc("#9cc063")
 					var q := 11 / sc
 					var cl := c
@@ -470,7 +470,7 @@ static func flight_layer(gm, idx: int, g: Pen) -> void:
 			for tr in F.tracers:
 				var a: float = tr.life / 0.35
 				g.line(tr.x + (tr.tx - tr.x) * (1 - a), tr.y + (tr.ty - tr.y) * (1 - a), tr.x + (tr.tx - tr.x) * minf(1, 1.3 - a), tr.y + (tr.ty - tr.y) * minf(1, 1.3 - a), rgba(255, 190, 90, a), tlw)
-			var ai = gm.approach_info()
+			var ai = gm.flight.approach_info()
 			if ai and ai.phase != "high" and ai.slack > -200:
 				var pl := 0.5 + 0.5 * sin(gm.T * 5)
 				var nx: float = -ai.cy
@@ -550,8 +550,8 @@ static func night_glows(gm, g: Pen, sc: float, alt: float, P: Dictionary) -> voi
 	if alt < 75:
 		g.radial(0, 0, [[0.0, rgba(255, 240, 200, 0.28 * dk)], [520.0, Color(0, 0, 0, 0)]], 24)
 	var blink := fmod(gm.T, 1.2) < 0.12
-	glow.call(sz * 0.2, -sz * 0.6, 10, "255,60,50", dk)
-	glow.call(sz * 0.2, sz * 0.6, 10, "60,255,120", dk)
+	glow.call(sz * 0.1, -sz * 0.6, 10, "255,60,50", dk)
+	glow.call(sz * 0.1, sz * 0.6, 10, "60,255,120", dk)
 	if blink: glow.call(-sz * 0.45, 0, 16, "255,255,255", dk)
 	g.restore()
 
@@ -625,8 +625,8 @@ static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 		_clipped_disc(g, sxp, syp, sr, mx, my, mr, rgba(120, 140, 190, 0.35))
 	var rn: float = gm.range_now() * k
 	if rn < mr: g.dashed_arc(mx, my, rn, 0, TAU, rgba(212, 90, 157, 0.9), 1, 3, 3)
-	var nt = gm.nav_target()
-	var mdt2 = gm.mayday_target()
+	var nt = gm.flight.nav_target()
+	var mdt2 = gm.flight.mayday_target()
 	for s in wd.strips:
 		if not gm.known.has(s.id): continue
 		var dx: float = (s.x - F.x) * k
@@ -699,7 +699,7 @@ static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 			var ac := arrow.duplicate(); ac.append(arrow[0])
 			g.polyline(ac, Color(0, 0, 0, 0.65), 2.5)
 			g.restore()
-	var mt = gm.mayday_target()
+	var mt = gm.flight.mayday_target()
 	if mt:
 		var ma := atan2(mt.y - F.y, mt.x - F.x)
 		var md := Vector2(mt.x - F.x, mt.y - F.y).length()
@@ -766,10 +766,10 @@ static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 		msg = "Low fuel."; c = hc("#e3644c")
 	elif G.leak > 0 and not F.onGround:
 		msg = "Fuel leak, %.1f gal a minute." % (G.leak * 60); c = hc("#e3644c")
-	elif rdh and gm.align_to(rdh.r.ang, F.trk):
+	elif rdh and gm.flight.align_to(rdh.r.ang, F.trk):
 		msg = "Over a straight stretch of road. You could put it down here."; c = hc("#f0c4dd")
 	else:
-		gm.AP = gm.approach_info()
+		gm.AP = gm.flight.approach_info()
 		var AP = gm.AP
 		if AP and (AP.phase != "early" or F.alt < 75):
 			var nm: String = "Haven" if AP.s.type == "haven" else AP.s.name
@@ -787,7 +787,7 @@ static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 			c = hc("#f0c4dd")
 		elif near and F.alt < 70 and gm.known.has(near.id):
 			var nn: String = "Haven" if near.type == "haven" else near.name
-			msg = ("Lined up with %s. Ease down." % nn) if gm.align_ok(near) else ("Line up with the runway at %s." % nn)
+			msg = ("Lined up with %s. Ease down." % nn) if gm.flight.align_ok(near) else ("Line up with the runway at %s." % nn)
 			c = hc("#f0c4dd")
 	if msg != "":
 		var w := minf(W - 20, Pen.measure(msg, 15) + 24)
@@ -839,12 +839,17 @@ static func prep_ground(gm) -> void:
 			var rl := 140 * gs
 			if sx < -rl or sx > gm.Wv + rl or sy < -rl or sy > gm.Hv + rl: continue
 			if arr.size() < 16: arr.append(Vector3(sx, sy, rl))
+		for f in S.get("mf", []):   # survivors' muzzle flashes light up the dark too
+			if arr.size() >= 16: break
+			var fx: float = gm.Wv / 2 + (f.x - S.rcx) * gs
+			var fy: float = gm.Hv / 2 + (f.y - S.rcy) * gs
+			var rf := 200 * gs
+			if fx < -rf or fx > gm.Wv + rf or fy < -rf or fy > gm.Hv + rf: continue
+			arr.append(Vector3(fx, fy, rf))
+		var nl := arr.size()
 		for i in range(arr.size(), 16): arr.append(Vector3.ZERO)
 		m.set_shader_parameter("lights", arr)
-		var nl := 0
-		for l in S.lights:
-			if l.on: nl += 1
-		m.set_shader_parameter("nlights", mini(16, nl))
+		m.set_shader_parameter("nlights", nl)
 		dr.visible = true
 	else:
 		dr.visible = false
@@ -885,13 +890,14 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 			for k in S.crates: draw_container(gm, g, k)
 			draw_pickups(gm, g)
 			for b in S.thrown:
-				g.save(); g.translate(b.x, b.y)
-				g.ellipse(3, 4, 7, 5, 0, Color(0, 0, 0, 0.3))
+				var bz: float = b.get("z", 0.0)   # height while a survivor's lob is in the air
+				g.ellipse(b.x + 3 + bz * 0.3, b.y + 4, 7, 5, 0, Color(0, 0, 0, 0.3 * (1.0 - minf(0.6, bz / 100.0))))
+				g.save(); g.translate(b.x, b.y - bz)
 				g.rotate(b.spin)
 				g.rr(-7, -4, 14, 8, 2, hc("#5b5f63"))
 				g.rect(-7, -4, 3, 8, hc("#3a3d40")); g.rect(4, -4, 3, 8, hc("#3a3d40"))
 				g.restore()
-				if fmod(T, 0.25) < 0.12: g.circle(b.x, b.y - 6, 2.5, hc("#ff4a30"))
+				if fmod(T, 0.25) < 0.12: g.circle(b.x, b.y - bz - 6, 2.5, hc("#ff4a30"))
 			for d in S.drops:
 				var pl := 0.5 + 0.5 * sin(T * 5 + d.x)
 				g.rect(d.x - 5, d.y - 3, 14, 10, Color(0, 0, 0, 0.3))
@@ -929,12 +935,17 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 				for q in 3:
 					g.circle(car.x + (randf() - 0.5) * 8, car.y + (randf() - 0.5) * 6, (5 + randf() * 3) * (0.5 + 0.5 * grow), rgba(255, 120 + randf() * 60, 40, 0.8))
 				g.circle(car.x, car.y, 2.5 + randf() * 1.5, rgba(255, 230, 170, 0.85 * grow))
+			# blast-radius rings: burning cars and thrown bombs
+			for car in S.cars:
+				if not car.dead and car.fuse >= 0: blast_ring(gm, g, car.x, car.y, Blasts.CAR_BLAST_R, car.fuse)
+			for b in S.thrown:
+				if not b.dead: blast_ring(gm, g, b.x, b.y, Blasts.BOMB_BLAST_R, b.fuse)
 			var P: Dictionary = gm.PS()
 			g.save(); g.translate(S.plane.x + 10, S.plane.y + 14); draw_plane(g, P, 190, 0, true); g.restore()
 			g.save(); g.translate(S.plane.x, S.plane.y); draw_plane(g, P, 190, 0, false); g.restore()
 			if S.nearPlane: g.dashed_arc(S.plane.x, S.plane.y, 130, 0, TAU, rgba(212, 90, 157, 0.8), 2, 8, 6)
 			for z in S.zs: draw_zombie(gm, g, z)
-			for v in S.sv: draw_person(g, v.x, v.y, v.ang, {"body": v.shirt, "skin": v.skin, "hair": "#2b2118", "cap": v.cap, "gun": true, "long": int(v.get("w", 1)) != 0, "vest": float(v.get("armor", 0.0)) > 0, "walk": v.wk, "hit": v.hit > 0})
+			for v in S.sv: draw_person(g, v.x, v.y, v.ang, {"body": v.shirt, "skin": v.skin, "hair": "#2b2118", "cap": v.cap, "gun": not v.get("unarmed", false), "bare": v.get("unarmed", false), "long": int(v.get("w", 1)) != 0, "vest": float(v.get("armor", 0.0)) > 0, "walk": v.wk, "hit": v.hit > 0})
 			if S.npc:
 				var n: Dictionary = S.npc
 				draw_person(g, n.x, n.y, n.ang, {"body": "#3f7a7a", "skin": "#e0b894", "hair": "#5a3a22", "gun": true, "long": int(n.get("w", 0)) != 0, "walk": n.wk, "hit": n.hit > 0})
@@ -955,6 +966,8 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 				var mx: float = p.x + cos(p.ang) * 26
 				var my: float = p.y + sin(p.ang) * 26
 				g.radial(mx, my, [[0.0, rgba(255, 220, 150, 0.9)], [48 * 0.3, rgba(255, 160, 70, 0.4)], [48.0, rgba(255, 120, 40, 0)]], 24)
+			for f in S.get("mf", []):
+				g.radial(f.x, f.y, [[0.0, rgba(255, 220, 150, 0.9)], [48 * 0.3, rgba(255, 160, 70, 0.4)], [48.0, rgba(255, 120, 40, 0)]], 24)
 			if S.boomFlash > 0 and S.scorch.size():
 				var q: Dictionary = S.scorch[S.scorch.size() - 1]
 				g.radial(q.x, q.y, [[0.0, rgba(255, 190, 90, minf(1, S.boomFlash * 3))], [200.0, rgba(255, 90, 30, 0)]], 32)
@@ -1103,6 +1116,13 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 ## The exploration-mode cursor (replaces the Windows pointer). Follows the mouse
 ## normally; while aiming down sights it follows the slowed virtual cursor and
 ## tightens up as the camera settles in.
+## Blinking red dashed ring showing how far a blast will reach from (x, y); blinks
+## faster once the fuse is nearly out.
+static func blast_ring(gm, g: Pen, x: float, y: float, rad: float, fuse: float) -> void:
+	var rate: float = Blasts.BLAST_RING_BLINK * (2.0 if fuse < Blasts.BLAST_RING_HURRY else 1.0)
+	if fmod(gm.T * rate, 1.0) >= 0.5: return   # off half the time
+	g.dashed_arc(x, y, rad, 0, TAU, rgba(255, 40, 30, 0.75), 2.5, Blasts.BLAST_RING_DASH, Blasts.BLAST_RING_GAP)
+
 static func draw_ads_reticle(gm, g: Pen) -> void:
 	var c: Vector2 = gm.reticle_pos()
 	var k: float = gm.ads_ease()
@@ -1423,6 +1443,10 @@ static func draw_person(g: Pen, x: float, y: float, a: float, o: Dictionary) -> 
 		g.lines(PackedVector2Array([Vector2(0, -8), Vector2(8, -2), Vector2(0, 8), Vector2(10, 4)]), body, 4.5)
 		g.circle(9, -1.5, 2.6, skin)
 		g.circle(11, 3.5, 2.6, skin)
+	elif o.get("bare", false):   # empty-handed: arms in, nothing in them
+		g.lines(PackedVector2Array([Vector2(0, -8), Vector2(5, -7), Vector2(0, 8), Vector2(5, 7)]), body, 4.5)
+		g.circle(6, -6.5, 2.4, skin)
+		g.circle(6, 6.5, 2.4, skin)
 	else:
 		g.lines(PackedVector2Array([Vector2(0, -8), Vector2(6, -9), Vector2(0, 8), Vector2(9, 5)]), body, 4.5)
 		g.line(10, 5, 30.0 if swing else 22.0, -8.0 if swing else 9.0, hc("#9a9a92"), 2.5)

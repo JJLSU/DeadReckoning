@@ -1,6 +1,10 @@
 class_name Game
 extends Node2D
 ## Dead Reckoning — main game controller. A close port of the HTML game's logic.
+## Owns the run state (G, F, S) and the frame loop, the player on foot, zombies, bullets and
+## the ground helpers. Bigger systems live in their own scripts, reached through the vars
+## below: survivors.gd (armed survivors), blasts.gd (explosions and cars), flight.gd
+## (flying and landing) and menu.gd (menus, saves, title screen, settings).
 
 const WORLD := D.WORLD   # land size: set in data.gd
 # Open ocean all the way around the landmass (which spans 0..WORLD). It is made wide
@@ -13,59 +17,18 @@ const MAX_WIND := 22.0      # strongest wind rolled at takeoff
 var OCEAN_PAD := 0.0
 var old_save_warned := false
 const TS := 32.0
-const SAVE_PATH := "user://deadreckoning_v1.json"
+# Slow health regen: after REGEN_DELAY s of standing still (within one tile of where you
+# stopped), not sprinting, not shooting and not hurt, health creeps back up to REGEN_CAP.
+const REGEN_DELAY := 3.0
+const REGEN_CAP := 50.0   # % of max health (max is 100)
+const REGEN_RATE := 3.0   # health per second
 
 # aim down sights — on foot, hold right mouse
 const ADS_MOVE := 0.5     # walk speed multiplier while aiming
 const ADS_SENS := 0.45     # mouse sensitivity multiplier while aiming
 const ADS_ZOOM := 0.25    # extra zoom at full aim (0.25 = 25% closer)
 const ADS_LEAD := 90.0    # how far (world px) the camera leans toward where you face
-# Survivor-held strips (see World.HOSTILE_CHANCE)
-const GARRISON_MIN := 8        # total armed survivors at one of these strips...
-const GARRISON_MAX := 14
-const GARRISON_OUT_MIN := 3    # ...of which this many start outside; the rest wait in buildings
-const GARRISON_OUT_MAX := 5
-# Unalerted survivors pace around their post (see sv_patrol()).
-const SV_PATROL_MIN := 2.0     # wander radius from their post, tiles (each picks one in this range)
-const SV_PATROL_MAX := 6.0
-const SV_PATROL_SPD := 0.4     # walking speed while patrolling, fraction of their normal 85 px/s
-const SV_PAUSE_MIN := 1.5      # seconds standing and looking around between legs
-const SV_PAUSE_MAX := 4.5
-# Alerted survivors only know where you were when they last saw or heard you. Out of
-# sight they head there, search around it, and give up after SV_FORGET seconds.
-const SV_FORGET := 12.0        # seconds without seeing/hearing you before they stand down
-const SV_SEARCH_R := 5.0       # search radius around your last known spot, tiles
-# When the alarm goes up, the ones waiting indoors come out unaware of exactly where you
-# are and sweep toward where you were, then patrol that area.
-const SV_ALARM_R := 1500.0     # a survivor spotting you sends everyone within this many px (of them) searching
-const SV_SWEEP_SPREAD := 6.0   # how far off your actual position they aim, tiles
-const SV_SWEEP_SPD := 0.6      # sweep walking speed, fraction of 85 px/s
-const SV_SWEEP_R := 7.0        # patrol radius once they get there, tiles
-# On first spotting you (since they last stood down) a survivor stops, turns on you and
-# yells before opening fire. The yell is noise like a gunshot (revolver = 2.5).
-const SV_YELL_MIN := 0.7       # seconds between the yell and their first shot
-const SV_YELL_MAX := 1.0
-const SV_YELL_NOISE := 3.0
-# Armed survivors' guns. Chance of each weapon ~ exp(-price / (SV_GUN_BASE + SV_GUN_STEP x danger)):
-# cheaper guns are always more common (scarcity), but dearer ones show up more where danger is high.
-const SV_GUN_BASE := 300.0
-const SV_GUN_STEP := 250.0
-const SV_DMG_REF := 30.0
-# Flight: automatic help on the runway (keeps you on the centreline during the takeoff and
-# landing roll) and on approach (steers you onto the runway and works the throttle).
-# Off for now; the approach guides on screen are still drawn. Set true to turn it back on.
-const LANDING_ASSIST := false
 
-# Rescue survivor (pickup missions)
-const NPC_GUNS := [0, 1, 2, 5]    # revolver, pump shotgun, lever rifle, double-barrel
-const NPC_DMG := 0.7              # their shots do this fraction of the gun's normal damage
-const NPC_FIRE_WINDOW := 8.0      # they keep shooting this long after your last loud shot
-const NPC_RANGE := 380.0          # how far they'll engage
-const SV_GUN_DROP := 0.15     # chance a killed survivor also drops their gun
-# Survivor body armour: chance by danger (index = danger), and how much it holds. Like
-# the player's armour, it soaks up half of each hit until it's used up.
-const SV_ARMOR_CHANCE := [0.0, 0.05, 0.15, 0.25, 0.35, 0.45]
-const SV_ARMOR := 50.0      # survivor bullet damage scales with gun damage / this (revolver = 1x)
 # Screamers: must see you (clear line of sight) within SCREAM_RANGE px, roughly facing you
 # (within SCREAM_CONE degrees), for SCREAM_WINDUP seconds straight before they scream.
 # They stop and snarl while winding up; break line of sight or kill them to stop it.
@@ -73,25 +36,16 @@ const SCREAM_RANGE := 300.0
 const SCREAM_CONE := 70.0
 const SCREAM_WINDUP := 1.0
 const ADS_AUTO_SPREAD := 0.5  # automatic weapons' bullet spread multiplier while aiming
-# Cars on the ground (exploration mode). Any bullet that hits one, and any blast that
-# reaches it, takes hitpoints off. Somewhere between CAR_SMOKE_MIN and CAR_SMOKE_MAX of its
-# hitpoints gone (picked per car) it starts smoking; at 0 it catches fire and blows up after
-# a random CAR_FUSE_MIN to CAR_FUSE_MAX seconds. Smoke, fire and the blast all come from one end of the
-# car (the middle of its front or rear third, picked per car). The burnt-out wreck stays put and still blocks.
-# For scale: revolver 30 a shot, lever rifle 95, a red barrel up close 160.
-const CAR_HP := 600.0
-const CAR_SMOKE_MIN := 0.6
-const CAR_SMOKE_MAX := 0.8
-const CAR_FUSE_MIN := 4.0
-const CAR_FUSE_MAX := 10.0
-const CAR_BLAST_R := 260.0       # px (a red barrel is 130)
-const CAR_BLAST_DMG := 320.0     # to zombies and survivors at the centre (a barrel does 160)
-const CAR_BLAST_PDMG := 90.0     # to you at the centre, plus 15 anywhere in range (a barrel: 40 + 8)
-const CAR_BLAST_NOISE := 40.0    # added to the noise meter (a barrel adds 18)
-const CAR_SCORCH_R := 44.0       # scorch mark left on the ground, px (a barrel's is 62)
-const CAR_SCORCH_A := 0.4        # and how dark at the centre (a barrel's is 0.75)
-const CAR_SMOLDER := 30.0        # seconds the wreck's smoke plume rises afterwards, thinning out
-const ADS_RATE := 4.0     # ease speed in/out (higher = snappier)
+# When a person (you, an armed survivor, the rescue survivor) is hurt but not killed, a
+# short spray of blood flies off away from whatever hit them, like the sparks off a wall,
+# in the same dark red as the blood left on the ground.
+const HIT_SPRAY_N := 3.5         # particles per hit, on average (2 or 3)
+const HIT_SPRAY_SZ := 3.0        # particle size (wall sparks are 3)
+const HIT_SPRAY_SPREAD := 0.45   # half-width of the spray cone, radians
+const HIT_SPRAY_MIN := 60.0      # particle speed range, px/s
+const HIT_SPRAY_MAX := 170.0
+const ADS_RATE := 2.0     # ease speed in/out (higher = snappier); 2.0 = half a second each way
+const BOLT_SNEAK_MULT := 2.0   # aimed crossbow damage multiplier on a hostile survivor who isn't alerted yet
 const CAM_EDGE := 60.0    # player always stays at least this many screen px from the view's edge
 const CAM_TOP := 140.0    # ...and this far from the top (clears the status panel)
 
@@ -99,15 +53,6 @@ const CAM_TOP := 140.0    # ...and this far from the top (clears the status pane
 # Keep below the 24px bite range so they can still reach you.
 const Z_BODY := 20.0
 
-# display settings — camera zoom, interface size, window
-const SETTINGS_PATH := "user://settings.cfg"
-const ZOOM_MIN := 0.6
-const ZOOM_MAX := 3.0
-const ZOOM_STEP := 1.15
-const UI_MIN := 0.6
-const UI_MAX := 2.5
-const UI_STEP := 0.1
-const WIN_SIZES := [Vector2i(1280, 800), Vector2i(1600, 900), Vector2i(1920, 1080), Vector2i(2560, 1440), Vector2i(3840, 2160)]
 var zoom := 1.0          # world camera zoom multiplier (1 = default framing)
 var ui_scale := 1.0      # interface size multiplier on top of automatic window scaling
 var fullscreen := false
@@ -117,6 +62,11 @@ var wd := World.new()
 var baker: Baker
 var synth: Synth
 var ui: UI
+# Systems split out of this script; each keeps a reference back to the game (gm).
+var survivors := Survivors.new(self)
+var blasts := Blasts.new(self)
+var flight := Flight.new(self)
+var menu := Menu.new(self)
 var layers: Array = []
 var dark_rect: ColorRect
 var dark_mat: ShaderMaterial
@@ -205,10 +155,10 @@ func _ready() -> void:
 	ui.game = self
 	add_child(ui)
 	get_viewport().size_changed.connect(_resize)
-	load_settings()
+	menu.load_settings()
 	_resize()
 	# world + textures
-	var sv = load_save()
+	var sv = menu.load_save()
 	wd.PAD = OCEAN_PAD
 	wd.gen_world(int(sv.seed) if sv else randi() % 1000000000)
 	baker.set_world(wd)
@@ -217,7 +167,7 @@ func _ready() -> void:
 	var st: Dictionary = wd.strips[wd.START]
 	demo = {"x": st.x, "y": st.y, "h": -0.6}
 	ready_done = true
-	show_title()
+	menu.show_title()
 	synth.warm()
 
 func _resize() -> void:
@@ -240,80 +190,6 @@ func new_state(seed_v: int) -> Dictionary:
 		"band": 3, "parts": 1, "bombs": 1, "diff": 1, "armor": 0.0, "goods": {}, "rings": [], "trinkets": [], "carried": 0.0, "ammo": 70, "med": 2, "hp": 100.0,
 		"weapons": [0], "weapon": 0, "contracts": [], "known": [], "strip": wd.START, "looted": {}, "offers": [], "nav": -1, "visits": {}, "mayday": null,
 		"stats": {"flights": 0, "deliv": 0, "kills": 0, "dist": 0.0}}
-
-func save_game() -> bool:
-	if G == null: return true
-	G.known = known.keys()
-	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
-	if f == null: return false
-	f.store_string(JSON.stringify(G))
-	f.flush()
-	var ok := f.get_error() == OK
-	f.close()
-	return ok
-
-func quit_to_desktop(save_progress: bool) -> void:
-	if save_progress and not save_game():
-		toast("Could not save your game. Please try again.", "bad")
-		return
-	get_tree().quit()
-
-func load_save():
-	if not FileAccess.file_exists(SAVE_PATH): return null
-	var f := FileAccess.open(SAVE_PATH, FileAccess.READ)
-	if f == null: return null
-	var d = JSON.parse_string(f.get_as_text())
-	if not (d is Dictionary): return null
-	if not save_fits(d): return null
-	return d
-
-## Saves record the land size they were made with (older saves have none = 30,000).
-## A save from a different land size describes a different map, so it can't be resumed.
-func save_fits(d: Dictionary) -> bool:
-	return absf(float(d.get("world", 30000.0)) - WORLD) < 1.0
-
-## True when there's a save file that can't be used with the current land size.
-func old_save_exists() -> bool:
-	if not FileAccess.file_exists(SAVE_PATH): return false
-	var f := FileAccess.open(SAVE_PATH, FileAccess.READ)
-	if f == null: return false
-	var d = JSON.parse_string(f.get_as_text())
-	return d is Dictionary and not save_fits(d)
-
-func clear_save() -> void:
-	if FileAccess.file_exists(SAVE_PATH): DirAccess.remove_absolute(ProjectSettings.globalize_path(SAVE_PATH))
-
-func checkpoint() -> void:
-	G.known = known.keys()
-	CP = JSON.stringify(G)
-	save_game()
-
-## JSON turns ints into floats; put integer fields back.
-func normalize(st: Dictionary) -> Dictionary:
-	for k in ["seed", "cash", "plane", "tanks", "engine", "band", "parts", "bombs", "diff", "ammo", "med", "weapon", "strip", "nav"]:
-		if st.has(k) and st[k] != null: st[k] = int(st[k])
-	var ws: Array = []
-	for w in st.get("weapons", [0]): ws.append(int(w))
-	st.weapons = ws
-	for arr in [st.get("contracts", []), st.get("offers", [])]:
-		for c in arr:
-			for k in ["dest", "pickup", "reward"]:
-				if c.has(k): c[k] = int(c[k])
-	for k in st.get("goods", {}).keys(): st.goods[k] = int(st.goods[k])
-	if st.get("mayday") is Dictionary:
-		st.mayday.id = int(st.mayday.id); st.mayday.reward = int(st.mayday.reward)
-	var stt: Dictionary = st.get("stats", {})
-	for k in ["flights", "deliv", "kills"]: stt[k] = int(stt.get(k, 0))
-	stt["dist"] = float(stt.get("dist", 0))
-	st.stats = stt
-	# older saves may have more tank upgrades than the plane now allows
-	if st.has("plane") and st.has("tanks"):
-		var pi := clampi(int(st.plane), 0, D.PLANES.size() - 1)
-		st.tanks = mini(int(st.tanks), int(D.PLANES[pi].tankMax))
-		if st.has("fuel"):
-			var fcap: float = D.PLANES[pi].fuel + st.tanks * D.PLANES[pi].tankStep
-			st.fuel = minf(float(st.fuel), fcap)
-	return st
 
 func PS() -> Dictionary:
 	var b: Dictionary = D.PLANES[G.plane]
@@ -338,6 +214,7 @@ func ocean_pad() -> float:
 func range_for(gal: float) -> float:
 	var P := PS()
 	return gal / (P.burn * (0.15 + 0.85 * 0.8)) * 0.8 * P.max
+
 func range_now() -> float: return range_for(G.fuel)
 func range_full() -> float: return range_for(PS().fuelCap)
 func has(id: String) -> bool: return G != null and G.trinkets.has(id)
@@ -347,7 +224,8 @@ func strip(i: int) -> Dictionary: return wd.strips[i]
 func toast(msg: String, cls: String = "") -> void: ui.toast(msg, cls)
 func toast_later(t: float, msg: String, cls: String = "") -> void:
 	get_tree().create_timer(t).timeout.connect(func(): toast(msg, cls))
-func sfx(k: String, v: float = -1.0) -> void: synth.sfx(k, v)
+
+func sfx(k: String, v: float = -1.0, pitch: float = 1.0) -> void: synth.sfx(k, v, pitch)
 func cap(s: String) -> String: return s.substr(0, 1).to_upper() + s.substr(1)
 
 func dark() -> float:
@@ -357,9 +235,11 @@ func dark() -> float:
 	if h >= 18 and h < 20: return (h - 18) / 2.0
 	if h >= 5 and h < 7: return 1.0 - (h - 5) / 2.0
 	return 1.0
+
 func clock() -> String:
 	var m := int(floor(G.time)) % 1440
 	return U.pad2(m / 60) + ":" + U.pad2(m % 60)
+
 func day() -> int: return int(floor(G.time / 1440.0)) + 1
 
 # ======================================================================
@@ -371,16 +251,16 @@ func key(k: Key) -> bool:
 func _input(e: InputEvent) -> void:
 	# Escape leaves fullscreen before any menu or gameplay handles the key.
 	if fullscreen and e is InputEventKey and e.pressed and not e.echo and e.physical_keycode == KEY_ESCAPE:
-		set_fullscreen(false)
+		menu.set_fullscreen(false)
 		if ui: ui.refresh_settings()
 		get_viewport().set_input_as_handled()
 
 func _unhandled_input(e: InputEvent) -> void:
 	if not ready_done: return
-	if display_input(e): return
+	if menu.display_input(e): return
 	if e is InputEventKey and e.pressed and not e.echo:
 		var c: int = e.physical_keycode
-		if c == KEY_C and mode == "flight" and F and uist == "" and cruise_ok(): F.cruise = not F.cruise
+		if c == KEY_C and mode == "flight" and F and uist == "" and flight.cruise_ok(): F.cruise = not F.cruise
 		if c == KEY_M and (mode == "flight" or mode == "ground") and (uist == "" or uist == "map"): ui.toggle_map()
 		if (c == KEY_ESCAPE or c == KEY_P) and (mode == "flight" or mode == "ground"):
 			if uist == "": ui.open_pause()
@@ -538,10 +418,10 @@ func _process(delta: float) -> void:
 	if ads and not (mode == "ground" and S): set_ads(false)
 	if mode == "flight" and F:
 		if uist == "":
-			var n := 3 if (F.cruise and cruise_ok()) else 1
+			var n := 3 if (F.cruise and flight.cruise_ok()) else 1
 			var k := 0
 			while k < n and F and uist == "" and mode == "flight":
-				upd_flight(dt)
+				flight.upd_flight(dt)
 				k += 1
 	elif mode == "ground" and S:
 		set_ads(uist == "" and Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT))
@@ -582,433 +462,6 @@ func draw_layer(idx: int, p: Pen) -> void:
 		p.rect(0, 0, Wv, Hv, U.hx("#2c4c58"))
 
 # ======================================================================
-# flight
-# ======================================================================
-func cruise_ok() -> bool:
-	return F != null and not F.onGround and not F.crashed and F.alt > 45 and F.storm < 0.05 and F.underFire <= 0 and G.fuel > 0
-
-func takeoff() -> void:
-	sat = 0.84; con = 1.07
-	var s := strip(G.strip)
-	var a: float = s.ang + (0.0 if randf() < 0.5 else PI)
-	var wa := randf() * TAU
-	var ws := randf() * 22
-	F = {"x": s.x - cos(a) * (s.len / 2 - 30), "y": s.y - sin(a) * (s.len / 2 - 30), "hdg": a, "spd": 0.0, "alt": 0.0, "vs": 0.0, "thr": 0.0, "onGround": true, "departing": true,
-		"rollStrip": s, "bank": 0.0, "prop": 0.0, "storm": 0.0, "tb": 0.0, "tracers": [], "underFire": 0.0, "flash": 0.0, "gx": 0.0, "gy": 0.0, "gfT": 0.0,
-		"wind": Vector2(cos(wa) * ws, sin(wa) * ws), "trk": a, "cruise": false, "crashed": false, "assist": false, "inStorm": false, "warnedFire": false, "evT": 60 + randf() * 50, "autothr": false}
-	mode = "flight"
-	_free_site()
-	ui.close_ui()
-	cam_snap = true
-	clear_input()
-	checkpoint()
-	toast("Throttle up to take off. Keep it on the runway.")
-
-func _thr_touch() -> bool:
-	return key(KEY_W) or key(KEY_S) or key(KEY_UP) or key(KEY_DOWN) or (ptrs.has(0) and ptrs[0].role == "thr")
-
-func upd_flight(dt: float) -> void:
-	G.time += dt
-	var P := PS()
-	var steer := 0.0
-	if key(KEY_A) or key(KEY_LEFT): steer -= 1
-	if key(KEY_D) or key(KEY_RIGHT): steer += 1
-	for p in ptrs.values():
-		if p.role == "steer": steer += clampf((p.x - p.sx) / 70.0, -1, 1)
-	steer = clampf(steer, -1, 1)
-	F.assist = false
-	if LANDING_ASSIST and F.onGround and F.rollStrip and absf(steer) < 0.05 and F.spd > 3:
-		var rs: Dictionary = F.rollStrip
-		var dir: float = rs.ang if absf(U.ang_diff(rs.ang, F.hdg)) < PI / 2 else rs.ang + PI
-		var lat: float = -(F.x - rs.x) * sin(dir) + (F.y - rs.y) * cos(dir)
-		steer = clampf(U.ang_diff(dir, F.hdg) * 3 - lat * 0.02, -1, 1)
-	if LANDING_ASSIST and not F.onGround and F.alt < 70 and absf(steer) < 0.05:
-		var best = null
-		var bd := 2600.0
-		for s in wd.strips:
-			if not known.has(s.id) or s.type == "road": continue
-			var d := Vector2(s.x - F.x, s.y - F.y).length()
-			if d < bd:
-				bd = d
-				best = s
-		if best:
-			var dir: float = best.ang if absf(U.ang_diff(best.ang, F.hdg)) < PI / 2 else best.ang + PI
-			var cx := cos(dir)
-			var cy := sin(dir)
-			var rx: float = F.x - best.x
-			var ry2: float = F.y - best.y
-			var along := rx * cx + ry2 * cy
-			var lat0 := -rx * cy + ry2 * cx
-			if along < best.len / 2 - 40 and along > -2600 and absf(lat0) < 450:
-				var la := clampf(-along * 0.35, 260, 700)
-				var tx: float = best.x + cx * (along + la)
-				var ty: float = best.y + cy * (along + la)
-				var des := atan2(ty - F.y, tx - F.x)
-				var df := U.ang_diff(des, F.trk)
-				if absf(U.ang_diff(des, F.hdg)) < 0.9:
-					steer = clampf(df * 2.6, -0.9, 0.9)
-					F.assist = true
-					if not _thr_touch() and F.thr <= 0.75 and along > -2200:
-						var pt = predict_touchdown()
-						var pa: float = ((pt.x - best.x) * cx + (pt.y - best.y) * cy) if pt else 1e9
-						var tgt: float = -best.len / 2 + best.len * 0.22
-						if pa < tgt - 50: F.thr = minf(0.72, F.thr + 0.9 * dt)
-						elif pa > tgt + 50: F.thr = maxf(0.08, F.thr - 0.6 * dt)
-						F.autothr = true
-	if key(KEY_W) or key(KEY_UP): F.thr = minf(1, F.thr + 0.55 * dt)
-	if key(KEY_S) or key(KEY_DOWN): F.thr = maxf(0, F.thr - 0.55 * dt)
-	var eff: float = F.thr if G.fuel > 0 else 0.0
-	if G.fuel > 0: G.fuel = maxf(0, G.fuel - P.burn * (0.15 + 0.85 * F.thr) * dt)
-	var target: float = eff * P.max
-	if F.onGround:
-		if target > F.spd: F.spd += (target - F.spd) * 0.25 * dt
-		else: F.spd = maxf(target, F.spd - (38.0 if eff < 0.08 else 14.0) * dt)
-	else:
-		F.spd += (target - F.spd) * (0.28 if target > F.spd else 0.3) * dt
-	var turnK: float = clampf(F.spd / 30.0, 0, 1) * 0.7 if F.onGround else 1.0
-	F.bank = lerpf(F.bank, 0.0 if F.onGround else steer, minf(1, dt * 4))
-	F.hdg += steer * P.turn * turnK * dt
-	F.prop += dt * (eff * 40 + 2)
-	var altT := clampf((F.spd - P.stall) / (P.cruise - P.stall) * 100, -80, 120)
-	if F.onGround:
-		F.alt = 0.0; F.vs = 0.0
-		if altT > 3:
-			F.onGround = false; F.alt = 0.3; F.rollStrip = null; F.departing = false
-			G.stats.flights += 1
-			toast("Airborne.")
-	else:
-		F.vs = maxf(clampf((altT - F.alt) * 1.3, -48, 22), -(5 + F.alt * 0.55))
-		F.alt += F.vs * dt
-		if F.alt <= 0:
-			touchdown(P)
-			if uist != "" or F == null or mode != "flight": return
-	if G.leak > 0 and G.fuel > 0: G.fuel = maxf(0, G.fuel - G.leak * dt)
-	var st := wd.storm_at(F.x, F.y)
-	F.storm = 0.0 if F.onGround else st.k
-	F.gx = 0.0; F.gy = 0.0
-	if F.storm > 0:
-		var k: float = F.storm
-		if not F.inStorm and k > 0.03: toast("Flying into weather. Hold on.", "bad")
-		F.inStorm = true
-		F.tb = lerpf(F.tb, (randf() - 0.5) * 2, minf(1, dt * 3))
-		F.hdg += F.tb * k * 0.9 * dt
-		F.alt += (randf() - 0.5) * k * 70 * dt
-		F.spd = maxf(0, F.spd + (randf() - 0.5) * k * 30 * dt)
-		var bp: Vector2 = st.best.p
-		var ta := atan2(F.y - bp.y, F.x - bp.x) + PI / 2
-		var gu := 48 * k * (0.6 + 0.4 * sin(T * 1.7))
-		F.gx = cos(ta) * gu; F.gy = sin(ta) * gu
-		if k > 0.55: G.hull -= (k - 0.55) * 14 * dt
-		if randf() < k * dt * 0.5:
-			F.flash = 0.25
-			sfx("thunder")
-			if k > 0.4 and randf() < 0.18:
-				G.hull -= 10
-				toast("Lightning strike.", "bad")
-	elif F.storm <= 0:
-		F.inStorm = false
-	F.flash -= dt
-	F.underFire -= dt
-	F.gfT -= dt
-	if F.gfT <= 0 and not F.onGround:
-		F.gfT = 0.45
-		var tt := wd.terr(F.x, F.y)
-		if F.alt < 45 and (tt == 9 or tt == 10) and randf() < 0.5:
-			var a := randf() * TAU
-			var rr2 := 150 + randf() * 250
-			var hit: bool = randf() < 0.35 * (1 - F.alt / 60.0)
-			F.tracers.append({"x": F.x + cos(a) * rr2, "y": F.y + sin(a) * rr2, "tx": F.x + (0.0 if hit else (randf() - 0.5) * 140), "ty": F.y + (0.0 if hit else (randf() - 0.5) * 140), "life": 0.35})
-			sfx("enemy")
-			F.underFire = 1.5
-			if not F.warnedFire:
-				F.warnedFire = true
-				toast("Ground fire. Climb out of range.", "bad")
-			if hit:
-				G.hull -= 4 + randf() * 5
-				if randf() < 0.3:
-					G.leak += 0.03
-					toast("Fuel leak.", "bad")
-	var i: int = F.tracers.size() - 1
-	while i >= 0:
-		F.tracers[i].life -= dt
-		if F.tracers[i].life <= 0: F.tracers.remove_at(i)
-		i -= 1
-	if G.hull <= 0:
-		G.hull = 0.0
-		die("breakup")
-		return
-	var dx: float = cos(F.hdg) * F.spd * dt
-	var dy: float = sin(F.hdg) * F.spd * dt
-	if not F.onGround:
-		dx += (F.wind.x + F.gx) * dt
-		dy += (F.wind.y + F.gy) * dt
-	if dx != 0 or dy != 0: F.trk = atan2(dy, dx)
-	F.x += dx; F.y += dy
-	G.stats.dist += Vector2(dx, dy).length()
-	var lo := -OCEAN_PAD
-	var hi := WORLD + OCEAN_PAD
-	if F.x < lo or F.y < lo or F.x > hi or F.y > hi:
-		F.x = clampf(F.x, lo, hi); F.y = clampf(F.y, lo, hi)
-		var toC := atan2(WORLD / 2 - F.y, WORLD / 2 - F.x)
-		F.hdg += U.ang_diff(toC, F.hdg) * dt * 2
-	if F.onGround:
-		var s = F.rollStrip if F.rollStrip else wd.strip_at(F.x, F.y, 0)
-		var on: bool = s != null and wd.on_runway(s, F.x, F.y, 1.5)
-		if not on and F.spd > 24:
-			die("loop")
-			return
-		if not F.departing and F.spd < 2.5 and eff < 0.1:
-			var near = s if s else wd.nearest_strip(F.x, F.y, 500)
-			if near:
-				arrive(near)
-				return
-	if not F.onGround:
-		F.evT -= dt
-		if F.evT <= 0 and G.mayday == null:
-			F.evT = 100 + randf() * 80
-			var rn := range_now()
-			var cand := wd.strips.filter(func(s):
-				var d := Vector2(s.x - F.x, s.y - F.y).length()
-				return s.type != "haven" and s.type != "road" and not s.get("hostile", false) and s.id != G.strip and d > 1200 and d < minf(5500, rn * 0.9))
-			if cand.size():
-				var s: Dictionary = cand[randi() % cand.size()]
-				known[s.id] = true
-				var d := Vector2(s.x - F.x, s.y - F.y).length()
-				G.mayday = {"id": s.id, "until": G.time + d / 100 * 2.2 + 40, "reward": int(round((150 + d / 100 * 6) / 5.0)) * 5}
-				sfx("rare")
-				toast("Radio: \"Mayday, mayday. We are pinned down at %s. Anyone out there?\" Land within %d minutes for $%d." % [s.name, int(round(G.mayday.until - G.time)), G.mayday.reward], "mag")
-	if G.mayday and G.time > G.mayday.until:
-		toast("The mayday has gone silent.", "bad")
-		G.mayday = null
-	discT -= dt
-	if discT <= 0:
-		discT = 0.5
-		for s in wd.strips:
-			if not known.has(s.id) and Vector2(s.x - F.x, s.y - F.y).length() < 2200:
-				known[s.id] = true
-				toast("Runway lights on the coast. Haven is real." if s.type == "haven" else ("Spotted a field: " + s.name + (". Armed survivors hold it." if s.get("hostile", false) else "")), "mag")
-
-func align_to(sang: float, a: float) -> bool:
-	var d := fmod(fmod(a - sang, PI) + PI, PI)
-	d = minf(d, PI - d)
-	return d < 0.6
-func align_ok(s: Dictionary) -> bool:
-	return align_to(s.ang, F.hdg if F.onGround else F.trk)
-
-func approach_info():
-	if F == null or F.onGround or F.alt < 4: return null
-	var best = null
-	var nt = nav_target()
-	# GDScript lambdas cannot reassign captured locals, so collect via a holder
-	var holder := [null]
-	var cand2 := func(s):
-		if s == null or not known.has(s.id) or s.type == "road": return
-		var d := Vector2(s.x - F.x, s.y - F.y).length()
-		if d > 7000: return
-		var dir: float = s.ang if absf(U.ang_diff(s.ang, F.hdg)) < PI / 2 else s.ang + PI
-		var cx := cos(dir)
-		var cy := sin(dir)
-		var rx: float = F.x - s.x
-		var ry: float = F.y - s.y
-		var along := rx * cx + ry * cy
-		var lat := -rx * cy + ry * cx
-		if along > s.len / 2 or absf(lat) > 700 or absf(U.ang_diff(atan2(s.y - F.y, s.x - F.x), F.hdg)) > 1.1: return
-		var td: float = -s.len / 2 + s.len * 0.22 - along
-		if holder[0] == null or td < holder[0].td:
-			holder[0] = {"s": s, "dir": dir, "cx": cx, "cy": cy, "along": along, "lat": lat, "td": td}
-	cand2.call(nt)
-	cand2.call(mayday_target())
-	if holder[0] == null:
-		for s in wd.strips: cand2.call(s)
-	best = holder[0]
-	if best == null: return null
-	var p1 = predict_touchdown(0.33)
-	var p0 = predict_touchdown(0.0)
-	if p1 == null: return null
-	var Dd := Vector2(p1.x - F.x, p1.y - F.y).length()
-	var D0 := Vector2(p0.x - F.x, p0.y - F.y).length() if p0 else Dd
-	var slack: float = best.td - Dd
-	best.D = Dd
-	best.slack = slack
-	best.canMake = D0 < best.td + best.s.len * 0.7
-	best.px = best.s.x + best.cx * (-best.s.len / 2 + best.s.len * 0.22) - best.cx * Dd
-	best.py = best.s.y + best.cy * (-best.s.len / 2 + best.s.len * 0.22) - best.cy * Dd
-	best.phase = "early" if slack > 220 else ("now" if slack >= -220 else ("late" if best.canMake else "high"))
-	return best
-
-func predict_touchdown(thrO: float = -1.0):
-	var P := PS()
-	var x: float = F.x
-	var y: float = F.y
-	var spd: float = F.spd
-	var alt: float = F.alt
-	var vs := 0.0
-	var tg: float = ((F.thr if thrO < 0 else thrO) if G.fuel > 0 else 0.0) * P.max
-	var c := cos(F.hdg)
-	var n := sin(F.hdg)
-	var wx: float = F.wind.x
-	var wy: float = F.wind.y
-	var st: float = P.stall
-	var cr: float = P.cruise
-	for i in 450:
-		var dt := 0.1
-		spd += (tg - spd) * (0.28 if tg > spd else 0.3) * dt
-		var altT := clampf((spd - st) / (cr - st) * 100, -80, 120)
-		vs = maxf(clampf((altT - alt) * 1.3, -48, 22), -(5 + alt * 0.55))
-		alt += vs * dt
-		x += c * spd * dt + wx * dt
-		y += n * spd * dt + wy * dt
-		if alt <= 0: return {"x": x, "y": y, "vs": vs, "t": i * dt}
-	return null
-
-func touchdown(P: Dictionary) -> void:
-	var vs: float = F.vs
-	F.alt = 0.0
-	var s = wd.strip_at(F.x, F.y, 1.7)
-	var firm := func():
-		if vs < -6:
-			G.hull = maxf(1, G.hull - round((-vs - 6) * 2.5))
-			toast("Firm touchdown. The airframe felt that.", "bad")
-	if s and vs > -19 and align_ok(s):
-		F.onGround = true; F.rollStrip = s; F.departing = false; F.vs = 0.0; F.thr = 0.0
-		sfx("thump")
-		if vs > -6: toast("Smooth touchdown.")
-		firm.call()
-		return
-	if s == null and vs > -15:
-		var rd = wd.road_at(F.x, F.y) if wd.terr(F.x, F.y) > 1 else null
-		if rd and align_to(rd.r.ang, F.trk):
-			var rs := make_road_strip(rd)
-			F.onGround = true; F.rollStrip = rs; F.departing = false; F.vs = 0.0; F.thr = 0.0
-			sfx("thump")
-			toast("Emergency landing on the road.", "mag")
-			firm.call()
-			return
-	var t := wd.terr(F.x, F.y)
-	if t <= 1:
-		die("ditch")
-		return
-	if s and vs > -15:
-		die("misalign")
-		return
-	if vs <= -15 or F.spd > P.stall * 1.1:
-		die("crash")
-		return
-	die("overrun")
-
-func make_road_strip(rd: Dictionary) -> Dictionary:
-	var r: Dictionary = rd.r
-	var cx: float = r.x1 + r.dx * rd.t
-	var cy: float = r.y1 + r.dy * rd.t
-	for s in wd.strips:
-		if s.type == "road" and Vector2(s.x - cx, s.y - cy).length() < 900: return s
-	var nb = wd.nearest_strip(cx, cy, 1e9)
-	var s := {"id": wd.strips.size(), "type": "road", "arch": "road", "name": "%s, mile %d" % [r.name, maxi(1, int(round(rd.t * r.len / 160.0)))], "x": cx, "y": cy, "ang": r.ang, "len": 640.0, "wid": 40.0,
-		"fuel": false, "shop": false, "dealer": false, "danger": clampi((nb.danger if nb else 2) + 1, 1, 5), "fuelPrice": 0, "seed": randi() % 1000000000, "home": false}
-	wd.strips.append(s)
-	G.roadStrips.append(s.duplicate())
-	known[s.id] = true
-	return s
-
-func arrive(s: Dictionary) -> void:
-	G.strip = s.id
-	known[s.id] = true
-	if s.type == "haven":
-		win()
-		return
-	var paid := 0
-	var n := 0
-	var keep: Array = []
-	for c in G.contracts:
-		if c.dest == s.id and (c.get("type", "") != "rescue" or c.get("stage", "") == "aboard"):
-			paid += int(c.reward)
-			n += 1
-		else:
-			keep.append(c)
-	G.contracts = keep
-	if s.type == "road" and int(G.visits.get(str(s.id), 0)) == 0:
-		toast_later(0.9, "No pump and no mechanic out here. Find fuel and get off this road.", "bad")
-	if G.mayday and int(G.mayday.id) == s.id:
-		var mr: int = G.mayday.reward
-		G.cash += mr; G.band += 2; G.ammo += 20; G.mayday = null
-		toast_later(0.05, "You made it in time. The survivors pay $%d and press bandages and rounds into your hands." % mr, "good")
-	if paid:
-		G.cash += paid
-		G.stats.deliv += n
-		toast("Delivered %s. Paid $%d." % [(str(n) + " loads") if n > 1 else "the load", paid], "good")
-	if G.nav == s.id: G.nav = -1
-	G.visits[str(s.id)] = int(G.visits.get(str(s.id), 0)) + 1
-	G.offers = gen_offers(s)
-	enter_ground(s)
-	checkpoint()
-
-## Your destination (course you set, or the current job). Maydays have their own marker.
-func nav_target():
-	if G.nav >= 0: return strip(G.nav)
-	if G.contracts.size(): return strip(contract_target(G.contracts[0]))
-	return null
-
-## The airfield sending an active mayday, if any (shown in red alongside your destination).
-func mayday_target():
-	if G == null or G.mayday == null: return null
-	return strip(int(G.mayday.id))
-
-# ======================================================================
-# contracts
-# ======================================================================
-func gen_offers(s: Dictionary) -> Array:
-	if s.get("hostile", false): return []
-	var R := range_full()
-	var n := 2 if s.type == "dirt" else (3 if s.type == "regional" else 4)
-	var c: Array = []
-	if s.type != "road":
-		c = wd.strips.filter(func(o):
-			if o.id == s.id or o.type == "haven" or o.type == "road" or o.get("hostile", false): return false
-			var d := Vector2(o.x - s.x, o.y - s.y).length()
-			return d > 1400 and d < R * 0.95)
-	c.shuffle()
-	var out: Array = []
-	for o in c.slice(0, n):
-		var d := Vector2(o.x - s.x, o.y - s.y).length()
-		var cg: Array = D.CARGO[randi() % D.CARGO.size()]
-		out.append({"id": U.rid(), "type": "", "dest": o.id, "icon": cg[0], "what": cg[1], "reward": int(round((70 + d / 100 * 8) * (1 + 0.15 * o.danger) * (0.85 + randf() * 0.3) / 5.0)) * 5})
-	if c.size() > n and randf() < 0.6:
-		var o: Dictionary = c[n]
-		var d := Vector2(o.x - s.x, o.y - s.y).length()
-		var who: String = D.RNAMES[randi() % D.RNAMES.size()]
-		var wk: Array = D.WHERE.keys()
-		var where: String = wk[randi() % wk.size()]
-		out.append({"id": U.rid(), "type": "rescue", "stage": "pickup", "pickup": o.id, "dest": s.id, "who": who, "where": where, "icon": "🆘", "what": who,
-			"reward": int(round((120 + d * 2 / 100 * 6) * (1 + 0.15 * o.danger) * (1.25 if has("radio") else 1.0) / 5.0)) * 5})
-	return out
-
-func contract_target(c: Dictionary) -> int:
-	return int(c.pickup) if (c.get("type", "") == "rescue" and c.get("stage", "") == "pickup") else int(c.dest)
-
-func objective() -> String:
-	if S and S.npc == null:
-		if G.contracts.size(): return "Board the plane and fly to %s." % strip(contract_target(G.contracts[0])).name
-		return "No job yet. Board the plane to see the job board."
-	if S and S.npc:
-		return ("Lead %s back to the plane." % S.npc.name) if S.npc.follow else ("Find %s in %s." % [S.npc.name, D.WHERE[S.npc.where]])
-	for k in G.contracts:
-		if k.get("type", "") == "rescue":
-			return ("Rescue %s at %s." % [k.who, strip(int(k.pickup)).name]) if k.stage == "pickup" else ("Fly %s to %s." % [k.who, strip(int(k.dest)).name])
-	if G.contracts.size():
-		var c: Dictionary = G.contracts[0]
-		return "Deliver %s to %s." % [c.what, strip(int(c.dest)).name]
-	if G.plane == 0:
-		return "You can afford a Heron. Find an airport with a dealer." if G.cash >= D.PLANES[1].price else "Take jobs and sell goods. A Heron costs $%d." % D.PLANES[1].price
-	if not known.has(0):
-		if G.rings.is_empty(): return "Find Haven. Old charts may tell you where to look."
-		return "Haven is in one of the four rings on your chart. Old charts narrow them down."
-	return "Fly to Haven."
-
-func bearing(a: Dictionary, b: Dictionary) -> String:
-	var deg := fmod(rad_to_deg(atan2(b.y - a.y, b.x - a.x)) + 90 + 360, 360)
-	return ["N", "NE", "E", "SE", "S", "SW", "W", "NW"][int(round(deg / 45.0)) % 8]
-
-# ======================================================================
 # ground: site setup
 # ======================================================================
 func _free_site() -> void:
@@ -1024,7 +477,7 @@ func gen_site(s: Dictionary) -> Dictionary:
 	site.merge({"noise": 0.0, "waves": [], "splat": [], "flick": 0.0, "hbT": 0.0, "nd": 1e9, "band": -1, "smoke": [], "swing": 0.0, "thrown": [], "crows": [], "pk": [],
 		"s": s, "pump": Vector2(plane.x + 260, (ry - 1) * TS + 14) if s.fuel else null,
 		"p": {"x": plane.x + 150, "y": plane.y - 8, "ang": 0.0, "cd": 0.0, "stam": 100.0, "jt": 0.0, "jcd": 0.0, "safe": Vector2(plane.x + 150, plane.y - 8), "jx": 0, "wk": 0.0, "sprint": false},
-		"zs": [], "sv": [], "bul": [], "drops": [], "fx": [], "fl": [], "t": 0.0, "spawnT": 5.0, "danger": s.danger, "scrN": 0,
+		"zs": [], "sv": [], "bul": [], "drops": [], "fx": [], "fl": [], "mf": [], "t": 0.0, "spawnT": 5.0, "danger": s.danger, "scrN": 0,
 		"cx": plane.x + 150, "cy": plane.y, "shake": 0.0, "flash": 0.0, "hurt": 0.0, "nearPlane": false, "scorch": [], "flow": PackedInt32Array(), "flowT": 0.0,
 		"boomFlash": 0.0, "rain": minf(1.0, wd.storm_at(s.x, s.y).k * 1.6), "npc": null, "air": false, "tSprint": false, "noAmmoT": -9.0, "flN": 0, "cawT": -9.0, "sipT": -9.0, "tkHint": false,
 		"rcx": 0.0, "rcy": 0.0, "adsK": 0.0, "cap": 0, "rooms_ra": []})
@@ -1045,7 +498,7 @@ func gen_site(s: Dictionary) -> Dictionary:
 			break
 	var first: bool = s.get("home", false) and int(G.visits.get(str(s.id), 0)) <= 1
 	S = site
-	init_cars()
+	blasts.init_cars()
 	var hostile: bool = s.get("hostile", false)
 	site.hostile = hostile
 	site.svh = []        # garrison members still inside buildings
@@ -1078,7 +531,7 @@ func gen_site(s: Dictionary) -> Dictionary:
 			stamp_corpse({"x": x, "y": y, "a": randf() * TAU, "shirt": D.ZSHIRT[randi() % D.ZSHIRT.size()], "skin": "#8c9a78" if randf() < 1.0 / 6.0 else D.sv_skin()})
 			break
 	if hostile:
-		spawn_garrison(site)
+		survivors.spawn_garrison(site)
 	elif not first and randf() < 0.2 + 0.08 * s.danger + (0.25 if site.arch == "military" else 0.0) and site.rooms.size():
 		var n := 1 + int(randf() * mini(3, s.danger))
 		for i in n:
@@ -1086,280 +539,13 @@ func gen_site(s: Dictionary) -> Dictionary:
 			var x: float = (o.c + 1.5 + randf() * (o.w - 3)) * TS
 			var y: float = (o.r + 1.5 + randf() * (o.h - 3)) * TS
 			if Vector2(x - site.p.x, y - site.p.y).length() > 320 and not solid(x, y):
-				site.sv.append(new_sv(x, y))
+				site.sv.append(survivors.new_sv(x, y))
 	return site
-
-## Pick a gun for an armed survivor at this danger level (index into D.WEAPONS).
-func pick_sv_weapon(danger: int) -> int:
-	var sc := SV_GUN_BASE + SV_GUN_STEP * maxi(1, danger)
-	var ws: Array = []
-	var tot := 0.0
-	for w in D.WEAPONS:
-		var x := exp(-float(w.price) / sc)
-		ws.append(x)
-		tot += x
-	var r := randf() * tot
-	for i in ws.size():
-		r -= ws[i]
-		if r <= 0: return i
-	return 0
-
-## One armed survivor.
-func new_sv(x: float, y: float) -> Dictionary:
-	var dg: int = int(S.danger) if S else 1
-	var arm: float = SV_ARMOR if randf() < float(SV_ARMOR_CHANCE[clampi(dg, 0, SV_ARMOR_CHANCE.size() - 1)]) else 0.0
-	return {"x": x, "y": y, "w": pick_sv_weapon(dg), "burst": 0, "armor": arm, "shirt": ["#5a5f3a", "#4a3a2a", "#3f4f5f"][randi() % 3], "skin": D.sv_skin(),
-		"cap": "#3a3226" if randf() < 0.5 else "", "wk": 0.0, "hp": 70.0, "cd": 1 + randf(), "ang": 0.0, "alert": false, "hit": 0.0, "sw": 0.0, "sd": 1.0, "dead": false}
-
-## Unalerted survivors pace around their post: walk to a nearby spot they can see,
-## stop and look around for a few seconds, pick another. Returns a steer vector
-## (length = speed fraction of the normal 85 px/s).
-func sv_patrol_init(v: Dictionary) -> void:
-	if not v.has("hx"):
-		v.hx = v.x; v.hy = v.y
-	if not v.has("pr"):
-		v.pr = (SV_PATROL_MIN + randf() * (SV_PATROL_MAX - SV_PATROL_MIN)) * TS   # how far this one wanders
-		v.pt = randf() * 3.0   # pause timer (staggered so they don't all move at once)
-		v.go = false; v.tx = v.x; v.ty = v.y
-		v.lx = v.x; v.ly = v.y; v.stk = 0.0
-
-## Start patrolling around (x, y) with at least radius r tiles, after a short pause.
-func sv_repost(v: Dictionary, x: float, y: float, r: float) -> void:
-	sv_patrol_init(v)
-	v.hx = x; v.hy = y
-	v.pr = maxf(v.pr, r * TS)
-	v.go = false
-	v.pt = 0.3 + randf() * 1.2
-
-## A survivor hears or feels something at (x, y): alerted, and that's where they think you are.
-func sv_hear(v: Dictionary, x: float, y: float) -> void:
-	v.alert = true
-	v.lkx = x; v.lky = y
-	v.lost = 0.0
-	v.srch = false
-	v.trav = false
-
-## Could a 10px-radius body walk in a straight line from (x0, y0) to (x1, y1)? Unlike
-## los() this uses the body's width and what blocks walking, not sight: a line that only
-## grazes a wall corner fails, and so does one across a fence you can see over.
-func walk_clear(x0: float, y0: float, x1: float, y1: float) -> bool:
-	var d := Vector2(x1 - x0, y1 - y0).length()
-	var n := int(ceil(d / 8.0))
-	for i in range(1, n + 1):
-		var t := float(i) / n
-		if hit_box(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, 10): return false
-	return true
-
-## Steer toward (tx, ty): straight if the body fits along the line, otherwise along an A*
-## path round the walls (cached per survivor, recomputed when the target tile changes).
-## Both checks use walk_clear(), not los(): with the thin sight line a survivor at a
-## corner could "see" a way through, bump the corner, slide out of sight, turn back to
-## the path, and repeat every frame, flicking between two headings.
-func sv_nav(v: Dictionary, tx: float, ty: float) -> Vector2:
-	var dx: float = tx - v.x
-	var dy: float = ty - v.y
-	var dl := Vector2(dx, dy).length()
-	if dl < 1: return Vector2.ZERO
-	if walk_clear(v.x, v.y, tx, ty):
-		v.path = PackedVector2Array()
-		return Vector2(dx / dl, dy / dl)
-	var tc := Vector2i(int(floor(tx / TS)), int(floor(ty / TS)))
-	var path: PackedVector2Array = v.get("path", PackedVector2Array())
-	if path.is_empty() or v.get("ptc", Vector2i(-1, -1)) != tc:
-		path = astar_path(v.x, v.y, tc)
-		v.ptc = tc
-	while path.size() and Vector2(path[0].x - v.x, path[0].y - v.y).length() < 10: path.remove_at(0)
-	# skip ahead to the next waypoint or the one after if it can walk straight there, so
-	# a fresh path doesn't send it back to the centre of the tile it's standing in
-	for j in range(mini(path.size() - 1, 2), 0, -1):
-		if walk_clear(v.x, v.y, path[j].x, path[j].y):
-			path = path.slice(j)
-			break
-	v.path = path
-	if path.is_empty(): return Vector2(dx / dl, dy / dl)
-	var wx: float = path[0].x - v.x
-	var wy: float = path[0].y - v.y
-	var wl := Vector2(wx, wy).length()
-	if wl < 0.01: return Vector2.ZERO
-	return Vector2(wx / wl, wy / wl)
-
-## Path (tile centres, px) from (x, y) to tile tc over walkable ground; built once per site.
-func astar_path(x: float, y: float, tc: Vector2i) -> PackedVector2Array:
-	var a: AStarGrid2D = S.get("astar", null)
-	if a == null:
-		a = AStarGrid2D.new()
-		a.region = Rect2i(0, 0, S.cols, S.rows)
-		a.cell_size = Vector2(TS, TS)
-		a.offset = Vector2(TS / 2, TS / 2)
-		a.diagonal_mode = AStarGrid2D.DIAGONAL_MODE_ONLY_IF_NO_OBSTACLES
-		a.update()
-		var g: PackedByteArray = S.g
-		var cols: int = S.cols
-		for r in S.rows:
-			for c in cols:
-				if MOVE[g[r * cols + c]] == 1: a.set_point_solid(Vector2i(c, r))
-		S.astar = a
-	var fc := Vector2i(int(floor(x / TS)), int(floor(y / TS)))
-	if not a.is_in_boundsv(fc) or not a.is_in_boundsv(tc) or a.is_point_solid(tc): return PackedVector2Array()
-	return a.get_point_path(fc, tc, true)
-
-func sv_patrol(v: Dictionary, dt: float) -> Vector2:
-	sv_patrol_init(v)
-	if not v.go:
-		v.pt -= dt
-		if randf() < dt * 0.6: v.ang += (randf() - 0.5) * 2.0   # glance around while standing
-		if v.pt > 0: return Vector2.ZERO
-		for t in 8:   # a spot near the post, open ground, in a straight line from here
-			var a := randf() * TAU
-			var r: float = v.pr * (0.3 + randf() * 0.7)
-			var tx: float = v.hx + cos(a) * r
-			var ty: float = v.hy + sin(a) * r
-			if solid(tx, ty) or not los(v.x, v.y, tx, ty): continue
-			v.tx = tx; v.ty = ty; v.stk = 0.0; v.go = true
-			break
-		if not v.go:
-			v.pt = 1.0
-			return Vector2.ZERO
-	var ddx: float = v.tx - v.x
-	var ddy: float = v.ty - v.y
-	var dl := Vector2(ddx, ddy).length()
-	# arrived, or stuck against something for a while: stop and wait
-	var mv := Vector2(v.x - v.lx, v.y - v.ly).length()
-	v.lx = v.x; v.ly = v.y
-	v.stk = v.stk + dt if mv < SV_PATROL_SPD * 85.0 * dt * 0.3 else 0.0
-	if dl < 10 or v.stk > 0.8:
-		v.go = false
-		v.pt = SV_PAUSE_MIN + randf() * (SV_PAUSE_MAX - SV_PAUSE_MIN)
-		return Vector2.ZERO
-	v.ang = atan2(ddy, ddx)
-	return Vector2(ddx / dl, ddy / dl) * SV_PATROL_SPD
-
-## Is (x, y) open ground a person can stand on, away from the player's start?
-func _garrison_spot_ok(site: Dictionary, x: float, y: float) -> bool:
-	return not solid(x, y) and Vector2(x - site.p.x, y - site.p.y).length() > 450
-
-## Garrison for a survivor-held strip: a few posted outside near building doors, the
-## rest inside the buildings until someone nearby spots the player (see sv_raise()).
-func spawn_garrison(site: Dictionary) -> void:
-	var total := GARRISON_MIN + randi() % (GARRISON_MAX - GARRISON_MIN + 1)
-	var outside := mini(total, GARRISON_OUT_MIN + randi() % (GARRISON_OUT_MAX - GARRISON_OUT_MIN + 1))
-	var rooms: Array = site.rooms
-	for i in total:
-		var out_now := i < outside
-		for t in 40:
-			var x: float
-			var y: float
-			if rooms.size():
-				# the tile just outside a building's door
-				var rm: Dictionary = rooms[randi() % rooms.size()]
-				var top: bool = rm.door[2]
-				var dirn := -1.0 if top else 1.0
-				x = (rm.door[0] + 1.0) * TS
-				y = (rm.door[1] + 0.5 + dirn) * TS
-				if out_now:   # posted a little way off from the door
-					x += (randf() - 0.5) * 6.0 * TS
-					y += dirn * randf() * 3.0 * TS
-				else:         # comes out right at the door
-					x += (randf() - 0.5) * TS
-			else:
-				x = (1.5 + randf() * (site.cols - 3)) * TS
-				y = (1.5 + randf() * (site.ry - 3)) * TS
-			if not _garrison_spot_ok(site, x, y): continue
-			if out_now: site.sv.append(new_sv(x, y))
-			else: site.svh.append({"x": x, "y": y, "out": 1e9})
-			break
-
-## Garrison behaviour each frame: ones called out by sv_raise() leave their buildings
-## when their time comes and sweep toward where the player was spotted.
-func upd_garrison() -> void:
-	var i: int = S.svh.size() - 1
-	while i >= 0:
-		var h: Dictionary = S.svh[i]
-		if S.t >= h.out:
-			var v := new_sv(h.x, h.y)
-			sv_patrol_init(v)
-			sv_sweep(v, h.tx, h.ty)
-			S.sv.append(v)
-			S.svh.remove_at(i)
-		i -= 1
-
-## A survivor has just spotted the player at (px, py): everyone within SV_ALARM_R px of
-## the spotter (indoors or out) who isn't already fighting heads out to search near there.
-func sv_raise(ox: float, oy: float, px: float, py: float) -> void:
-	var doors := false
-	for h in S.svh:
-		if h.out < 1e8 or Vector2(h.x - ox, h.y - oy).length() >= SV_ALARM_R: continue
-		h.out = S.t + 1.0 + randf() * 9.0
-		h.tx = px; h.ty = py
-		doors = true
-	if doors: toast("Doors bang open. More of them are coming out of the buildings.", "bad")
-	for o in S.sv:
-		if o.dead or o.alert or Vector2(o.x - ox, o.y - oy).length() >= SV_ALARM_R: continue
-		sv_patrol_init(o)
-		sv_sweep(o, px, py)
-
-## Send a survivor (unaware of exactly where the player is) toward a random open spot
-## within SV_SWEEP_SPREAD tiles of (px, py); they patrol there once they arrive.
-func sv_sweep(v: Dictionary, px: float, py: float) -> void:
-	var spr := SV_SWEEP_SPREAD * TS
-	var sx := px
-	var sy := py
-	for t in 12:
-		var ox: float = px + (randf() - 0.5) * 2.0 * spr
-		var oy: float = py + (randf() - 0.5) * 2.0 * spr
-		if not solid(ox, oy):
-			sx = ox; sy = oy
-			break
-	v.trav = true; v.sx = sx; v.sy = sy; v.travT = 0.0
-
-## Damage to a zombie or survivor; armoured survivors soak up half of each hit
-## until their armour runs out (same rule as the player's armour).
-func dmg_enemy(e: Dictionary, d: float) -> void:
-	var ar: float = e.get("armor", 0.0)
-	if ar > 0:
-		var a := minf(ar, d * 0.5)
-		e.armor = ar - a
-		d -= a
-	e.hp -= d
-
-## A survivor fires their gun. Automatics fire short bursts; shotguns fire a spread of
-## pellets. Damage per bullet is the normal survivor damage x (gun damage / SV_DMG_REF).
-func sv_fire(v: Dictionary) -> void:
-	var w: Dictionary = D.WEAPONS[int(v.get("w", 0))]
-	var auto: bool = w.get("auto", false)
-	var dmg: float = (8 + S.danger) * DF().dmg * float(w.dmg) / SV_DMG_REF
-	var aim: float = v.ang + (randf() - 0.5) * 0.22 * (1.6 if auto and v.burst > 0 else 1.0)
-	for k in int(w.pel):
-		var a: float = aim + (randf() - 0.5) * float(w.spr) * 2.0
-		S.bul.append({"x": v.x + cos(a) * 14, "y": v.y + sin(a) * 14, "vx": cos(a) * w.spd * 0.65, "vy": sin(a) * w.spd * 0.65,
-			"life": w.life * 1.6, "dmg": dmg, "pl": false, "kb": 0.0, "bolt": w.bolt})
-	sfx("bow" if w.silent else "enemy")
-	if auto:
-		if v.burst <= 0: v.burst = 3 + randi() % 3
-		v.burst -= 1
-		if v.burst > 0:
-			v.cd = w.rate * 2.0          # next shot in the burst
-			return
-	v.cd = (0.75 + w.rate) * (1.0 + randf() * 0.6)
-
-## Reinforcement survivor arriving from the edge of the map (noise waves at held strips).
-func spawn_edge_sv() -> void:
-	for t2 in 40:
-		var side := randi() % 4
-		var c: int = 1 if side == 0 else (S.cols - 2 if side == 1 else 1 + int(randf() * (S.cols - 2)))
-		var r: int = 1 if side == 2 else (S.ry - 2 if side == 3 else 1 + int(randf() * (S.rows - 2)))
-		var x: float = (c + 0.5) * TS
-		var y: float = (r + 0.5) * TS
-		if solid(x, y) or Vector2(x - S.p.x, y - S.p.y).length() < 380: continue
-		var v := new_sv(x, y)
-		v.alert = true
-		S.sv.append(v)
-		return
 
 func enter_ground(s: Dictionary) -> void:
 	_free_site()
 	gen_site(s)
-	spawn_npc(s)
+	survivors.spawn_npc(s)
 	mode = "ground"
 	ui.close_ui()
 	clear_input()
@@ -1367,125 +553,6 @@ func enter_ground(s: Dictionary) -> void:
 	if s.get("hostile", false):
 		toast("Armed survivors hold this strip. No fuel, no trade, no jobs. Keep your head down.", "bad")
 	elif dark() > 0.5: toast("It is dark. The dead move faster at night.", "bad")
-
-func spawn_npc(s: Dictionary) -> void:
-	var c = null
-	for k in G.contracts:
-		if k.get("type", "") == "rescue" and k.stage == "pickup" and int(k.pickup) == s.id:
-			c = k
-			break
-	if c == null or S == null: return
-	var rm = null
-	for r in S.rooms:
-		if r.kind == c.where:
-			rm = r
-			break
-	if rm == null:
-		for r in S.rooms:
-			if r.kind == "house":
-				rm = r
-				break
-	if rm == null and S.rooms.size(): rm = S.rooms[S.rooms.size() - 1]
-	if rm == null: return
-	var x: float = (rm.c + rm.w / 2.0) * TS
-	var y: float = (rm.r + rm.h / 2.0) * TS
-	var q := 0
-	while q < 30 and solid(x, y):
-		x = (rm.c + 1.5 + randf() * (rm.w - 3)) * TS
-		y = (rm.r + 1.5 + randf() * (rm.h - 3)) * TS
-		q += 1
-	var where: String = c.where if rm.kind == c.where else "house"
-	S.npc = {"x": x, "y": y, "ang": PI / 2, "hp": 60.0, "name": c.who, "where": where, "cid": c.id, "follow": false, "wk": 0.0, "hit": 0.0,
-		"w": NPC_GUNS[randi() % NPC_GUNS.size()], "cd": 0.0, "fire_t": -1.0}
-	# The building they're hiding in is safe for the mission: nothing spawns in it,
-	# zombies can't walk in, and anything already inside is removed.
-	S.safe = Rect2(rm.c * TS, rm.r * TS, rm.w * TS, rm.h * TS)
-	S.zs = S.zs.filter(func(z): return not in_safe(z.x, z.y))
-	S.sv = S.sv.filter(func(v): return not in_safe(v.x, v.y))
-	toast_later(0.7, "%s is hiding in %s." % [c.who, D.WHERE[where]], "mag")
-
-## Inside the rescue survivor's hiding place (while that mission is running here)?
-func in_safe(x: float, y: float) -> bool:
-	return S != null and S.get("safe") != null and (S.safe as Rect2).has_point(Vector2(x, y))
-
-## The rescue survivor shoots back: only once they're following you, and only for a
-## while after you fire something loud (crossbow shots keep them quiet too).
-func npc_fight(n: Dictionary, dt: float) -> void:
-	if not n.follow or S.t > float(n.get("fire_t", -1.0)): return
-	n.cd = float(n.get("cd", 0.0)) - dt
-	var best = null
-	var bd := NPC_RANGE
-	for e in S.zs + S.sv:
-		if e.dead or e.get("dormant", false) or e.get("rise", 0.0) > 0: continue
-		var d := Vector2(e.x - n.x, e.y - n.y).length()
-		if d < bd and los(n.x, n.y, e.x, e.y):
-			bd = d
-			best = e
-	if best == null: return
-	var aim := atan2(best.y - n.y, best.x - n.x)
-	n.ang = aim
-	if n.cd > 0: return
-	var w: Dictionary = D.WEAPONS[int(n.w)]
-	var a0: float = aim + (randf() - 0.5) * 0.16
-	for k in int(w.pel):
-		var a: float = a0 + (randf() - 0.5) * float(w.spr) * 2.0
-		S.bul.append({"x": n.x + cos(a) * 14, "y": n.y + sin(a) * 14, "vx": cos(a) * w.spd, "vy": sin(a) * w.spd, "life": w.life,
-			"dmg": float(w.dmg) * NPC_DMG, "pl": true, "kb": float(w.kb) * 0.5, "bolt": false})
-	sfx(w.snd)
-	add_noise(float(w.noise) * 0.5)
-	n.cd = (0.75 + float(w.rate)) * (1.0 + randf() * 0.4)
-
-func npc_hurt(d: float) -> void:
-	var n = S.npc
-	if n == null: return
-	n.hp -= d
-	n.hit = 0.15
-	blood(n.x, n.y, 2)
-	if n.hp <= 0:
-		blood(n.x, n.y, 8)
-		stamp_corpse({"x": n.x, "y": n.y, "a": randf() * TAU, "shirt": "#3f7a7a", "skin": "#e0b894"})
-		G.contracts = G.contracts.filter(func(k): return k.id != n.cid)
-		toast("%s did not make it. The job is gone." % cap(n.name), "bad")
-		S.npc = null
-		S.safe = null
-
-func upd_npc(dt: float) -> void:
-	var n = S.npc
-	if n == null: return
-	var p: Dictionary = S.p
-	var dx: float = p.x - n.x
-	var dy: float = p.y - n.y
-	var d := Vector2(dx, dy).length()
-	if d == 0: d = 1
-	n.hit -= dt
-	if not n.follow and d < 70:
-		n.follow = true
-		toast("%s: \"%s\"" % [cap(n.name), D.FOUND[randi() % D.FOUND.size()]], "mag")
-		sfx("loot")
-	if n.follow and d > 44:
-		var vx := dx / d
-		var vy := dy / d
-		if d > 120 and not los(n.x, n.y, p.x, p.y):
-			var fd = flow_dir(n.x, n.y)
-			if fd:
-				vx = fd.x; vy = fd.y
-		var ox: float = n.x
-		var oy: float = n.y
-		var sp := 175.0 if d > 160 else 140.0
-		move_c(n, vx * sp * dt, vy * sp * dt, 9)
-		n.wk += Vector2(n.x - ox, n.y - oy).length() * 0.22
-		n.ang = atan2(vy, vx)
-	npc_fight(n, dt)
-	if n.follow and (Vector2(n.x - S.plane.x, n.y - S.plane.y).length() < 160 or (S.nearPlane and d < 120)):
-		for c in G.contracts:
-			if c.id == n.cid:
-				c.stage = "aboard"
-				G.nav = int(c.dest)
-				toast("%s climbs into the back. Fly them to %s." % [cap(n.name), strip(int(c.dest)).name], "good")
-				sfx("cash")
-				break
-		S.npc = null
-		S.safe = null
 
 # ======================================================================
 # ground: helpers
@@ -1504,18 +571,22 @@ func solid(x: float, y: float) -> bool:
 		if v == 10: return false
 		if v == 6 and c > 0 and r > 0 and c < S.cols - 1 and r < S.rows - 1: return false
 	return MOVE[v] == 1
+
 func solid_b(x: float, y: float) -> bool:
 	var c := int(floor(x / TS))
 	var r := int(floor(y / TS))
 	if c < 0 or r < 0 or c >= S.cols or r >= S.rows: return true
 	return BLOCK[S.g[r * S.cols + c]] == 1
+
 func hit_box(x: float, y: float, r: float) -> bool:
 	return solid(x - r, y - r) or solid(x + r, y - r) or solid(x - r, y + r) or solid(x + r, y + r)
+
 func move_c(e: Dictionary, dx: float, dy: float, r: float) -> void:
 	var nx: float = e.x + dx
 	if not hit_box(nx, e.y, r): e.x = nx
 	var ny: float = e.y + dy
 	if not hit_box(e.x, ny, r): e.y = ny
+
 ## Keeps a zombie or armed survivor from walking through the player. If its centre ends up closer
 ## than Z_BODY, it is pushed back out to the edge of the player's body (or back to
 ## where it started if a wall is in the way). Applies mid-jump too, so the player
@@ -1546,6 +617,22 @@ func los(x0: float, y0: float, x1: float, y1: float) -> bool:
 		var t := float(i) / n
 		if solid_b(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t): return false
 	return true
+
+## Could a 10px-radius body walk in a straight line from (x0, y0) to (x1, y1)? Unlike
+## los() this uses the body's width and what blocks walking, not sight: a line that only
+## grazes a wall corner fails, and so does one across a fence you can see over.
+func walk_clear(x0: float, y0: float, x1: float, y1: float) -> bool:
+	var d := Vector2(x1 - x0, y1 - y0).length()
+	var n := int(ceil(d / 8.0))
+	for i in range(1, n + 1):
+		var t := float(i) / n
+		if hit_box(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, 10): return false
+	return true
+
+## Inside the rescue survivor's hiding place (while that mission is running here)?
+func in_safe(x: float, y: float) -> bool:
+	return S != null and S.get("safe") != null and (S.safe as Rect2).has_point(Vector2(x, y))
+
 ## Would a shot fired now reach world point (tx, ty)? Drives the red dot in the
 ## exploration cursor. Mirrors shoot() and the bullet loop: same muzzle point
 ## (16px out from the player), same range (spd x life), same walls/cars (solid_b)
@@ -1573,9 +660,11 @@ func shot_reaches(tx: float, ty: float) -> bool:
 			if not br.dead and pow(br.x - q.x, 2) + pow(br.y - q.y, 2) < 150:
 				return pow(br.x - tx, 2) + pow(br.y - ty, 2) < 150
 	return true
+
 func passable(c: int, r: int) -> bool:
 	if c < 0 or r < 0 or c >= S.cols or r >= S.rows: return false
 	return MOVE[S.g[r * S.cols + c]] == 0
+
 func build_flow() -> void:
 	var cols: int = S.cols
 	var n: int = cols * S.rows
@@ -1646,16 +735,41 @@ func blood(x: float, y: float, n: int) -> void:
 	for i in n:
 		recs.append([x + (randf() - 0.5) * 18, y + (randf() - 0.5) * 18, 3 + randf() * 6])
 	S.bg.stamp(["blood", recs])
+
+## Blood spray off a person hit at (x, y), flying along dir (away from what hit them).
+func blood_spray(x: float, y: float, dir: Vector2) -> void:
+	if S == null: return
+	dir = dir.normalized() if dir.length() > 0.01 else Vector2.from_angle(randf() * TAU)
+	for n in int(HIT_SPRAY_N) + (1 if randf() < fmod(HIT_SPRAY_N, 1.0) else 0):
+		var a := dir.angle() + (randf() - 0.5) * 2.0 * HIT_SPRAY_SPREAD
+		var v := randf_range(HIT_SPRAY_MIN, HIT_SPRAY_MAX)
+		S.fx.append({"x": x + dir.x * 6, "y": y + dir.y * 6, "vx": cos(a) * v, "vy": sin(a) * v, "life": 0.22 + randf() * 0.12,
+			"c": "#5a0c08" if randf() < 0.75 else "#6e120c", "sz": HIT_SPRAY_SZ, "drag": false})
+
+## Would amt of damage leave them standing? (armour soaks half of a hit while it lasts)
+func survives(hp: float, armor: float, amt: float) -> bool:
+	return hp - (amt - minf(armor, amt * 0.5)) > 0
+
 func stamp_corpse(k: Dictionary) -> void:
 	S.bg.stamp(["corpse", k])
+
 func stamp_scorch(x: float, y: float) -> void:
 	S.bg.stamp(["scorch", x, y])
+
+## Muzzle flash from someone other than the player (survivors, your rescue): a short glow
+## at the gun drawn by render.gd, which also lights the dark at night. The player's own
+## flash is S.flash.
+func muzzle_flash(x: float, y: float, ang: float) -> void:
+	if not S.has("mf"): S.mf = []
+	S.mf.append({"x": x + cos(ang) * 22, "y": y + sin(ang) * 22, "life": 0.06})
+
 func floater(x: float, y: float, txt: String, c: String = "#efe6cf") -> void:
 	S.fl.append({"x": x, "y": y, "txt": txt, "c": c, "life": 1.4})
 
 func ground_scale() -> float:
 	var gs := clampf(sqrt(Wv * Hv) / 600.0, 0.72, 1.6)
 	return gs * zoom * (1.0 + ADS_ZOOM * ads_ease())
+
 func s2w_g(x: float, y: float) -> Vector2:
 	var gs := ground_scale()
 	return Vector2((x - Wv / 2) / gs + S.cx, (y - Hv / 2) / gs + S.cy)
@@ -1739,10 +853,37 @@ func toxic(e: Dictionary) -> void:
 				G.stats.kills += 1
 	if S.npc:
 		var d := Vector2(S.npc.x - e.x, S.npc.y - e.y).length()
-		if d < 95: npc_hurt(18)
+		if d < 95: survivors.npc_hurt(18, Vector2(S.npc.x - e.x, S.npc.y - e.y))
 	if S == null: return
 	var pd := Vector2(S.p.x - e.x, S.p.y - e.y).length()
-	if pd < 95: hurt(22 * (1 - pd / 95) + 6, "gas")
+	if pd < 95:
+		hurt(22 * (1 - pd / 95) + 6, "gas")
+		if S and uist == "": blood_spray(S.p.x, S.p.y, Vector2(S.p.x - e.x, S.p.y - e.y))
+
+## Damage to a zombie or survivor; armoured survivors soak up half of each hit
+## until their armour runs out (same rule as the player's armour).
+func dmg_enemy(e: Dictionary, d: float) -> void:
+	var ar: float = e.get("armor", 0.0)
+	if ar > 0:
+		var a := minf(ar, d * 0.5)
+		e.armor = ar - a
+		d -= a
+	e.hp -= d
+
+## A survivor (hostile or your rescue) hurt by a bullet, melee or gas sometimes cries out:
+## the same "Aagh!" as when a blast throws them, quieter the further away they are. Called
+## after the damage is taken; a hit that kills makes no cry. Blasts play their own cries
+## (Blasts.BLAST_CRY_MAX), so blast damage doesn't call this.
+const HURT_CRY_CHANCE := 0.6
+func hurt_cry(e: Dictionary) -> void:
+	if e.hp <= 0 or randf() >= HURT_CRY_CHANCE: return
+	var d := Vector2(e.x - S.p.x, e.y - S.p.y).length()
+	sfx("cry", 0.14 * (1.0 - 0.6 * minf(1.0, d / 900.0)), e.get("voice", 1.0))
+
+## A survivor killed before they knew you were there (not alerted) lets out a short "Ugh!".
+func death_ugh(e: Dictionary) -> void:
+	var d := Vector2(e.x - S.p.x, e.y - S.p.y).length()
+	sfx("ugh", 0.14 * (1.0 - 0.6 * minf(1.0, d / 900.0)), e.get("voice", 1.0))
 
 func killed(e: Dictionary, isZ: bool) -> void:
 	if e.get("kind", "") == "bloat": toxic(e)
@@ -1761,124 +902,11 @@ func killed(e: Dictionary, isZ: bool) -> void:
 		S.fx.append({"x": e.x, "y": e.y, "vx": cos(a) * v, "vy": sin(a) * v, "life": 0.4, "c": "#6e120d", "sz": 3.0, "drag": true})
 	if isZ and randf() < 0.25: S.drops.append({"x": e.x, "y": e.y, "k": "ammo", "n": 3 + randi() % 6})
 
-## A red barrel, thrown bomb, or (big = true) a car blowing up.
-func explode(br: Dictionary, big: bool = false) -> void:
-	if br.dead: return
-	br.dead = true
-	add_noise(CAR_BLAST_NOISE if big else 18.0)
-	var R := CAR_BLAST_R if big else 130.0
-	var zd := CAR_BLAST_DMG if big else 160.0
-	var k := R / 130.0   # visual scale
-	for c in S.crates:
-		if not c.open and c.ty == "safe" and Vector2(c.x - br.x, c.y - br.y).length() < R * 0.92:
-			c.forced = true
-			loot_crate(c)
-	sfx("bigboom" if big else "boom")
-	S.shake = 26.0 if big else 16.0
-	S.boomFlash = 0.5 if big else 0.3
-	S.scorch.append({"x": br.x, "y": br.y})   # also where the blast's light flash is drawn
-	if big: S.bg.stamp(["scorch", br.x, br.y, CAR_SCORCH_R, CAR_SCORCH_A])
-	else: stamp_scorch(br.x, br.y)
-	for i in (18 if big else 9):
-		S.smoke.append({"x": br.x + (randf() - 0.5) * 60 * k, "y": br.y + (randf() - 0.5) * 60 * k, "r": (30 + randf() * 30) * sqrt(k), "life": 2 + randf() * 2 * k, "max": 2.0 + 2.0 * k, "g": false})
-	for i in (110 if big else 40):
-		var a := randf() * TAU
-		var v := (60 + randf() * 260) * sqrt(k)
-		S.fx.append({"x": br.x, "y": br.y, "vx": cos(a) * v, "vy": sin(a) * v, "life": 0.3 + randf() * 0.5 * k, "c": "#ffb347" if randf() < 0.5 else ("#e3644c" if randf() < 0.7 else "#fff0b0"), "sz": 4.0 if big and randf() < 0.4 else 3.0, "drag": false})
-	if big:
-		for i in 14:   # flying wreckage
-			var a := randf() * TAU
-			var v := 120 + randf() * 220
-			S.fx.append({"x": br.x, "y": br.y, "vx": cos(a) * v, "vy": sin(a) * v, "life": 0.6 + randf() * 0.6, "c": "#2a2624", "sz": 5.0, "drag": true})
-	for z in S.zs:
-		var d := Vector2(z.x - br.x, z.y - br.y).length()
-		if d < R:
-			z.hp -= zd * (1 - d / R / 1.3)
-			z.hit = 0.15
-			if z.hp <= 0 and not z.dead:
-				z.dead = true
-				G.stats.kills += 1
-				blood(z.x, z.y, 6)
-		if d < (900 if big else 700): z.alert = true
-	for v in S.sv:
-		var d := Vector2(v.x - br.x, v.y - br.y).length()
-		if d < R:
-			dmg_enemy(v, zd * (1 - d / R / 1.3))
-			if v.hp <= 0 and not v.dead:
-				v.dead = true
-				G.stats.kills += 1
-				blood(v.x, v.y, 6)
-		if d < (900 if big else 700): sv_hear(v, br.x, br.y)
-	for o in S.barrels:
-		if not o.dead and o.fuse < 0 and Vector2(o.x - br.x, o.y - br.y).length() < R * 0.85: o.fuse = 0.15
-	# blasts damage cars too, so a barrel or a burning car can set off the ones nearby
-	for car in S.cars:
-		if car == br or car.dead: continue
-		var d := maxf(0.0, Vector2(car.x - br.x, car.y - br.y).length() - 28.0)   # car body, not just its hot end
-		if d < R: car_hit(car, zd * (1 - d / R / 1.3))
-	var pd := Vector2(S.p.x - br.x, S.p.y - br.y).length()
-	if pd < R:
-		if big: hurt(CAR_BLAST_PDMG * (1 - pd / R) + 15, "blast")
-		else: hurt(40 * (1 - pd / R) + 8, "blast")
-
-# ---------------- cars ----------------
-## Gives the site's parked cars hitpoints, and maps their tiles so bullets can find them.
-func init_cars() -> void:
-	S["carAt"] = {}
-	for car in S.cars:
-		# x, y is the hot end, not the middle: the centre of the front or rear third
-		var end := (1.0 if randf() < 0.5 else -1.0) * 2.0 * TS / 3.0
-		var hz: bool = car.w > car.h
-		car.merge({"x": (car.c + car.w * 0.5) * TS + (end if hz else 0.0), "y": (car.r + car.h * 0.5) * TS + (0.0 if hz else end), "hp": CAR_HP,
-			"smokeAt": CAR_HP * (1.0 - randf_range(CAR_SMOKE_MIN, CAR_SMOKE_MAX)),
-			"fuse": -1.0, "dead": false, "puff": 0.0, "burnT": 0.0, "burnMax": CAR_SMOLDER})
-		for r in range(car.r, car.r + car.h):
-			for c in range(car.c, car.c + car.w):
-				S.carAt[r * S.cols + c] = car
-## The car (if any) parked on the tile under world point (x, y).
-func car_at(x: float, y: float):
-	var c := int(floor(x / TS))
-	var r := int(floor(y / TS))
-	if c < 0 or r < 0 or c >= S.cols or r >= S.rows: return null
-	return S.carAt.get(r * S.cols + c)
-func car_hit(car: Dictionary, d: float) -> void:
-	if car.dead or car.fuse >= 0: return
-	car.hp -= d
-	if car.hp <= 0:
-		car.fuse = randf_range(CAR_FUSE_MIN, CAR_FUSE_MAX)
-		sfx("pop")
-		for i in 12: S.fx.append({"x": car.x, "y": car.y, "vx": (randf() - 0.5) * 160, "vy": (randf() - 0.5) * 160, "life": 0.4, "c": "#ffb347", "sz": 3.0, "drag": true})
-## Smoke from damaged cars, the countdown on burning ones, smouldering wrecks.
-func update_cars(dt: float) -> void:
-	for car in S.cars:
-		var rate := 0.0
-		if car.dead:
-			car.burnT -= dt   # the plume itself is drawn in render.gd
-		elif car.fuse >= 0:
-			rate = 3.0
-			car.burnT += dt
-		elif car.hp <= car.smokeAt:
-			# thin grey wisps at first, thicker as it nears 0
-			rate = 1.5 + 4.0 * (1.0 - car.hp / maxf(1.0, car.smokeAt))
-		if rate > 0:
-			car.puff -= dt * rate
-			while car.puff <= 0:
-				car.puff += 1.0
-				var hot: bool = car.fuse >= 0 and not car.dead
-				S.smoke.append({"x": car.x + (randf() - 0.5) * 12, "y": car.y + (randf() - 0.5) * 12, "r": (8 + randf() * 8) * (1.6 if hot else 1.0), "life": 1.6 + randf() * 1.4, "max": 3.0, "g": false})
-		if car.fuse >= 0 and not car.dead:
-			car.fuse -= dt
-			if car.fuse <= 0:
-				car.burnT = CAR_SMOLDER
-				car.burnMax = CAR_SMOLDER
-				S.bg.stamp(["wreck", car])
-				explode(car, true)
-				if S == null or uist == "dead": return
-
 func shoot() -> void:
 	var w: Dictionary = D.WEAPONS[G.weapon]
 	var p: Dictionary = S.p
 	p.cd = w.rate
+	regen_reset()
 	if G.ammo <= 0:
 		p.cd = 0.42
 		S.swing = 0.18
@@ -1895,7 +923,10 @@ func shoot() -> void:
 		for e in enemies():
 			var d := Vector2(e.x - p.x, e.y - p.y).length()
 			if d < 44 and absf(U.ang_diff(atan2(e.y - p.y, e.x - p.x), p.ang)) < 1.1:
+				var was_alert: bool = e.get("alert", false)
 				dmg_enemy(e, 67.0 if has("boots") else 42.0)
+				if S.sv.has(e): hurt_cry(e)
+				if e.hp > 0 and S.sv.has(e): blood_spray(e.x, e.y, Vector2(e.x - p.x, e.y - p.y))
 				e.hit = 0.12
 				e.alert = true
 				move_c(e, cos(p.ang) * 18, sin(p.ang) * 18, 10)
@@ -1905,6 +936,7 @@ func shoot() -> void:
 					e.dead = true
 					G.stats.kills += 1
 					blood(e.x, e.y, 6)
+					if S.sv.has(e) and not was_alert: death_ugh(e)
 		if hit: sfx("hit")
 		if S.t - S.noAmmoT > 4:
 			S.noAmmoT = S.t
@@ -1913,13 +945,18 @@ func shoot() -> void:
 	G.ammo -= 1
 	sfx(w.snd)
 	if S.npc and S.npc.follow and not w.silent:
-		S.npc.fire_t = S.t + NPC_FIRE_WINDOW   # your rescue joins in
+		S.npc.fire_t = S.t + Survivors.NPC_FIRE_WINDOW   # your rescue joins in
 	var spr: float = w.spr * (ADS_AUTO_SPREAD if ads and w.get("auto", false) else 1.0)
-	# some weapons hit harder when aimed down sights ("ads_dmg" in D.WEAPONS, e.g. the crossbow)
-	var base_dmg: float = float(w.get("ads_dmg", w.dmg)) if ads else float(w.dmg)
+	# some weapons hit harder when aimed down sights ("ads_dmg" in D.WEAPONS, e.g. the crossbow).
+	# Only counts once the aim has fully settled in (adsK reaches 1), not the moment you press.
+	var aimed: bool = ads and S.get("adsK", 0.0) >= 1.0
+	var base_dmg: float = float(w.get("ads_dmg", w.dmg)) if aimed else float(w.dmg)
+	var scope_k := 1.2 if has("scope") else 1.0
+	# "hip_zdmg": damage to the dead when NOT aimed in (crossbow); survivors still take base_dmg
+	var zdmg: float = (float(w.hip_zdmg) if w.has("hip_zdmg") and not aimed else base_dmg) * scope_k
 	for i in w.pel:
 		var a: float = p.ang + (randf() - 0.5) * spr * 2
-		S.bul.append({"x": p.x + cos(p.ang) * 16, "y": p.y + sin(p.ang) * 16, "vx": cos(a) * w.spd, "vy": sin(a) * w.spd, "life": w.life, "dmg": base_dmg * (1.2 if has("scope") else 1.0), "pl": true, "kb": w.kb, "bolt": w.bolt})
+		S.bul.append({"x": p.x + cos(p.ang) * 16, "y": p.y + sin(p.ang) * 16, "vx": cos(a) * w.spd, "vy": sin(a) * w.spd, "life": w.life, "dmg": base_dmg * scope_k, "zdmg": zdmg, "aim": aimed, "pl": true, "kb": w.kb, "bolt": w.bolt})
 	if not w.bolt:   # spent casing — guns only, the crossbow has none
 		S.fx.append({"x": p.x + cos(p.ang) * 8, "y": p.y + sin(p.ang) * 8, "vx": cos(p.ang + 1.6) * 110 + (randf() - 0.5) * 40, "vy": sin(p.ang + 1.6) * 110 + (randf() - 0.5) * 40, "life": 0.7, "c": "#d9b35a", "sz": 2.2, "drag": true})
 	add_noise(w.noise)
@@ -1929,10 +966,23 @@ func shoot() -> void:
 		for z in S.zs:
 			if not z.dormant and Vector2(z.x - p.x, z.y - p.y).length() < 520: z.alert = true
 		for v in S.sv:
-			if Vector2(v.x - p.x, v.y - p.y).length() < 700: sv_hear(v, p.x, p.y)
+			if Vector2(v.x - p.x, v.y - p.y).length() < 700: survivors.sv_hear(v, p.x, p.y)
 
-func hurt(d: float, cause: String) -> void:
+## fx = false: just the damage (and death), no splatter, sound or shake (used for blast
+## damage spread over a few frames, whose effects play once when it goes off).
+func hurt(d: float, cause: String, fx: bool = true) -> void:
 	if uist != "": return
+	regen_reset()
+	if not fx:
+		if G.armor > 0:
+			var a2 := minf(G.armor, d * 0.5)
+			G.armor -= a2
+			d -= a2
+		G.hp -= d
+		if G.hp <= 0:
+			G.hp = 0.0
+			die(cause)
+		return
 	if S:
 		for q in 1 + (1 if d > 10 else 0):
 			S.splat.append({"x": randf() * Wv, "y": Hv * 0.15 + randf() * Hv * 0.7, "r": 28 + randf() * 50, "life": 1.8, "s": randf() * 999})
@@ -2118,61 +1168,6 @@ func upd_pickups(dt: float) -> void:
 				S.pk.remove_at(i)
 		i -= 1
 
-# ---- testing helpers (HUD buttons, see UI.DEBUG_BUTTONS) ----
-func dbg_all_weapons() -> void:
-	if G == null: return
-	for i in D.WEAPONS.size():
-		if not G.weapons.has(i): G.weapons.append(i)
-	sfx("click")
-	toast("Testing: all weapons added. Press 1-%d to equip." % D.WEAPONS.size(), "good")
-
-func dbg_ammo() -> void:
-	if G == null: return
-	G.ammo += 1000
-	sfx("click")
-	toast("Testing: +1,000 rounds (%d total)." % G.ammo, "good")
-
-func dbg_all_trinkets() -> void:
-	if G == null: return
-	for t in D.TRINKETS:
-		if not G.trinkets.has(t[0]): G.trinkets.append(t[0])
-	sfx("click")
-	toast("Testing: all %d trinkets added." % D.TRINKETS.size(), "good")
-
-func dbg_best_plane() -> void:
-	if G == null: return
-	G.plane = D.PLANES.size() - 1
-	G.tanks = int(D.PLANES[G.plane].tankMax)
-	G.engine = MAX_ENGINE
-	G.fuel = PS().fuelCap
-	G.hull = 100.0
-	sfx("click")
-	toast("Testing: %s with full tanks and engine upgrades." % D.PLANES[G.plane].name, "good")
-
-func dbg_reveal_map() -> void:
-	if G == null: return
-	var n := 0
-	for s in wd.strips:
-		if s.type == "haven": continue   # Haven stays hidden so the rumour rings can be tested
-		if not known.has(s.id):
-			known[s.id] = true
-			n += 1
-	G.known = known.keys()
-	sfx("click")
-	toast("Testing: map revealed, %d new fields charted. Haven is still hidden." % n, "good")
-
-func dbg_cash() -> void:
-	if G == null: return
-	G.cash += 1000
-	sfx("click")
-	toast("Testing: +$1,000 ($%d total)." % G.cash, "good")
-
-func dbg_fuel() -> void:
-	if G == null: return
-	G.carried += 1000.0
-	sfx("click")
-	toast("Testing: +1,000 gal in cans (%d total)." % int(floor(G.carried)), "good")
-
 func select_weapon(index: int) -> void:
 	if G == null or index < 0 or index >= D.WEAPONS.size(): return
 	if not G.weapons.has(index):
@@ -2227,10 +1222,68 @@ func upd_ground(dt: float) -> void:
 	G.time += dt * 0.5
 	var nk := 1 + (0.12 if G.diff == 0 else (0.3 if G.diff == 2 else 0.2)) * dark()
 	var p: Dictionary = S.p
+	blasts.blast_dmg_tick(p, dt)
+	if S == null or uist == "dead": return
 	S.flowT -= dt
 	if S.flowT <= 0:
 		S.flowT = 0.3
 		build_flow()
+	var ml := upd_player(p, dt)
+	if upd_bullets(p, dt): return
+	for z in S.zs:
+		if z.dead: killed(z, true)
+	if S == null: return
+	for v in S.sv:
+		if v.dead: killed(v, false)
+	if S == null or uist == "dead": return
+	S.zs = S.zs.filter(func(z): return not z.dead)
+	S.sv = S.sv.filter(func(v): return not v.dead)
+	if upd_zombies(p, nk, dt): return
+	survivors.upd_survivors(p, dt)
+	upd_drops(p)
+	upd_spawns(dt)
+	for br in S.barrels:
+		if br.fuse >= 0 and not br.dead:
+			br.fuse -= dt
+			if br.fuse <= 0: blasts.explode(br)
+			if S == null or uist == "dead": return
+	blasts.update_cars(dt)
+	if S == null or uist == "dead": return
+	if randf() < dt * 0.4:
+		var nd := 1e9
+		for z in S.zs:
+			if z.alert:
+				var d2 := Vector2(z.x - p.x, z.y - p.y).length()
+				if d2 < nd: nd = d2
+		if nd < 450: sfx("groan", 0.09 * (1 - nd / 450))
+	if upd_effects(dt): return
+	survivors.upd_npc(dt)
+	if S == null: return
+	upd_pickups(dt)
+	upd_crows(p, dt)
+	upd_tanker(p, ml, dt)
+	S.nearPlane = Vector2(p.x - S.plane.x, p.y - S.plane.y).length() < 130
+	upd_camera(p, dt)
+	upd_mood(dt)
+
+## Slow regen up to REGEN_CAP while you keep still. Wandering more than a tile from where
+## you stopped, or sprinting, restarts the wait (shoot() and hurt() restart it too).
+func upd_regen(p: Dictionary, sprint: bool, dt: float) -> void:
+	if sprint or Vector2(p.x, p.y).distance_to(p.get("rgA", Vector2(p.x, p.y))) > TS:
+		regen_reset()
+	if not p.has("rgA"): p.rgA = Vector2(p.x, p.y)
+	p.rgT = p.get("rgT", 0.0) + dt
+	if p.rgT >= REGEN_DELAY and G.hp > 0 and G.hp < REGEN_CAP:
+		G.hp = minf(REGEN_CAP, G.hp + REGEN_RATE * dt)
+
+func regen_reset() -> void:
+	if not S or not S.has("p"): return
+	S.p.rgT = 0.0
+	S.p.rgA = Vector2(S.p.x, S.p.y)
+
+## You on foot: walking and sprinting (stamina), being thrown by blasts, jumping,
+## aiming and firing. Returns how hard you're pushing to move (0 = standing still).
+func upd_player(p: Dictionary, dt: float) -> float:
 	var mx := 0.0
 	var my := 0.0
 	if key(KEY_W) or key(KEY_UP): my -= 1
@@ -2247,8 +1300,9 @@ func upd_ground(dt: float) -> void:
 	var ox: float = p.x
 	var oy: float = p.y
 	var ps := (168.0 if has("shoes") else 150.0) * (1.55 if sprint else 1.0) * (1.1 if p.jt > 0 else 1.0) * (ADS_MOVE if ads else 1.0)
+	var pown := blasts.knock_tick(p, dt)   # thrown by a blast? (you can't run against it)
 	S.air = p.jt > 0
-	move_c(p, mx * ps * dt, my * ps * dt, 10)
+	move_c(p, mx * ps * dt * pown, my * ps * dt * pown, 10)
 	S.air = false
 	p.wk += Vector2(p.x - ox, p.y - oy).length() * (0.3 if sprint else 0.22)
 	if sprint:
@@ -2259,6 +1313,7 @@ func upd_ground(dt: float) -> void:
 				if not z.dormant and Vector2(z.x - p.x, z.y - p.y).length() < 230: z.alert = true
 	elif p.jt <= 0:
 		p.stam = minf(100, p.stam + 20 * dt)
+	upd_regen(p, sprint, dt)
 	p.jcd -= dt
 	if p.jt > 0:
 		p.jt -= dt
@@ -2283,7 +1338,11 @@ func upd_ground(dt: float) -> void:
 	elif Vector2(mx, my).length() > 0.1: p.ang = atan2(my, mx)
 	p.cd -= dt
 	if fire and p.cd <= 0: shoot()
-	# bullets
+	return ml
+
+## Bullets in flight: walls, cars, red barrels, zombies, survivors and you.
+## Returns true when the site is gone or you died (stop the frame there).
+func upd_bullets(p: Dictionary, dt: float) -> bool:
 	var i: int = S.bul.size() - 1
 	while i >= 0:
 		var b: Dictionary = S.bul[i]
@@ -2294,8 +1353,8 @@ func upd_ground(dt: float) -> void:
 			b.y += b.vy * dt / 3
 			if solid_b(b.x, b.y):
 				for n in 3: S.fx.append({"x": b.x, "y": b.y, "vx": (randf() - 0.5) * 120, "vy": (randf() - 0.5) * 120, "life": 0.25, "c": "#e8c77a", "sz": 3.0, "drag": false})
-				var car = car_at(b.x, b.y)
-				if car and not b.bolt: car_hit(car, b.dmg)   # crossbow bolts just stick in
+				var car = blasts.car_at(b.x, b.y)
+				if car and not b.bolt: blasts.car_hit(car, b.dmg)   # crossbow bolts just stick in
 				dead = true
 				break
 			var hb := false
@@ -2303,17 +1362,17 @@ func upd_ground(dt: float) -> void:
 				if not br.dead and pow(br.x - b.x, 2) + pow(br.y - b.y, 2) < 150:
 					if not b.bolt:   # crossbow bolts stop in the barrel without setting it off
 						br.hp -= b.dmg
-						if br.hp <= 0: explode(br)
+						if br.hp <= 0: blasts.explode(br)
 					hb = true
 					break
 			if hb:
 				dead = true
 				break
-			if S == null: return
+			if S == null: return true
 			if b.pl:
 				for z in S.zs:
 					if not z.dead and pow(z.x - b.x, 2) + pow(z.y - b.y, 2) < 144:
-						z.hp -= b.dmg
+						z.hp -= float(b.get("zdmg", b.dmg))   # the crossbow hip-fires weaker at the dead
 						z.hit = 0.1
 						sfx("hit")
 						if z.dormant:
@@ -2332,36 +1391,38 @@ func upd_ground(dt: float) -> void:
 				if not dead:
 					for v in S.sv:
 						if not v.dead and pow(v.x - b.x, 2) + pow(v.y - b.y, 2) < 144:
-							dmg_enemy(v, b.dmg)
+							var was_alert: bool = v.alert
+							# an aimed (ADS) crossbow bolt into a survivor who hasn't spotted you yet hits harder
+							dmg_enemy(v, b.dmg * (BOLT_SNEAK_MULT if b.bolt and b.get("aim", false) and not v.alert else 1.0))
+							hurt_cry(v)
 							v.hit = 0.1
-							sv_hear(v, p.x, p.y)
+							survivors.sv_hear(v, p.x, p.y)
 							blood(v.x, v.y, 1)
+							if v.hp > 0: blood_spray(v.x, v.y, Vector2(b.vx, b.vy))
 							if v.hp <= 0:
 								v.dead = true
 								G.stats.kills += 1
 								blood(v.x, v.y, 6)
+								if not was_alert: death_ugh(v)
 								var am := randf() < 0.6
 								S.drops.append({"x": v.x, "y": v.y, "k": "ammo" if randf() < 0.6 else "cash", "n": (10 + randi() % 10) if am else (30 + randi() % 60)})
-								if randf() < SV_GUN_DROP:
+								if randf() < Survivors.SV_GUN_DROP and not v.get("unarmed", false):
 									S.drops.append({"x": v.x + 14, "y": v.y + 6, "k": "gun", "w": int(v.get("w", 0)), "n": 0})
 							dead = true
 							break
 			elif pow(p.x - b.x, 2) + pow(p.y - b.y, 2) < 110:
 				hurt(b.dmg, "shot")
+				if S and uist == "": blood_spray(p.x, p.y, Vector2(b.vx, b.vy))
 				dead = true
-		if S == null or uist == "dead": return
+		if S == null or uist == "dead": return true
 		b.life -= dt
 		if dead or b.life <= 0: S.bul.remove_at(i)
 		i -= 1
-	for z in S.zs:
-		if z.dead: killed(z, true)
-	if S == null: return
-	for v in S.sv:
-		if v.dead: killed(v, false)
-	if S == null or uist == "dead": return
-	S.zs = S.zs.filter(func(z): return not z.dead)
-	S.sv = S.sv.filter(func(v): return not v.dead)
-	# zombies
+	return false
+
+## Zombies: waking, chasing (flow field), lunging, screamers, biting you and the
+## rescue survivor. nk is the night speed-up. Returns true when the frame should stop.
+func upd_zombies(p: Dictionary, nk: float, dt: float) -> bool:
 	S.nd = 1e9
 	var zs: Array = S.zs
 	for z in zs:
@@ -2369,6 +1430,9 @@ func upd_ground(dt: float) -> void:
 		var dy: float = p.y - z.y
 		var d := Vector2(dx, dy).length()
 		if d == 0: d = 1
+		blasts.blast_dmg_tick(z, dt)
+		if z.dead: continue
+		var own := blasts.knock_tick(z, dt)   # thrown by a blast?
 		if z.dormant:
 			if d < 75 or z.wake:
 				z.dormant = false; z.rise = 0.7; z.alert = true
@@ -2433,7 +1497,7 @@ func upd_ground(dt: float) -> void:
 			sp *= DF().lunge
 			vx = dx / d; vy = dy / d
 		if z.get("scr", 0.0) > 0: sp = 0   # screamer winding up: stands still
-		sp *= nk
+		sp *= nk * own
 		var zx: float = z.x
 		var zy: float = z.y
 		move_c(z, vx * sp * dt, vy * sp * dt, 10)
@@ -2476,114 +1540,20 @@ func upd_ground(dt: float) -> void:
 			if nd < 250 and not z.alert and los(z.x, z.y, S.npc.x, S.npc.y): z.alert = true
 			if nd < 22 and z.cd <= 0 and not in_safe(S.npc.x, S.npc.y):
 				z.cd = 0.85
-				npc_hurt(z.dmg)
-				if S == null: return
+				survivors.npc_hurt(z.dmg, Vector2(S.npc.x - z.x, S.npc.y - z.y))
+				if S == null: return true
 		if d < 24 and z.cd <= 0 and not (p.jt > 0):
 			z.cd = 0.85
 			hurt(z.dmg, "bitten")
-			if uist != "": return
-	# survivors
-	if S.get("hostile", false): upd_garrison()
-	for v in S.sv:
-		var dx: float = p.x - v.x
-		var dy: float = p.y - v.y
-		var d := Vector2(dx, dy).length()
-		if d == 0: d = 1
-		var see := d < 520 and los(v.x, v.y, p.x, p.y)
-		if see and (d < 420 or v.alert):   # seen: alerted, knows exactly where you are
-			sv_hear(v, p.x, p.y)
-			if not v.get("called", false):   # first sighting (since they last stood down): raise the alarm
-				v.called = true
-				sv_raise(v.x, v.y, p.x, p.y)
-				v.yell = SV_YELL_MIN + randf() * (SV_YELL_MAX - SV_YELL_MIN)
-				v.cd = maxf(v.cd, v.yell)
-				sfx("yell")
-				add_noise(SV_YELL_NOISE)
-		v.cd -= dt
-		v.yell = maxf(0.0, v.get("yell", 0.0) - dt)
-		v.hit -= dt
-		var vx := 0.0
-		var vy := 0.0
-		if v.alert:
-			if see and v.yell > 0:
-				v.ang = atan2(dy, dx)   # just spotted you: standing and yelling, not shooting yet
-			elif see:
-				v.ang = atan2(dy, dx)
-				# preferred distance depends on the gun: shotguns close in, rifles hang back
-				var wd2: Dictionary = D.WEAPONS[int(v.get("w", 0))]
-				var near := 110.0 if wd2.pel > 1 else (260.0 if (wd2.spr < 0.02) else 180.0)
-				var far := 200.0 if wd2.pel > 1 else (380.0 if (wd2.spr < 0.02) else 300.0)
-				if d > far:
-					vx = dx / d; vy = dy / d
-				elif d < near:
-					vx = -dx / d; vy = -dy / d
-				v.sw -= dt
-				if v.sw <= 0:
-					v.sw = 1 + randf() * 1.5
-					v.sd = 1.0 if randf() < 0.5 else -1.0
-				vx += -dy / d * v.sd * 0.7
-				vy += dx / d * v.sd * 0.7
-				if v.cd <= 0: sv_fire(v)
-			else:
-				# can't see you: go to where they last saw/heard you, search there, then give up
-				if not v.has("lkx"): sv_hear(v, p.x, p.y)   # alerted by a hit: they know where it came from
-				v.lost = v.get("lost", 0.0) + dt
-				if v.lost > SV_FORGET:
-					v.alert = false
-					v.called = false
-					v.erase("lkx")
-					v.srch = false
-					sv_repost(v, v.x, v.y, SV_SEARCH_R)
-				elif not v.get("srch", false) and Vector2(v.lkx - v.x, v.lky - v.y).length() > 24:
-					var nv := sv_nav(v, v.lkx, v.lky)
-					vx = nv.x; vy = nv.y
-					# for a moment after losing sight they keep their gun on where you were,
-					# so stepping in and out of view at a doorway doesn't spin them back and forth
-					if v.lost < 0.6: v.ang = atan2(v.lky - v.y, v.lkx - v.x)
-					elif nv.length() > 0: v.ang = atan2(vy, vx)
-				else:
-					if not v.get("srch", false):
-						v.srch = true
-						sv_repost(v, v.lkx, v.lky, SV_SEARCH_R)
-					var pv := sv_patrol(v, dt)
-					vx = pv.x; vy = pv.y
-		elif v.get("trav", false):
-			# sweeping out toward where the player was when the alarm went up
-			v.travT += dt
-			if Vector2(v.sx - v.x, v.sy - v.y).length() < 24 or v.travT > 40.0:
-				v.trav = false
-				sv_repost(v, v.x, v.y, SV_SWEEP_R)
-			else:
-				var nv := sv_nav(v, v.sx, v.sy) * SV_SWEEP_SPD
-				vx = nv.x; vy = nv.y
-				if nv.length() > 0: v.ang = atan2(vy, vx)
-		else:
-			var pv := sv_patrol(v, dt)
-			vx = pv.x; vy = pv.y
-		# keep clear of other survivors and of zombies: the same soft push zombies use
-		# on each other (bodies within 20 px steer apart)
-		for others in [S.sv, S.zs]:
-			for o in others:
-				if o == v or o.dead: continue
-				var ox2: float = v.x - o.x
-				var oy2: float = v.y - o.y
-				var dd := ox2 * ox2 + oy2 * oy2
-				if dd < 400:
-					if dd > 0.01:
-						var q := sqrt(dd)
-						vx += ox2 / q * 0.8
-						vy += oy2 / q * 0.8
-					else:   # exactly on top of each other (e.g. two out of the same door)
-						vx += randf() - 0.5
-						vy += randf() - 0.5
-		var vx0: float = v.x
-		var vy0: float = v.y
-		move_c(v, vx * 85 * dt, vy * 85 * dt, 10)
-		body_block(v, p, vx0, vy0, vx, vy)
-		v.wk += Vector2(v.x - vx0, v.y - vy0).length() * 0.22
+			if uist != "": return true
+			blood_spray(p.x, p.y, Vector2(p.x - z.x, p.y - z.y))
+	return false
+
+## Walking over crates opens them; walking over drops (ammo, guns, cash) picks them up.
+func upd_drops(p: Dictionary) -> void:
 	for c in S.crates:
 		if not c.open and Vector2(c.x - p.x, c.y - p.y).length() < 24: loot_crate(c)
-	i = S.drops.size() - 1
+	var i: int = S.drops.size() - 1
 	while i >= 0:
 		var d: Dictionary = S.drops[i]
 		if Vector2(d.x - p.x, d.y - p.y).length() < 22:
@@ -2609,10 +1579,14 @@ func upd_ground(dt: float) -> void:
 				floater(d.x, d.y - 16, "+$%d" % d.n, "#9cc063")
 			S.drops.remove_at(i)
 		i -= 1
+
+## Noise waves (the dead, or armed reinforcements at survivor-held strips) and the
+## steady trickle of new arrivals.
+func upd_spawns(dt: float) -> void:
 	# (no background noise: the meter only rises from what the player does)
 	var held: bool = S.get("hostile", false)
 	# At survivor-held strips the noise waves are armed reinforcements, not the dead.
-	var waves := [[35, 2, "Shouts from the treeline. More of them are coming."], [65, 3, "Engines on the road. They are bringing friends."], [100, 4, "Everyone they have is coming. Get to the plane."]] if held \
+	var waves := [[35, 0, "Doors bang open. Everyone inside is coming out to look for you."], [65, 3, "Engines on the road. They are bringing friends."], [100, 4, "Everyone they have is coming. Get to the plane."]] if held \
 		else [[35, 5, "They know you are here."], [65, 9, "A crowd is gathering at the fence line."], [100, 14, "The horde is here. Get to the plane."]]
 	for wv in waves:
 		if S.noise >= wv[0] and not S.waves.has(wv[0]):
@@ -2620,14 +1594,17 @@ func upd_ground(dt: float) -> void:
 			toast(wv[2], "bad")
 			sfx("horde")
 			S.shake = maxf(S.shake, 5)
+			if held and wv[1] == 0:   # first mark at a held strip: everyone indoors comes out looking for you
+				survivors.call_out(S.p.x, S.p.y)
+				continue
 			for k in maxi(1, int(round(wv[1] * DF().count))):
-				if held: spawn_edge_sv()
+				if held: S.svq = S.get("svq", 0) + 1   # they arrive one by one (Survivors.upd_garrison())
 				else: spawn_edge(wv[0] >= 100 and G.diff != 0)
 	S.spawnT -= dt
 	if held and S.spawnT <= 0:
 		# no dead here; once the meter is full, a reinforcement every 10-16 s
 		S.spawnT = 10.0 + randf() * 6.0
-		if S.noise >= 100 and S.sv.size() < 20: spawn_edge_sv()
+		if S.noise >= 100 and S.sv.size() < 20: survivors.spawn_edge_sv()
 	elif S.spawnT <= 0:
 		var nf: float = S.noise / 100.0
 		S.spawnT = maxf(0.7, (8 - S.danger * 1.1) * (1 - nf * 0.8)) * (0.7 + randf() * 0.6)
@@ -2638,22 +1615,12 @@ func upd_ground(dt: float) -> void:
 				spawn_edge(randf() < 0.5)
 			else:
 				spawn_z(false)
-	for br in S.barrels:
-		if br.fuse >= 0 and not br.dead:
-			br.fuse -= dt
-			if br.fuse <= 0: explode(br)
-			if S == null or uist == "dead": return
-	update_cars(dt)
-	if S == null or uist == "dead": return
-	if randf() < dt * 0.4:
-		var nd := 1e9
-		for z in S.zs:
-			if z.alert:
-				var d2 := Vector2(z.x - p.x, z.y - p.y).length()
-				if d2 < nd: nd = d2
-		if nd < 450: sfx("groan", 0.09 * (1 - nd / 450))
+
+## Particles, thrown bombs (bouncing, fuse), smoke and floating text.
+## Returns true when a bomb going off ended the frame (site gone or you died).
+func upd_effects(dt: float) -> bool:
 	S.boomFlash -= dt
-	i = S.fx.size() - 1
+	var i: int = S.fx.size() - 1
 	while i >= 0:
 		var f: Dictionary = S.fx[i]
 		f.x += f.vx * dt
@@ -2667,19 +1634,29 @@ func upd_ground(dt: float) -> void:
 	i = S.thrown.size() - 1
 	while i >= 0:
 		var b: Dictionary = S.thrown[i]
-		var f := pow(0.18, dt)
-		b.vx *= f; b.vy *= f
 		b.spin += dt * 12
-		var nx: float = b.x + b.vx * dt
-		if solid(nx, b.y): b.vx *= -0.5
-		else: b.x = nx
-		var ny: float = b.y + b.vy * dt
-		if solid(b.x, ny): b.vy *= -0.5
-		else: b.y = ny
+		if b.get("air", 0.0) > 0:
+			# lobbed by a survivor: arcing through the air over walls and cover (height z)
+			b.air -= dt
+			b.x += b.vx * dt; b.y += b.vy * dt
+			var k: float = 1.0 - maxf(0.0, b.air) / b.air0
+			b.z = 4.0 * b.h * k * (1.0 - k)
+			if b.air <= 0:   # landed: rolls on a little
+				b.z = 0.0
+				b.vx *= 0.15; b.vy *= 0.15
+		else:
+			var f := pow(0.18, dt)
+			b.vx *= f; b.vy *= f
+			var nx: float = b.x + b.vx * dt
+			if solid(nx, b.y): b.vx *= -0.5
+			else: b.x = nx
+			var ny: float = b.y + b.vy * dt
+			if solid(b.x, ny): b.vy *= -0.5
+			else: b.y = ny
 		b.fuse -= dt
 		if b.fuse <= 0:
-			explode(b)
-			if S == null or uist == "dead": return
+			blasts.explode(b)
+			if S == null or uist == "dead": return true
 			S.thrown.remove_at(i)
 		i -= 1
 	i = S.smoke.size() - 1
@@ -2695,9 +1672,10 @@ func upd_ground(dt: float) -> void:
 		f.life -= dt
 		if f.life <= 0: S.fl.remove_at(i)
 		i -= 1
-	upd_npc(dt)
-	if S == null: return
-	upd_pickups(dt)
+	return false
+
+## The stash glint and the crows that scatter when you come near or fire.
+func upd_crows(p: Dictionary, dt: float) -> void:
 	for c in S.crates:
 		if not c.open and c.ty == "stash" and not c.seen and Vector2(c.x - p.x, c.y - p.y).length() < 110:
 			c.seen = true
@@ -2721,6 +1699,9 @@ func upd_ground(dt: float) -> void:
 			cw.h = minf(40, cw.h + dt * 30)
 			cw.life -= dt
 			if cw.life <= 0: cw.gone = true
+
+## Siphoning fuel from a tanker: stand still next to it (ml is your movement input).
+func upd_tanker(p: Dictionary, ml: float, dt: float) -> void:
 	if S.tanker and S.tanker.gal > 0:
 		var tk: Dictionary = S.tanker
 		var d := Vector2(p.x - tk.x, p.y - tk.y).length()
@@ -2738,7 +1719,9 @@ func upd_ground(dt: float) -> void:
 		elif d < 70 and not S.tkHint:
 			S.tkHint = true
 			floater(tk.x, tk.y - 30, "Stand still to siphon fuel. It is noisy.", "#d9a441")
-	S.nearPlane = Vector2(p.x - S.plane.x, p.y - S.plane.y).length() < 130
+
+## Camera: aim-down-sights ease, smoothed follow and lean, kept inside the map and the player in view.
+func upd_camera(p: Dictionary, dt: float) -> void:
 	S.adsK = move_toward(S.get("adsK", 0.0), 1.0 if ads else 0.0, dt * ADS_RATE)
 	# Camera = smoothed follow of the player (bcx/bcy) + ADS lean. The lean's size
 	# uses the same eased amount as the zoom (not the follow smoothing), so zoom
@@ -2768,10 +1751,17 @@ func upd_ground(dt: float) -> void:
 	var edge := CAM_EDGE / gs
 	S.cx = clampf(S.cx, p.x - hw + edge, p.x + hw - edge)
 	S.cy = clampf(S.cy, p.y - hh + CAM_EDGE / gs, p.y + hh - CAM_TOP / gs)
+
+## Screen shake, flashes, blood splats, lamp flicker, the heartbeat and the low-health colour grade.
+func upd_mood(dt: float) -> void:
 	S.shake = maxf(0, S.shake - dt * 20)
 	S.flash -= dt
 	S.hurt -= dt
-	i = S.splat.size() - 1
+	var mf: Array = S.get("mf", [])
+	for k in range(mf.size() - 1, -1, -1):
+		mf[k].life -= dt
+		if mf[k].life <= 0: mf.remove_at(k)
+	var i: int = S.splat.size() - 1
 	while i >= 0:
 		S.splat[i].life -= dt
 		if S.splat[i].life <= 0: S.splat.remove_at(i)
@@ -2798,6 +1788,7 @@ func upd_ground(dt: float) -> void:
 # ======================================================================
 func die(kind: String) -> void:
 	if uist == "dead": return
+	synth.undeafen()
 	if mode == "flight" and F:
 		F.crashed = true
 		sfx("thump" if kind == "overrun" else "crash")
@@ -2805,7 +1796,7 @@ func die(kind: String) -> void:
 	ui.show_dead(kind)
 
 func win() -> void:
-	clear_save()
+	menu.clear_save()
 	CP = ""
 	ui.show_win()
 	mode = "title"
@@ -2813,359 +1804,10 @@ func win() -> void:
 	_free_site()
 
 # ======================================================================
-# menu actions
+# draw layers (one Node2D per layer, all drawn by draw_layer())
 # ======================================================================
-func good_price(s: Dictionary, g: String) -> int:
-	return int(round(D.GOODS[g][1] * (0.6 + U.hash3(s.id, D.GKEYS.find(g), wd.SEED + 71)) * (1.2 if has("ledger") else 1.0)))
-func repair_cost() -> int:
-	return int(ceil(100 - G.hull)) * 4 + (60 if G.leak > 0 else 0)
-
-func act(a: String, v = null) -> void:
-	var s = strip(G.strip) if G else null
-	var P = PS() if G else null
-	match a:
-		"tab":
-			menu_tab = v
-			ui.render_menu()
-		"close", "resume": ui.close_ui()
-		"band":
-			if G.cash >= 25:
-				G.cash -= 25; G.band += 1
-			ui.render_menu()
-		"bomb":
-			if G.cash >= 60:
-				G.cash -= 60; G.bombs += 1
-			ui.render_menu()
-		"sell":
-			var n := int(G.goods.get(v, 0))
-			var pr := good_price(s, v)
-			if n:
-				G.cash += n * pr
-				G.goods[v] = 0
-				toast("Sold %d %s for $%d." % [n, D.GOODS[v][0], n * pr], "good")
-				sfx("cash")
-			ui.render_menu()
-		"sellparts":
-			if G.parts > 0:
-				G.parts -= 1; G.cash += 15
-			ui.render_menu()
-		"fieldfix":
-			if G.parts > 0 and G.hull < 100:
-				G.parts -= 1
-				G.hull = minf(100, G.hull + (25 if has("gloves") else 15))
-				toast("Patched a section of the airframe.", "good")
-			ui.render_menu()
-		"fieldleak":
-			if G.parts >= 2 and G.leak > 0:
-				G.parts -= 2; G.leak = 0.0
-				toast("Fuel line sealed.", "good")
-			ui.render_menu()
-		"repair":
-			var c := repair_cost()
-			if c > 0 and G.cash >= c:
-				G.cash -= c; G.hull = 100.0; G.leak = 0.0
-				toast("The mechanic patches her up.", "good")
-			ui.render_menu()
-		"sleep":
-			var m := fmod(G.time, 1440.0)
-			G.time += fmod(390 - m + 1440, 1440.0)
-			G.hp = minf(100, G.hp + 40)
-			G.offers = gen_offers(s)
-			enter_ground(s)
-			checkpoint()
-			toast("Day %d. You wake at first light." % day(), "good")
-		"sound":
-			synth.set_on(not synth.on)
-			ui.close_ui()
-			ui.open_pause()
-		"zoom":
-			set_zoom(1.0 if v == 0 else zoom * (ZOOM_STEP if v > 0 else 1.0 / ZOOM_STEP), false)
-			ui.refresh_settings()
-		"uiscale":
-			set_ui_scale(1.0 if v == 0 else ui_scale + UI_STEP * signf(v), false)
-			ui.refresh_settings()
-		"fullscreen":
-			set_fullscreen(not fullscreen)
-			ui.refresh_settings()
-		"winsize":
-			set_window_size((win_idx + 1) % WIN_SIZES.size())
-			ui.refresh_settings()
-		"settings":
-			ui.show_settings(v)
-		"diff":
-			G.diff = int(v)
-			save_game()
-			ui.close_ui()
-			ui.open_pause()
-			toast("Difficulty: %s. It takes full effect at the next airfield." % D.DIFFS[G.diff].name, "mag")
-		"takeoff": takeoff()
-		"pour":
-			var n := minf(G.carried, P.fuelCap - G.fuel)
-			G.fuel += n
-			G.carried -= n
-			toast("Poured %.1f gal." % n)
-			ui.render_menu()
-		"buy5":
-			var n := minf(5, P.fuelCap - G.fuel)
-			var c := int(ceil(n * s.fuelPrice))
-			if G.cash >= c:
-				G.cash -= c; G.fuel += n
-			ui.render_menu()
-		"fill":
-			var n: float = P.fuelCap - G.fuel
-			n = minf(n, floor(G.cash / float(s.fuelPrice)))
-			G.cash -= int(ceil(n * s.fuelPrice))
-			G.fuel += n
-			ui.render_menu()
-		"accept":
-			var idx := int(v)
-			if idx < G.offers.size():
-				var c: Dictionary = G.offers[idx]
-				G.offers.remove_at(idx)
-				G.contracts.append(c)
-				var tg := contract_target(c)
-				known[tg] = true
-				known[int(c.dest)] = true
-				if G.nav < 0: G.nav = tg
-				toast(("Rescue job taken. Course set to %s." % strip(tg).name) if c.get("type", "") == "rescue" else ("Loaded %s. Course set to %s." % [c.what, strip(tg).name]), "mag")
-			ui.render_menu()
-		"dump":
-			G.contracts.remove_at(int(v))
-			ui.render_menu()
-		"nav":
-			G.nav = int(v)
-			ui.render_menu()
-		"tank":
-			var c: int = 450 * (G.tanks + 1) + G.plane * 200
-			if G.cash >= c and G.tanks < P.tankMax:
-				G.cash -= c; G.tanks += 1
-				toast("Auxiliary tank fitted.", "good")
-			ui.render_menu()
-		"engine":
-			var c: int = 600 * (G.engine + 1)
-			if G.cash >= c and G.engine < 2:
-				G.cash -= c; G.engine += 1
-				toast("Engine overhauled.", "good")
-			ui.render_menu()
-		"weapon":
-			var i := int(v)
-			var w: Dictionary = D.WEAPONS[i]
-			if G.weapons.has(i): select_weapon(i)
-			elif G.cash >= w.price:
-				G.cash -= w.price
-				G.weapons.append(i)
-				toast("Bought %s. Press %d to equip." % [w.name, i + 1], "good")
-			ui.render_menu()
-		"ammo":
-			if G.cash >= 35:
-				G.cash -= 35; G.ammo += 30
-			ui.render_menu()
-		"ammo100":
-			if G.cash >= 100:
-				G.cash -= 100; G.ammo += 100
-			ui.render_menu()
-		"med":
-			if G.cash >= 60:
-				G.cash -= 60; G.med += 1
-			ui.render_menu()
-		"plane":
-			var i := int(v)
-			var cost: int = D.PLANES[i].price - int(floor(D.PLANES[G.plane].price * 0.5))
-			if G.cash >= cost:
-				G.cash -= cost
-				G.plane = i
-				G.tanks = 0
-				G.engine = 0
-				G.fuel = minf(G.fuel, PS().fuelCap)
-				G.contracts = G.contracts.slice(0, PS().slots)
-				toast("The %s is yours." % D.PLANES[i].name, "good")
-			ui.render_menu()
-		"newgame": start_new()
-		"continue":
-			var sv = load_save()
-			if sv: resume_from(sv)
-		"retry":
-			var st = JSON.parse_string(CP)
-			st = normalize(st)
-			st.cash = int(floor(st.cash * (0.8 if st.diff == 2 else 0.9)))
-			st.hp = 100.0
-			resume_from(st)
-			toast("You wake up in the hangar with a headache and a lighter wallet.", "bad")
-		"save_quit_desktop": quit_to_desktop(true)
-		"quit_desktop": quit_to_desktop(false)
-		"quit":
-			save_game()
-			show_title()
-		"help": ui.show_help()
-		"backtitle": show_title()
-		"settingsback":
-			if mode == "flight" or mode == "ground":
-				ui.close_ui()
-				ui.open_pause()
-			else:
-				show_title()
-
-# ======================================================================
-# title & lifecycle
-# ======================================================================
-func show_title() -> void:
-	mode = "title"
-	F = null
-	_free_site()
-	sat = 0.84; con = 1.07
-	ui.show_title(load_save() != null)
-	if old_save_exists() and not old_save_warned:
-		old_save_warned = true
-		toast_later(0.6, "Your saved run is from the old, smaller map and can't be continued. Start a new run to play on the new map.", "bad")
-
-func _regen_world(seed_v: int) -> void:
-	wd.PAD = OCEAN_PAD
-	wd.gen_world(seed_v)
-	baker.set_world(wd)
-	TCACHE.clear()
-	baker.build_overview(OCEAN_PAD)
-
-func start_new() -> void:
-	var seed_v := randi() % 1000000000
-	_regen_world(seed_v)
-	G = new_state(seed_v)
-	known = {wd.START: true}
-	var st := strip(wd.START)
-	var others := wd.strips.filter(func(s): return s.type != "haven" and s.id != wd.START)
-	others.sort_custom(func(a, b): return Vector2(a.x - st.x, a.y - st.y).length() < Vector2(b.x - st.x, b.y - st.y).length())
-	for s in others.slice(0, 2): known[s.id] = true
-	G.visits[str(wd.START)] = 1
-	G.offers = gen_offers(st)
-	enter_ground(st)
-	checkpoint()
-	toast("%s. Home, for now." % st.name)
-	toast_later(1.6, "Loot the hangars, then board the plane.", "mag")
-
-func resume_from(st: Dictionary) -> void:
-	st = normalize(st)
-	if baker.overview == null or int(st.seed) != wd.SEED: _regen_world(int(st.seed))
-	G = st
-	for kv in [["time", 420.0], ["hull", 100.0], ["leak", 0.0], ["roadStrips", []], ["trinkets", []], ["diff", 1], ["band", 0], ["parts", 0], ["bombs", 0], ["armor", 0.0], ["rings", []], ["goods", {}], ["looted", {}], ["visits", {}], ["mayday", null], ["offers", []]]:
-		if not G.has(kv[0]) or (G[kv[0]] == null and kv[1] != null): G[kv[0]] = kv[1]
-	wd.strips = wd.strips.filter(func(s): return s.type != "road")
-	for r in G.roadStrips:
-		var rr: Dictionary = r.duplicate()
-		rr.id = wd.strips.size()
-		for k in ["x", "y", "ang", "len", "wid"]: rr[k] = float(rr[k])
-		rr.danger = int(rr.danger)
-		rr.seed = int(rr.seed)
-		wd.strips.append(rr)
-	if G.strip >= wd.strips.size(): G.strip = wd.START
-	if G.nav >= wd.strips.size(): G.nav = -1
-	G.contracts = G.contracts.filter(func(c): return int(c.dest) < wd.strips.size())
-	known = {}
-	for k in G.get("known", []): known[int(k)] = true
-	known[G.strip] = true
-	enter_ground(strip(G.strip))
-	checkpoint()
-
-
 class DrawLayer extends Node2D:
 	var idx := 0
 	var game
 	func _draw() -> void:
 		game.draw_layer(idx, Pen.new(self))
-
-# ======================================================================
-# display settings: zoom, interface size, window size, fullscreen
-# ======================================================================
-## Hotkeys that work anywhere. Returns true when the event was consumed.
-func display_input(e: InputEvent) -> bool:
-	if e is InputEventKey and e.pressed:
-		var c: int = e.physical_keycode
-		var ctrl: bool = e.ctrl_pressed or e.meta_pressed
-		var zin: bool = c == KEY_EQUAL or c == KEY_KP_ADD
-		var zout: bool = c == KEY_MINUS or c == KEY_KP_SUBTRACT
-		var zreset: bool = c == KEY_0 or c == KEY_KP_0
-		if zin or zout or zreset:
-			if ctrl:
-				set_ui_scale(1.0 if zreset else ui_scale + (UI_STEP if zin else -UI_STEP))
-			else:
-				set_zoom(1.0 if zreset else zoom * (ZOOM_STEP if zin else 1.0 / ZOOM_STEP))
-			ui.refresh_settings()
-			return true
-		if e.echo: return false
-		if c == KEY_F11 or (c == KEY_ENTER and e.alt_pressed):
-			set_fullscreen(not fullscreen)
-			ui.refresh_settings()
-			return true
-	elif e is InputEventMouseButton and e.pressed and uist == "":
-		if e.button_index == MOUSE_BUTTON_WHEEL_UP or e.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-			var up: bool = e.button_index == MOUSE_BUTTON_WHEEL_UP
-			if e.ctrl_pressed: set_ui_scale(ui_scale + (UI_STEP if up else -UI_STEP))
-			else: set_zoom(zoom * (1.07 if up else 1.0 / 1.07), false)
-			return true
-	return false
-
-func set_zoom(z: float, announce: bool = true) -> void:
-	zoom = clampf(z, ZOOM_MIN, ZOOM_MAX)
-	if absf(zoom - 1.0) < 0.02: zoom = 1.0
-	if announce and ready_done and uist == "": toast("Zoom %d%%" % roundi(zoom * 100))
-	save_settings()
-
-func set_ui_scale(s: float, announce: bool = true) -> void:
-	ui_scale = clampf(snappedf(s, 0.05), UI_MIN, UI_MAX)
-	get_window().content_scale_factor = ui_scale
-	if announce and ready_done and uist == "": toast("Interface size %d%%" % roundi(ui_scale * 100))
-	save_settings()
-
-func set_fullscreen(on: bool) -> void:
-	fullscreen = on
-	if on:
-		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
-	else:
-		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
-		_apply_window_size()
-	save_settings()
-
-func set_window_size(i: int) -> void:
-	win_idx = clampi(i, 0, WIN_SIZES.size() - 1)
-	if fullscreen:
-		fullscreen = false
-		DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_WINDOWED)
-	_apply_window_size()
-	save_settings()
-
-func _apply_window_size() -> void:
-	var want: Vector2i = WIN_SIZES[win_idx]
-	var scr := DisplayServer.screen_get_usable_rect(DisplayServer.window_get_current_screen())
-	var sz := Vector2i(mini(want.x, scr.size.x), mini(want.y, scr.size.y))
-	DisplayServer.window_set_size(sz)
-	DisplayServer.window_set_position(scr.position + (scr.size - sz) / 2)
-
-func window_label() -> String:
-	var w: Vector2i = WIN_SIZES[win_idx]
-	return "%d × %d" % [w.x, w.y]
-
-func save_settings() -> void:
-	var cf := ConfigFile.new()
-	cf.set_value("display", "zoom", zoom)
-	cf.set_value("display", "ui_scale", ui_scale)
-	cf.set_value("display", "fullscreen", fullscreen)
-	cf.set_value("display", "window", win_idx)
-	cf.save(SETTINGS_PATH)
-
-func load_settings() -> void:
-	var cf := ConfigFile.new()
-	if cf.load(SETTINGS_PATH) != OK:
-		# first launch: pick the largest preset that fits comfortably on this screen
-		var scr := DisplayServer.screen_get_usable_rect(DisplayServer.window_get_current_screen())
-		win_idx = 0
-		for i in WIN_SIZES.size():
-			if WIN_SIZES[i].x <= scr.size.x * 0.85 and WIN_SIZES[i].y <= scr.size.y * 0.85: win_idx = i
-		if DisplayServer.get_name() != "headless": _apply_window_size()
-		save_settings()
-		return
-	zoom = clampf(float(cf.get_value("display", "zoom", 1.0)), ZOOM_MIN, ZOOM_MAX)
-	ui_scale = clampf(float(cf.get_value("display", "ui_scale", 1.0)), UI_MIN, UI_MAX)
-	win_idx = clampi(int(cf.get_value("display", "window", 0)), 0, WIN_SIZES.size() - 1)
-	fullscreen = bool(cf.get_value("display", "fullscreen", false))
-	get_window().content_scale_factor = ui_scale
-	if DisplayServer.get_name() == "headless": return
-	if fullscreen: DisplayServer.window_set_mode(DisplayServer.WINDOW_MODE_FULLSCREEN)
-	else: _apply_window_size()

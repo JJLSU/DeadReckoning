@@ -357,7 +357,7 @@ func foot(left: Array, right: Array) -> void:
 
 func _click(a: String, v) -> void:
 	game.sfx("click")
-	game.act(a, v)
+	game.menu.act(a, v)
 
 # ---------------------------------------------------------------- panels
 func show_panel(u: String) -> void:
@@ -423,7 +423,7 @@ func open_pause() -> void:
 	var G: Dictionary = game.G
 	_clear()
 	h2("Paused")
-	note(game.objective())
+	note(game.menu.objective())
 	stack([["Resume", "go", "resume"], ["Display settings", "ghost", "settings"],
 		["Save and quit to desktop", "ghost", "save_quit_desktop"],
 		["Quit to desktop without saving", "ghost", "quit_desktop"]])
@@ -461,7 +461,7 @@ func show_settings(_from = null) -> void:
 		[["−", "alt", "zoom", -1], ["Reset", "alt", "zoom", 0], ["+", "alt", "zoom", 1]])
 	row("Aa", "Interface size: %d%%" % roundi(gm.ui_scale * 100), "Text, buttons and gauges. Ctrl with + and −.",
 		[["−", "alt", "uiscale", -1], ["Reset", "alt", "uiscale", 0], ["+", "alt", "uiscale", 1]])
-	row("🖥", "Window: %s" % ("fullscreen" if gm.fullscreen else gm.window_label()), "Cycle sizes. F11 toggles fullscreen; Esc leaves it.",
+	row("🖥", "Window: %s" % ("fullscreen" if gm.fullscreen else gm.menu.window_label()), "Cycle sizes. F11 toggles fullscreen; Esc leaves it.",
 		[["Next size", "alt", "winsize", null], ["Windowed" if gm.fullscreen else "Fullscreen", "alt", "fullscreen", null]])
 	stack([["Back", "go", "settingsback"]])
 	if gm.uist != "settings":
@@ -542,23 +542,23 @@ func render_menu() -> void:
 		if G.contracts.is_empty(): empty("Nothing aboard. Take a job from the board below.")
 		for i in G.contracts.size():
 			var c: Dictionary = G.contracts[i]
-			var d: Dictionary = game.strip(game.contract_target(c))
+			var d: Dictionary = game.strip(game.menu.contract_target(c))
 			var t: String
 			if c.get("type", "") == "rescue":
 				t = ("Find %s in %s at %s" % [c.who, D.WHERE[c.where], d.name]) if c.stage == "pickup" else ("%s to %s" % [c.who, d.name])
 			else:
 				t = "%s to %s" % [c.what, d.name]
-			row(c.icon, t, "%d km %s, pays $%d" % [U.km(Vector2(d.x - s.x, d.y - s.y).length()), game.bearing(s, d), c.reward],
+			row(c.icon, t, "%d km %s, pays $%d" % [U.km(Vector2(d.x - s.x, d.y - s.y).length()), game.menu.bearing(s, d), c.reward],
 				[["On course" if G.nav == d.id else "Set course", "alt", "nav", d.id], ["Drop", "alt", "dump", i]])
 		h4("Job board")
 		if G.offers.is_empty(): empty("The board is bare. Fields within your range have nothing posted.")
 		for i in G.offers.size():
 			var c: Dictionary = G.offers[i]
-			var d: Dictionary = game.strip(game.contract_target(c))
+			var d: Dictionary = game.strip(game.menu.contract_target(c))
 			var dd := Vector2(d.x - s.x, d.y - s.y).length()
 			var dn: String = d.name if known.has(d.id) else "an uncharted field"
 			var t: String = ("Rescue %s, hiding in %s at %s, and fly them back here" % [c.who, D.WHERE[c.where], dn]) if c.get("type", "") == "rescue" else ("Fly %s to %s" % [c.what, dn])
-			row(c.icon, t, "%d km %s, danger %s, pays $%d%s" % [U.km(dd), game.bearing(s, d), _pips(d.danger), c.reward, ", beyond current fuel" if dd > game.range_now() else ""],
+			row(c.icon, t, "%d km %s, danger %s, pays $%d%s" % [U.km(dd), game.menu.bearing(s, d), _pips(d.danger), c.reward, ", beyond current fuel" if dd > game.range_now() else ""],
 				[["Accept", "b", "accept", i, G.contracts.size() >= Pp.slots]])
 	elif mt == "shop":
 		if not s.shop:
@@ -571,7 +571,7 @@ func render_menu() -> void:
 				[["Maxed" if G.tanks >= Pp.tankMax else "Fit", "b", "tank", null, G.tanks >= Pp.tankMax or G.cash < tp]])
 			row("⚙️", "Engine overhaul, %d of 2 done" % G.engine, "+8%% speed and range%s" % ((", $%d" % ep) if G.engine < 2 else ""),
 				[["Maxed" if G.engine >= 2 else "Overhaul", "b", "engine", null, G.engine >= 2 or G.cash < ep]])
-			var rc: int = game.repair_cost()
+			var rc: int = game.menu.repair_cost()
 			row("🛠️", "Patch the airframe and fuel lines", "Hull at %d%%%s. $%d" % [int(ceil(G.hull)), ", fuel leaking" if G.leak > 0 else "", rc],
 				[["Sound" if rc <= 0 else "Repair", "b", "repair", null, rc <= 0 or G.cash < rc]])
 			h4("Weapons and supplies")
@@ -593,7 +593,7 @@ func render_menu() -> void:
 				var n := int(G.goods.get(g, 0))
 				if n == 0: continue
 				any = true
-				var pr: int = game.good_price(s, g)
+				var pr: int = game.menu.good_price(s, g)
 				var base: int = D.GOODS[g][1]
 				row("📦", "%d %s" % [n, D.GOODS[g][0]], "$%d each here%s" % [pr, ", a good price" if pr > base * 1.25 else (", a poor price" if pr < base * 0.8 else "")], [["Sell all", "b", "sell", g]])
 			if G.parts > 0:
@@ -659,20 +659,20 @@ func _hud_press(k: String) -> void:
 	var gm := game
 	match k:
 		"cruise":
-			if gm.F and gm.cruise_ok(): gm.F.cruise = not gm.F.cruise
+			if gm.F and gm.flight.cruise_ok(): gm.F.cruise = not gm.F.cruise
 		"throw": gm.throw_bomb()
 		"map": toggle_map()
 		"pause": open_pause()
 		"heal": gm.heal()
 		"board": open_menu()
 		"taxi": gm.enter_ground(gm.strip(gm.G.strip))
-		"dbg_weapons": gm.dbg_all_weapons()
-		"dbg_ammo": gm.dbg_ammo()
-		"dbg_trinkets": gm.dbg_all_trinkets()
-		"dbg_cash": gm.dbg_cash()
-		"dbg_fuel": gm.dbg_fuel()
-		"dbg_plane": gm.dbg_best_plane()
-		"dbg_map": gm.dbg_reveal_map()
+		"dbg_weapons": gm.menu.dbg_all_weapons()
+		"dbg_ammo": gm.menu.dbg_ammo()
+		"dbg_trinkets": gm.menu.dbg_all_trinkets()
+		"dbg_cash": gm.menu.dbg_cash()
+		"dbg_fuel": gm.menu.dbg_fuel()
+		"dbg_plane": gm.menu.dbg_best_plane()
+		"dbg_map": gm.menu.dbg_reveal_map()
 
 func update_buttons() -> void:
 	var gm := game
@@ -687,7 +687,7 @@ func update_buttons() -> void:
 	btns.pause.visible = play
 	btns.heal.visible = gr and (G.med > 0 or G.band > 0) and G.hp < 100
 	btns.throw.visible = gr and G.bombs > 0
-	var ok: bool = fl and gm.cruise_ok()
+	var ok: bool = fl and gm.flight.cruise_ok()
 	btns.cruise.visible = ok
 	if not ok and F: F.cruise = false
 	var on: bool = F != null and F.cruise
@@ -791,7 +791,7 @@ class MapView extends Control:
 				g.dashed_arc(rc.x * k, rc.y * k, rr * k, 0, TAU, Color(20 / 255.0, 30 / 255.0, 34 / 255.0, 0.8), 1.5, 5, 4)
 				g.text_base("Haven?", rc.x * k, rc.y * k + 4, 13, ink, 0, "700")
 		var dests := {}
-		for c in G.contracts: dests[gm.contract_target(c)] = true
+		for c in G.contracts: dests[gm.menu.contract_target(c)] = true
 		var mag := Color.html("#9b2a68")
 		for s in wd.strips:
 			if not gm.known.has(s.id): continue

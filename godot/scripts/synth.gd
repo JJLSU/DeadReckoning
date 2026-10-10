@@ -30,17 +30,42 @@ var bq_w := [0.0, 0.0, 0.0, 0.0]
 var bq_r := [0.0, 0.0, 0.0, 0.0]
 var co_w: Array
 var co_r: Array
+# Deafened by a blast (see deafen()): straight away every other sound drops to DEAF_VOL for
+# DEAF_HOLD seconds, then fades back up to full over DEAF_FADE seconds. The blast's own boom
+# isn't turned down (UNDUCKED). A ringing in the ears starts DEAF_RING_DELAY after the blast,
+# fades in over DEAF_RING_IN and fades out again as hearing comes back.
+const DEAF_VOL := 0.25
+const DEAF_HOLD := 3.0
+const DEAF_FADE := 2.0
+const DEAF_RING_DELAY := 0.5
+const DEAF_RING_IN := 0.8
+const DEAF_RING_VOL := 0.025  # loudness of the ringing at its peak
+const FX_BUS := "Fx"         # every sound but the ringing and the booms plays on this bus, so it can be turned down
+const UNDUCKED := ["boom", "bigboom"]   # played on Master instead, at full volume while deafened
+var deaf_on := false
+var deaf_t := 0.0   # seconds since the deafness started
+var ring_player: AudioStreamPlayer
 
 func _ready() -> void:
 	seed(12345)
 	noise_buf.resize(int(FS))
 	for i in noise_buf.size(): noise_buf[i] = randf() * 2.0 - 1.0
 	randomize()
+	if AudioServer.get_bus_index(FX_BUS) < 0:
+		AudioServer.add_bus()
+		var bi := AudioServer.bus_count - 1
+		AudioServer.set_bus_name(bi, FX_BUS)
+		AudioServer.set_bus_send(bi, "Master")
 	for i in 16:
 		var p := AudioStreamPlayer.new()
+		p.bus = FX_BUS
 		add_child(p)
 		players.append(p)
+	ring_player = AudioStreamPlayer.new()   # on Master, so the deafness doesn't turn it down
+	ring_player.stream = _ring_stream()
+	add_child(ring_player)
 	gen_player = AudioStreamPlayer.new()
+	gen_player.bus = FX_BUS
 	var g := AudioStreamGenerator.new()
 	g.mix_rate = FS
 	g.buffer_length = 0.12
@@ -65,8 +90,35 @@ func set_on(v: bool) -> void:
 	_apply()
 
 func _apply() -> void:
+	var k := 1.0      # volume of everything else
+	var ring := 0.0   # volume of the ringing
+	if deaf_on:
+		var back := clampf((deaf_t - DEAF_HOLD) / DEAF_FADE, 0.0, 1.0)   # 0 deaf .. 1 hearing again
+		k = DEAF_VOL + (1.0 - DEAF_VOL) * back
+		ring = clampf((deaf_t - DEAF_RING_DELAY) / DEAF_RING_IN, 0.0, 1.0) * (1.0 - back)
+	AudioServer.set_bus_volume_db(AudioServer.get_bus_index(FX_BUS), linear_to_db(k))
 	AudioServer.set_bus_volume_db(0, 0.0 if on else -80.0)
 	AudioServer.set_bus_mute(0, not on)
+	if ring_player:
+		if ring > 0.001:
+			ring_player.volume_db = linear_to_db(ring)
+			if not ring_player.playing: ring_player.play()
+		elif ring_player.playing: ring_player.stop()
+
+## A one-second loop of high, slightly beating tones: the ringing in your ears after a blast.
+func _ring_stream() -> AudioStreamWAV:
+	var n := int(FS)
+	var b := PackedFloat32Array()
+	b.resize(n)
+	for i in n:
+		var t := i / FS
+		# whole numbers of cycles per second, so the loop joins up without a click
+		b[i] = DEAF_RING_VOL * (sin(TAU * 2200.0 * t) + 0.6 * sin(TAU * 2205.0 * t) + 0.15 * sin(TAU * 4401.0 * t)) / 1.75
+	var w := _to_stream(b)
+	w.loop_mode = AudioStreamWAV.LOOP_FORWARD
+	w.loop_begin = 0
+	w.loop_end = n
+	return w
 
 # ---------------- filters ----------------
 func _coef(type: String, f: float, q: float) -> Array:
@@ -167,7 +219,19 @@ func _render(kind: String) -> PackedFloat32Array:
 		"land": _noise(b, .12, 260, .7, .3, "lowpass")
 		"horde": _noise(b, 1.6, 180, .4, .8, "lowpass"); _tone(b, 90, 60, 1.4, .12, "sawtooth")
 		"siphon": _noise(b, .35, 500, 3, .08)
-		"caw": _tone(b, 820, 560, .13, .05, "square"); _tone(b, 760, 520, .13, .04, "square", .18)
+		"caw":
+			# crows taking off: soft whumps of wing beats from three birds, quickening
+			# as they climb away and fading out (the key keeps its old name; it used to be a caw)
+			for bird in 3:
+				var t := bird * (0.05 + randf() * 0.05)
+				var gap := 0.11 + randf() * 0.03
+				var v := 0.045 - bird * 0.01
+				for k in 7:
+					_noise(b, .07, 420 + randf() * 160, .7, v, "bandpass", t)
+					_noise(b, .05, 1500 + randf() * 400, 1.2, v * .25, "bandpass", t + .01)
+					t += gap
+					gap *= 0.9
+					v *= 0.8
 		"click": _tone(b, 1200, 900, .04, .06, "square")
 		"swing": _noise(b, .14, 2600, 1.2, .25)
 		"thunder": _noise(b, 2.4, 110, .3, 1.1, "lowpass"); _noise(b, .4, 900, .5, .3)
@@ -186,7 +250,7 @@ func _render(kind: String) -> PackedFloat32Array:
 			elif kind.begins_with("yell"):
 				# a shouted "Hey!": buzzy voice through two vowel formants, pitch up then down
 				var v := 0.14
-				var f := 105.0 + randf() * 30.0
+				var f := 120.0   # each survivor's own pitch is applied when it plays (VOICE)
 				# the three variants are full, medium and short: "Heyyy!", "Hey!", "Hy!"
 				var d: float = [0.42, 0.3, 0.2][int(kind.substr(4)) % 3] + randf() * 0.06
 				var f1 := _coef("bandpass", 480 + randf() * 100, 3.0)
@@ -194,6 +258,27 @@ func _render(kind: String) -> PackedFloat32Array:
 				_tone(b, f * 1.25, f * 0.8, d, v * 2.5, "sawtooth", 0.0, 4.0, 6.0, false, 0.05, f1)
 				_tone(b, f * 1.25, f * 0.8, d, v * 1.5, "sawtooth", 0.0, 4.0, 6.0, false, 0.05, f2)
 				_noise(b, minf(.12, d * .4), 1400, 1.5, v * .4)
+			elif kind.begins_with("cry"):
+				# thrown by a blast: a pained "Aagh!", open vowel, pitch breaking upward then falling away
+				var v := 0.14
+				var f := 170.0   # each survivor's own pitch is applied when it plays (VOICE)
+				var d: float = [0.55, 0.42, 0.32][int(kind.substr(3)) % 3] + randf() * 0.08
+				var f1 := _coef("bandpass", 750 + randf() * 120, 3.0)
+				var f2 := _coef("bandpass", 1250 + randf() * 200, 4.0)
+				_tone(b, f * 1.5, f * 0.7, d, v * 2.5, "sawtooth", 0.0, 3.0, 7.0, false, 0.02, f1)
+				_tone(b, f * 1.5, f * 0.7, d, v * 1.5, "sawtooth", 0.0, 3.0, 7.0, false, 0.02, f2)
+				_noise(b, minf(.15, d * .35), 1600, 1.5, v * .5)
+			elif kind.begins_with("ugh"):
+				# killed before they knew you were there: a short, choked "Ugh!", the breath
+				# knocked out of them, pitch dropping as the vowel is cut off
+				var v := 0.14
+				var f := 120.0   # each survivor's own pitch is applied when it plays (VOICE)
+				var d: float = [0.26, 0.2, 0.15][int(kind.substr(3)) % 3] + randf() * 0.04
+				var f1 := _coef("bandpass", 600 + randf() * 80, 3.0)
+				var f2 := _coef("bandpass", 1150 + randf() * 150, 4.0)
+				_tone(b, f * 1.1, f * 0.65, d, v * 2.5, "sawtooth", 0.0, 0.0, 0.0, false, 0.015, f1)
+				_tone(b, f * 1.1, f * 0.65, d, v * 1.5, "sawtooth", 0.0, 0.0, 0.0, false, 0.015, f2)
+				_noise(b, d * .6, 900, 1.2, v * .6)
 			elif kind.begins_with("heart"):
 				var v := 0.2
 				_tone(b, 58, 40, .14, v); _tone(b, 52, 36, .16, v * .8, "sine", .2)
@@ -212,9 +297,14 @@ func _to_stream(b: PackedFloat32Array) -> AudioStreamWAV:
 	w.data = data
 	return w
 
-const REF := {"groan": 0.06, "snarl": 0.12, "heart": 0.2, "yell": 0.14}
+const REF := {"groan": 0.06, "snarl": 0.12, "heart": 0.2, "yell": 0.14, "cry": 0.14, "ugh": 0.14}
+# Each survivor gets a voice pitch at spawn ("voice", a playback pitch scale in this range) used
+# for all their speech ("yell", "cry", "ugh"): about 105-135 Hz for the "Hey!", 150-190 Hz for the cry.
+const VOICE := Vector2(0.875, 1.125)
 
-func sfx(kind: String, vv: float = -1.0) -> void:
+## Play a sound. vv: volume for the REF sounds (their reference volume = as rendered);
+## pitch: playback pitch scale (a survivor's voice).
+func sfx(kind: String, vv: float = -1.0, pitch: float = 1.0) -> void:
 	if not on: return
 	var key := kind
 	var vol_db := 0.0
@@ -227,8 +317,10 @@ func sfx(kind: String, vv: float = -1.0) -> void:
 		sounds[key] = _to_stream(_render(key))
 	var p: AudioStreamPlayer = players[pi_]
 	pi_ = (pi_ + 1) % players.size()
+	p.bus = &"Master" if UNDUCKED.has(kind) else StringName(FX_BUS)
 	p.stream = sounds[key]
 	p.volume_db = vol_db
+	p.pitch_scale = pitch
 	p.play()
 
 ## Pre-render common sounds so the first gunshot does not hitch.
@@ -248,7 +340,26 @@ func engine(thr: float, alt: float, active: bool) -> void:
 func rain(k: float) -> void:
 	t_r = k * 0.05 if k > 0.15 else 0.0
 
+## Deafened by a blast close by (see Blasts.explode()): all other sounds drop to DEAF_VOL and
+## the ears ring, then hearing comes back. Another blast while already deafened starts it
+## over, keeping the ringing up if it already is.
+func deafen() -> void:
+	if deaf_on: deaf_t = minf(deaf_t, DEAF_RING_DELAY + DEAF_RING_IN)
+	else:
+		deaf_on = true
+		deaf_t = 0.0
+	_apply()
+
+## Hearing back to normal at once (the player died).
+func undeafen() -> void:
+	deaf_on = false
+	_apply()
+
 func _process(dt: float) -> void:
+	if deaf_on:
+		deaf_t += dt
+		if deaf_t >= DEAF_HOLD + DEAF_FADE: deaf_on = false
+		_apply()
 	if playback == null: return
 	var a1 := 1.0 - exp(-dt / 0.1)
 	var a2 := 1.0 - exp(-dt / 0.15)
