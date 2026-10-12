@@ -854,6 +854,11 @@ static func prep_ground(gm) -> void:
 	else:
 		dr.visible = false
 
+const FLOATER_BOTTOM := 44.0   # on foot: the newest pop-up message sits this far above the bottom edge
+const FLOATER_LINE := 19.0     # and older ones stack upwards this far apart
+const FLOATER_MAX := 5         # at most this many shown at once
+const SMOKE_HIDE := 0.5        # how much of the player a smoke cloud hides at full density
+
 static func ground_layer(gm, idx: int, g: Pen) -> void:
 	var S: Dictionary = gm.S
 	var gs: float = gm.ground_scale()
@@ -898,6 +903,14 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 				g.rect(-7, -4, 3, 8, hc("#3a3d40")); g.rect(4, -4, 3, 8, hc("#3a3d40"))
 				g.restore()
 				if fmod(T, 0.25) < 0.12: g.circle(b.x, b.y - bz - 6, 2.5, hc("#ff4a30"))
+			for sg in S.get("smk", []):   # survivors' smoke grenades in the air: a pipe bomb in olive drab
+				var cz: float = sg.z
+				g.ellipse(sg.x + 3 + cz * 0.3, sg.y + 4, 7, 5, 0, Color(0, 0, 0, 0.3 * (1.0 - minf(0.6, cz / 100.0))))
+				g.save(); g.translate(sg.x, sg.y - cz)
+				g.rotate(sg.spin)
+				g.rr(-7, -4, 14, 8, 2, hc("#66704a"))
+				g.rect(-7, -4, 3, 8, hc("#3f4630")); g.rect(4, -4, 3, 8, hc("#3f4630"))
+				g.restore()
 			for d in S.drops:
 				var pl := 0.5 + 0.5 * sin(T * 5 + d.x)
 				g.rect(d.x - 5, d.y - 3, 14, 10, Color(0, 0, 0, 0.3))
@@ -945,7 +958,13 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 			g.save(); g.translate(S.plane.x, S.plane.y); draw_plane(g, P, 190, 0, false); g.restore()
 			if S.nearPlane: g.dashed_arc(S.plane.x, S.plane.y, 130, 0, TAU, rgba(212, 90, 157, 0.8), 2, 8, 6)
 			for z in S.zs: draw_zombie(gm, g, z)
-			for v in S.sv: draw_person(g, v.x, v.y, v.ang, {"body": v.shirt, "skin": v.skin, "hair": "#2b2118", "cap": v.cap, "gun": not v.get("unarmed", false), "bare": v.get("unarmed", false), "long": int(v.get("w", 1)) != 0, "vest": float(v.get("armor", 0.0)) > 0, "walk": v.wk, "hit": v.hit > 0})
+			for v in S.sv:
+				# startled hop on spotting you: up and down, drawn bigger like your jump
+				var sj: float = sin(PI * (1 - float(v.jt) / Survivors.SV_STARTLE_T)) * 3.5 if v.has("jt") else 0.0
+				if sj > 0:
+					g.save(); g.translate(v.x, v.y - sj * 0.5); g.scale(1 + sj / 45, 1 + sj / 45); g.translate(-v.x, -v.y)
+				draw_person(g, v.x, v.y, v.ang, {"body": v.shirt, "skin": v.skin, "hair": "#2b2118", "cap": v.cap, "gun": not v.get("unarmed", false), "bare": v.get("unarmed", false), "long": int(v.get("w", 1)) != 0, "vest": float(v.get("armor", 0.0)) > 0, "walk": v.wk, "hit": v.hit > 0, "lower": 1.0 - float(v.get("gup", 0.0))})
+				if sj > 0: g.restore()
 			if S.npc:
 				var n: Dictionary = S.npc
 				draw_person(g, n.x, n.y, n.ang, {"body": "#3f7a7a", "skin": "#e0b894", "hair": "#5a3a22", "gun": true, "long": int(n.get("w", 0)) != 0, "walk": n.wk, "hit": n.hit > 0})
@@ -953,11 +972,19 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 					var pl := 0.5 + 0.5 * sin(T * 5)
 					g.ring(n.x, n.y, 22 + pl * 6, rgba(240, 160, 210, 0.3 + 0.5 * pl), 2)
 				g.text(n.name, n.x, n.y - 22, 11, hc("#f0c4dd"), 0, "700", 3, Color(0, 0, 0, 0.7))
+			for cl in S.get("clouds", []): draw_cloud(g, cl, T)
 			var jz: float = sin(PI * (1 - p.jt / 0.46)) * 14 if p.jt > 0 else 0.0
 			if jz > 0: g.ellipse(p.x + 3 + jz * 0.4, p.y + 5 + jz * 0.7, 10, 7, 0, Color(0, 0, 0, 0.25))
 			g.save()
 			if jz > 0:
 				g.translate(p.x, p.y - jz * 0.5); g.scale(1 + jz / 45, 1 + jz / 45); g.translate(-p.x, -p.y)
+			# inside a smoke cloud you're partly hidden: SMOKE_HIDE at full density, fading out
+			# toward the thin edge of the cloud (g.restore() puts the alpha back)
+			var hid := 0.0
+			for cl in S.get("clouds", []):
+				var dc := Vector2(p.x - cl.x, p.y - cl.y).length()
+				if dc < cl.r: hid = maxf(hid, float(cl.den) * clampf((cl.r - dc) / (cl.r * 0.3), 0.0, 1.0))
+			g.ga = 1.0 - SMOKE_HIDE * minf(1.0, hid)
 			draw_person(g, p.x, p.y, p.ang, {"body": "#9a3a2a" if S.hurt > 0 else "#6b4a2e", "skin": "#d9b48f", "cap": "#34404c", "gun": gm.G.ammo > 0, "long": gm.G.weapon > 0, "walk": p.wk, "swing": S.swing > 0})
 			g.restore()
 		1:
@@ -1003,7 +1030,11 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 				for i in 8:
 					var k := fmod(T * 0.35 + i / 8.0 + float(car.c) * 0.13, 1.0)
 					g.circle(car.x + k * 90, car.y - k * 55, (5 + k * 30) * grow, rgba(46, 44, 42, 0.45 * (1 - k)))
+		20:   # roofs, on their own layer so roof.gdshader can cut peek circles out of them
+			view.call()
 			draw_roofs(gm, g)
+		21:   # everything drawn over the roofs (crows, haze, trees, ...)
+			view.call()
 			for cw in S.crows:
 				if cw.gone: continue
 				g.save(); g.translate(cw.x, cw.y)
@@ -1046,6 +1077,7 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 						g.tex(Tx.TREES[int(j * 3)], x - sz / 2, y - sz / 2, sz, sz)
 				g.ga = 1.0
 			for f in S.fl:
+				if not f.get("w", false): continue   # the rest are drawn near the bottom of the screen (layer 7)
 				g.ga = clampf(f.life, 0, 1)
 				g.text(f.txt, f.x, f.y, 14, hc(f.c), 0, "700", 3, Color(0, 0, 0, 0.7))
 			g.ga = 1.0
@@ -1110,6 +1142,17 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 			if S.boomFlash > 0: g.rect(0, 0, W, H, rgba(255, 190, 110, minf(1, S.boomFlash * 1.2)))
 		7:
 			g.set_xf(Transform2D.IDENTITY)
+			# pop-up messages on foot: stacked near the bottom of the screen, newest lowest,
+			# so they don't cover the action around the player
+			var fy: float = H - FLOATER_BOTTOM
+			for k in range(S.fl.size() - 1, -1, -1):
+				var f: Dictionary = S.fl[k]
+				if f.get("w", false): continue
+				g.ga = clampf(f.life, 0, 1)
+				g.text(f.txt, W / 2, fy, 15, hc(f.c), 0, "700", 3, Color(0, 0, 0, 0.7))
+				fy -= FLOATER_LINE
+				if fy < H - FLOATER_BOTTOM - FLOATER_LINE * (FLOATER_MAX - 1): break
+			g.ga = 1.0
 			hud_ground(gm, g)
 			if gm.uist == "" and not gm.cursor_on_btn: draw_ads_reticle(gm, g)
 
@@ -1145,10 +1188,27 @@ static func draw_roofs(gm, g: Pen) -> void:
 	var S: Dictionary = gm.S
 	var p: Dictionary = S.p
 	var sid: int = S.s.id
-	for rm in S.rooms:
+	var sighted := ads_sighted(gm, S, p)
+	var gs: float = gm.ground_scale()
+	var ox: float = gm.Wv / 2 - S.rcx * gs
+	var oy: float = gm.Hv / 2 - S.rcy * gs
+	var rects := PackedVector4Array()
+	var fades := PackedVector2Array()
+	var centres := PackedVector2Array()
+	for ri in S.rooms.size():
+		var rm: Dictionary = S.rooms[ri]
 		var inside: bool = p.x > rm.c * TS and p.x < (rm.c + rm.w) * TS and p.y > rm.r * TS and p.y < (rm.r + rm.h) * TS
-		var goal := 0.05 if inside else (PEEK_ALPHA if peeking(S, p, rm) else 1.0)
-		rm.ra = lerpf(rm.ra, goal, 0.18)
+		rm.ra = lerpf(rm.ra, 0.05 if inside else 1.0, 0.18)
+		# aiming in through an opening fades a soft circle around where the sightline crosses
+		# it; peeking in at a door fades one around the player
+		if not inside and sighted.has(ri): rm.apt = sighted[ri]
+		rm.ak = lerpf(rm.get("ak", 0.0), 1.0 if not inside and sighted.has(ri) else 0.0, 0.18)
+		rm.pk = lerpf(rm.get("pk", 0.0), 1.0 if not inside and peeking(S, p, rm) else 0.0, 0.18)
+		if (rm.ak > 0.01 or rm.pk > 0.01) and rects.size() < 16:
+			rects.append(Vector4(rm.c * TS * gs + ox, rm.r * TS * gs + oy, ((rm.c + rm.w) * TS + 10) * gs + ox, ((rm.r + rm.h) * TS + 10) * gs + oy))
+			fades.append(Vector2(rm.ak, rm.pk))
+			var apt: Vector2 = rm.get("apt", Vector2.ZERO)
+			centres.append(Vector2(apt.x * gs + ox, apt.y * gs + oy))
 		if rm.ra < 0.02: continue
 		var x: float = rm.c * TS + 10
 		var y: float = rm.r * TS + 10
@@ -1160,6 +1220,20 @@ static func draw_roofs(gm, g: Pen) -> void:
 		draw_roof(g, rm, sid, w, h)
 		g.restore()
 		g.ga = 1.0
+	var m: ShaderMaterial = gm.roof_mat
+	m.set_shader_parameter("screen", Vector2(gm.Wv, gm.Hv))
+	m.set_shader_parameter("ppos", Vector2(p.x * gs + ox, p.y * gs + oy))
+	m.set_shader_parameter("circ_r", PEEK_RADIUS * TS * gs)
+	m.set_shader_parameter("ads_r", ADS_RADIUS * TS * gs)
+	m.set_shader_parameter("peek_a", PEEK_ALPHA)
+	m.set_shader_parameter("nrooms", rects.size())
+	for i in range(rects.size(), 16):
+		rects.append(Vector4.ZERO)
+		fades.append(Vector2.ZERO)
+		centres.append(Vector2.ZERO)
+	m.set_shader_parameter("rooms", rects)
+	m.set_shader_parameter("centres", centres)
+	m.set_shader_parameter("fades", fades)
 	for rm in S.rooms:
 		if rm.sign == null: continue
 		var dc: int = rm.door[0]
@@ -1173,11 +1247,13 @@ static func draw_roofs(gm, g: Pen) -> void:
 		g.stroke_rect(x - tw / 2 + 1.5, y - 6.5, tw - 3, 11, hc("#3a3028"), 1)
 		g.text(rm.sign, x, y - 0.5, 8, hc("#2a221a"), 0, "700")
 
-## Looking in through a doorway: standing near one of the building's door openings
-## (outside, or in the doorway) and facing that opening makes the roof see-through.
-const PEEK_DIST := 3.0    # tiles from the door opening's centre
-const PEEK_CONE := 60.0   # degrees either side of looking straight at the door opening
-const PEEK_ALPHA := 0.3   # roof opacity while peeking (inside the building it's 0.05)
+## Looking in through a doorway: standing directly in front of one of the building's
+## door openings (outside, or in the doorway, within PEEK_DIST of the wall) with your facing
+## line passing in through that opening makes the roof see-through in a soft circle around
+## the player (PEEK_RADIUS).
+const PEEK_RADIUS := 6.0  # tiles: peeking cuts a soft circle this big around the player out of the roof
+const PEEK_DIST := PEEK_RADIUS   # tiles out from the wall (same as the see-through circle)
+const PEEK_ALPHA := 0.3   # roof opacity where it's cut while peeking or aiming in (inside the building the whole roof is 0.05)
 
 static func peeking(S: Dictionary, p: Dictionary, rm: Dictionary) -> bool:
 	var c0: int = rm.c
@@ -1189,14 +1265,14 @@ static func peeking(S: Dictionary, p: Dictionary, rm: Dictionary) -> bool:
 	if p.x < c0 * TS - reach or p.x > (c1 + 1) * TS + reach or p.y < r0 * TS - reach or p.y > (r1 + 1) * TS + reach: return false
 	var fx := cos(p.ang)
 	var fy := sin(p.ang)
-	var cone := cos(deg_to_rad(PEEK_CONE))
 	var cols: int = S.cols
 	for r in range(r0, r1 + 1):
 		for c in range(c0, c1 + 1):
 			var edge_c := c == c0 or c == c1
 			var edge_r := r == r0 or r == r1
 			if not (edge_c or edge_r) or (edge_c and edge_r): continue   # perimeter only, skip corners
-			if S.g[r * cols + c] != 2: continue   # not an opening
+			var gv: int = S.g[r * cols + c]
+			if gv != 2 and gv != 15: continue   # not an opening (doorway or window)
 			var ix := 0.0
 			var iy := 0.0
 			if r == r0: iy = 1.0
@@ -1205,14 +1281,57 @@ static func peeking(S: Dictionary, p: Dictionary, rm: Dictionary) -> bool:
 			else: ix = -1.0
 			var dx: float = p.x - (c + 0.5) * TS
 			var dy: float = p.y - (r + 0.5) * TS
-			if dx * dx + dy * dy > reach * reach: continue
-			if dx * ix + dy * iy > 0.5 * TS: continue   # already past the doorway (inside test handles that)
-			# facing the opening itself; when standing right in it, facing in through it
-			var dl := sqrt(dx * dx + dy * dy)
-			var tx := -dx / dl if dl > 0.4 * TS else ix
-			var ty := -dy / dl if dl > 0.4 * TS else iy
-			if fx * tx + fy * ty >= cone: return true
+			var out := -(dx * ix + dy * iy)   # how far outside the wall line (negative = in the doorway)
+			var side := dx * -iy + dy * ix   # sideways from this opening tile's centre
+			if out > reach or out < -0.5 * TS: continue   # too far out, or already past the doorway
+			if absf(side) > 0.5 * TS: continue   # not directly in front of this tile of the opening
+			# looking in: the facing line must cross the wall through an opening tile
+			var fin := fx * ix + fy * iy
+			if fin < 0.2: continue
+			var hx: float = p.x + fx * (out / fin)
+			var hy: float = p.y + fy * (out / fin)
+			var hc_: int = clampi(int(floor(hx / TS)), c0, c1) if iy != 0.0 else c
+			var hr_: int = clampi(int(floor(hy / TS)), r0, r1) if ix != 0.0 else r
+			var hv: int = S.g[hr_ * cols + hc_]
+			if hv == 2 or hv == 15: return true
 	return false
+
+## Aiming in through an opening: while aiming down sights, follow the sightline from the
+## player towards the reticle (and on past it) until it hits a wall. Any building it
+## enters through a door opening gets a see-through circle (ADS_RADIUS), centred where the
+## sightline crosses that opening. Returns {room index (into S.rooms): crossing point}.
+const ADS_PEEK_RANGE := 20.0   # tiles the sightline is followed
+const ADS_RADIUS := 3.0        # tiles: radius of the soft circle cut out of the roof (half the peek circle)
+
+static func ads_sighted(gm, S: Dictionary, p: Dictionary) -> Dictionary:
+	var hit := {}
+	if not gm.ads: return hit
+	var wp: Vector2 = gm.s2w_g(gm.reticle_pos().x, gm.reticle_pos().y)
+	var dir := Vector2(wp.x - p.x, wp.y - p.y)
+	if dir.length() < 1.0: return hit
+	dir = dir.normalized()
+	var cols: int = S.cols
+	var through := {}   # rooms whose door opening the sightline has crossed: where it crossed
+	var lc := -999
+	var lr := -999
+	var n := int(ADS_PEEK_RANGE * TS / 4.0)
+	for i in range(1, n + 1):
+		var q := Vector2(p.x, p.y) + dir * (4.0 * i)
+		var c := int(floor(q.x / TS))
+		var r := int(floor(q.y / TS))
+		if c == lc and r == lr: continue
+		lc = c; lr = r
+		if gm.solid_b(q.x, q.y): break
+		for ri in S.rooms.size():
+			var rm: Dictionary = S.rooms[ri]
+			if c < rm.c or r < rm.r or c >= rm.c + rm.w or r >= rm.r + rm.h: continue
+			var edge: bool = c == rm.c or r == rm.r or c == rm.c + rm.w - 1 or r == rm.r + rm.h - 1
+			if edge:
+				var gv: int = S.g[r * cols + c]
+				if (gv == 2 or gv == 15) and not through.has(ri): through[ri] = q
+			elif through.has(ri) and not hit.has(ri):
+				hit[ri] = through[ri]
+	return hit
 
 static func draw_roof(g: Pen, rm: Dictionary, sid: int, w: float, h: float) -> void:
 	var col := hc(rm.roof if rm.roof else "#6b5a4a")
@@ -1424,6 +1543,21 @@ static func draw_zombie(gm, g: Pen, z: Dictionary) -> void:
 	if hit: g.ellipse(0, 0, 8, 12, 0, Color(1, 1, 1, 0.55))
 	g.restore()
 
+## A smoke grenade's cloud: overlapping grey puffs drifting slowly, thick enough in the middle
+## to hide anyone in it, thinning and spreading as it dies away.
+static func draw_cloud(g: Pen, cl: Dictionary, T: float) -> void:
+	var den: float = cl.den
+	if den <= 0.01: return
+	var R: float = cl.r
+	var sd: int = int(cl.seed)
+	for q in 12:
+		var a := float(sd + q * 137) * 0.618 * TAU + T * 0.15 * (1.0 if q % 2 == 0 else -1.0)
+		var rr := R * (0.15 + 0.45 * fmod(float(sd * 7 + q * 53) * 0.0137, 1.0))
+		var pr := R * (0.42 + 0.12 * sin(T * 0.7 + q))
+		var shade := 0.68 + 0.08 * float(q % 3)
+		g.circle(cl.x + cos(a) * rr, cl.y + sin(a) * rr, pr, Color(shade, shade, shade * 0.98, 0.42 * den))
+	g.circle(cl.x, cl.y, R * 0.55, Color(0.74, 0.74, 0.72, 0.5 * den))
+
 static func draw_person(g: Pen, x: float, y: float, a: float, o: Dictionary) -> void:
 	g.save()
 	g.translate(x, y)
@@ -1438,11 +1572,21 @@ static func draw_person(g: Pen, x: float, y: float, a: float, o: Dictionary) -> 
 	var swing: bool = o.get("swing", false)
 	if o.get("gun", false):
 		var lng: bool = o.get("long", false)
+		# "lower" 0..1: gun swung down across the body (relaxed carry) instead of aimed ahead
+		var rot: float = float(o.get("lower", 0.0)) * 0.85
+		var pv := Vector2(4, 3)
+		if rot != 0:
+			g.save(); g.translate(pv.x, pv.y); g.rotate(rot); g.translate(-pv.x, -pv.y)
 		g.rect(7, 0.5, 23.0 if lng else 15.0, 3.5, hc("#161615"))
 		if lng: g.rect(3, 0, 8, 4.5, hc("#5a3e26"))
-		g.lines(PackedVector2Array([Vector2(0, -8), Vector2(8, -2), Vector2(0, 8), Vector2(10, 4)]), body, 4.5)
-		g.circle(9, -1.5, 2.6, skin)
-		g.circle(11, 3.5, 2.6, skin)
+		if rot != 0: g.restore()
+		var e1 := pv + (Vector2(8, -2) - pv).rotated(rot)
+		var e2 := pv + (Vector2(10, 4) - pv).rotated(rot)
+		var h1 := pv + (Vector2(9, -1.5) - pv).rotated(rot)
+		var h2 := pv + (Vector2(11, 3.5) - pv).rotated(rot)
+		g.lines(PackedVector2Array([Vector2(0, -8), e1, Vector2(0, 8), e2]), body, 4.5)
+		g.circle(h1.x, h1.y, 2.6, skin)
+		g.circle(h2.x, h2.y, 2.6, skin)
 	elif o.get("bare", false):   # empty-handed: arms in, nothing in them
 		g.lines(PackedVector2Array([Vector2(0, -8), Vector2(5, -7), Vector2(0, 8), Vector2(5, 7)]), body, 4.5)
 		g.circle(6, -6.5, 2.4, skin)

@@ -19,10 +19,11 @@ var pal := {}
 const LIGHT := {"paper": "#ebe3cb", "panel": "#f4eedd", "panel2": "#e3d9bd", "ink": "#1f2a2e", "dim": "#5f665f", "line": "#c8bb95", "magenta": "#9b2a68", "chart": "#2f5d7c", "good": "#4d6b2a", "bad": "#a3301f", "btn": "#1f2a2e", "btnink": "#f4eedd"}
 const DARK := {"paper": "#141a1c", "panel": "#1b2326", "panel2": "#243034", "ink": "#e8e1cc", "dim": "#9aa39a", "line": "#34443f", "magenta": "#d45a9d", "chart": "#79a9c9", "good": "#9cc063", "bad": "#e3644c", "btn": "#e8e1cc", "btnink": "#141a1c"}
 
-## Testing buttons (All weapons / 1,000 rounds / All trinkets / $1,000 / 1,000 gallons / Best plane / Reveal map) in exploration mode.
+## Testing buttons (All weapons / 1,000 rounds / All trinkets / $1,000 / 1,000 gallons / Best plane / Reveal map /
+## Invulnerable toggle / 100 bombs) in exploration mode.
 ## Set to false to hide them for a release build.
 const DEBUG_BUTTONS := true
-const DBG_KEYS := ["dbg_weapons", "dbg_ammo", "dbg_trinkets", "dbg_cash", "dbg_fuel", "dbg_plane", "dbg_map"]
+const DBG_KEYS := ["dbg_weapons", "dbg_ammo", "dbg_trinkets", "dbg_cash", "dbg_fuel", "dbg_plane", "dbg_map", "dbg_invuln", "dbg_bombs"]
 
 func P(k: String) -> Color: return Color.html(pal[k])
 
@@ -39,7 +40,8 @@ func _ready() -> void:
 	root.theme = th
 	# HUD buttons
 	for spec in [["map", "Map"], ["pause", "Pause"], ["heal", "Heal"], ["throw", "Throw bomb"], ["cruise", "Cruise ×3"], ["board", "Board plane"], ["taxi", "Taxi back to hangar"],
-			["dbg_weapons", "All Weapons"], ["dbg_ammo", "1,000 Rounds"], ["dbg_trinkets", "All Trinkets"], ["dbg_cash", "$1,000"], ["dbg_fuel", "1,000 Gallons"], ["dbg_plane", "Best Plane"], ["dbg_map", "Reveal Map"]]:
+			["dbg_weapons", "All Weapons"], ["dbg_ammo", "1,000 Rounds"], ["dbg_trinkets", "All Trinkets"], ["dbg_cash", "$1,000"], ["dbg_fuel", "1,000 Gallons"], ["dbg_plane", "Best Plane"], ["dbg_map", "Reveal Map"],
+			["dbg_invuln", "Invulnerable"], ["dbg_bombs", "100 Bombs"]]:
 		var b := Button.new()
 		b.text = spec[1]
 		b.focus_mode = Control.FOCUS_NONE
@@ -136,7 +138,10 @@ func _process(_dt: float) -> void:
 	if map_ov.visible:
 		map_panel.reset_size()
 		map_panel.position = ((vs - map_panel.size) / 2.0).floor()
-	toasts.position = Vector2((vs.x - minf(vs.x * 0.92, 440.0)) / 2.0, 190)
+	if game and game.mode == "ground":   # on foot: near the bottom, just above the pop-up messages (Render.FLOATER_*)
+		toasts.position = Vector2((vs.x - minf(vs.x * 0.92, 440.0)) / 2.0, vs.y - 60.0 - Render.FLOATER_LINE * Render.FLOATER_MAX - toasts.get_combined_minimum_size().y)
+	else:
+		toasts.position = Vector2((vs.x - minf(vs.x * 0.92, 440.0)) / 2.0, 190)
 	toasts.size = Vector2(minf(vs.x * 0.92, 440.0), 0)
 
 # ---------------------------------------------------------------- styles
@@ -673,6 +678,8 @@ func _hud_press(k: String) -> void:
 		"dbg_fuel": gm.menu.dbg_fuel()
 		"dbg_plane": gm.menu.dbg_best_plane()
 		"dbg_map": gm.menu.dbg_reveal_map()
+		"dbg_invuln": gm.menu.dbg_invuln()
+		"dbg_bombs": gm.menu.dbg_bombs()
 
 func update_buttons() -> void:
 	var gm := game
@@ -696,6 +703,9 @@ func update_buttons() -> void:
 	if btns.throw.visible: btns.throw.text = "Throw bomb (%d)" % G.bombs
 	btns.board.visible = gr and S != null and S.nearPlane
 	btns.taxi.visible = fl and F.onGround and F.departing and F.spd < 3
+	var inv: bool = gm.invuln
+	btns.dbg_invuln.text = "Invulnerable: ON" if inv else "Invulnerable"
+	btns.dbg_invuln.add_theme_stylebox_override("normal", _sb(Color(155 / 255.0, 42 / 255.0, 104 / 255.0, 0.85) if inv else Color(38 / 255.0, 52 / 255.0, 78 / 255.0, 0.8), Color.html("#d45a9d") if inv else Color(239 / 255.0, 230 / 255.0, 207 / 255.0, 0.25), 1, 6, Vector2(13, 9)))
 	for k in btns: btns[k].reset_size()
 	btns.map.position = Vector2(10, vs.y - 12 - btns.map.size.y)
 	btns.pause.position = Vector2(78, vs.y - 12 - btns.pause.size.y)

@@ -203,6 +203,17 @@ func dbg_cash() -> void:
 	gm.sfx("click")
 	gm.toast("Testing: +$1,000 ($%d total)." % gm.G.cash, "good")
 
+func dbg_invuln() -> void:
+	gm.invuln = not gm.invuln
+	gm.sfx("click")
+	gm.toast("Testing: invulnerable %s." % ("ON, you take no damage" if gm.invuln else "off"), "good")
+
+func dbg_bombs() -> void:
+	if gm.G == null: return
+	gm.G.bombs += 100
+	gm.sfx("click")
+	gm.toast("Testing: +100 bombs (%d total)." % gm.G.bombs, "good")
+
 func dbg_fuel() -> void:
 	if gm.G == null: return
 	gm.G.carried += 1000.0

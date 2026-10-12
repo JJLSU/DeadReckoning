@@ -8,11 +8,11 @@ class_name Blasts
 # a random CAR_FUSE_MIN to CAR_FUSE_MAX seconds. Smoke, fire and the blast all come from one end of the
 # car (the middle of its front or rear third, picked per car). The burnt-out wreck stays put and still blocks.
 # For scale: revolver 30 a shot, lever rifle 95, a red barrel up close 160.
-const CAR_HP := 600.0
+const CAR_HP := 250.0
 const CAR_SMOKE_MIN := 0.6
 const CAR_SMOKE_MAX := 0.8
-const CAR_FUSE_MIN := 3.0
-const CAR_FUSE_MAX := 5.0
+const CAR_FUSE_MIN := 1.5
+const CAR_FUSE_MAX := 3.0
 const CAR_BLAST_R := 250.0       # px (a red barrel is 130)
 const CAR_BLAST_DMG := 100.0     # to zombies, survivors and you at the centre (a barrel: 160 to them, 40 + 8 to you)
 const CAR_BLAST_CAR_DMG := 320.0 # to other cars at the centre, so blasts chain from car to car
@@ -33,6 +33,7 @@ const BLAST_PUSH_DRAG := 0.02    # fraction of the push speed left after one sec
 const BLAST_DMG_TIME := 0.4      # blast damage to people (you, zombies, survivors) lands spread over this many seconds,
 								 # so they're seen flying before they drop. Cars and barrels take theirs at once.
 const BLAST_DEAF_R := 2.0 / 3.0  # deafened (Synth.deafen) within this fraction of a car's or indoor bomb's blast radius
+const BLAST_DEAF_INDOOR := 2.0   # ...or, for a bomb indoors while you're in that same building, within this many blast radii, walls or not
 const BLAST_CRY_MAX := 3         # most cries one blast sets off (the nearest survivors)
 const BLAST_CRY_DELAY := 0.12     # seconds after a barrel or bomb goes off before the first cry
 const BLAST_CRY_DELAY_CAR := 0.3  # ...and after a car blows up (its boom is longer)
@@ -116,15 +117,21 @@ func explode(br: Dictionary, big: bool = false) -> void:
 		if car == br or car.dead: continue
 		var d := maxf(0.0, Vector2(car.x - br.x, car.y - br.y).length() - 28.0)   # car body, not just its hot end
 		if d < R and blast_clear(br, car.x, car.y, car): car_hit(car, (CAR_BLAST_CAR_DMG if big else zd) * (1 - d / R / 1.3))
-	var pd := Vector2(gm.S.p.x - br.x, gm.S.p.y - br.y).length()
+	var pd0 := Vector2(gm.S.p.x - br.x, gm.S.p.y - br.y).length()   # straight-line, walls ignored
+	var pd := pd0
 	if pd < PR and not blast_clear(br, gm.S.p.x, gm.S.p.y): pd = 1e9
+	# ears ringing, everything else turned down for a few seconds: only from a car, or a bomb
+	# going off inside a building, and only close in (BLAST_DEAF_R of the blast radius). If
+	# you're in the same building when a bomb goes off in it, the bang fills the rooms:
+	# deafened out to BLAST_DEAF_INDOOR blast radii, through walls.
+	var brm = gm.survivors.room_at(br.x, br.y)
+	var indoor_bomb: bool = gm.S.thrown.has(br) and brm != null
+	if (pd < R * BLAST_DEAF_R and (big or indoor_bomb)) \
+			or (indoor_bomb and pd0 < R * BLAST_DEAF_INDOOR and is_same(gm.survivors.room_at(gm.S.p.x, gm.S.p.y), brm)):
+		gm.synth.deafen()
 	if pd < R:
 		var pdm := zd * (1 - pd / R / 1.3) if big else 40 * (1 - pd / R) + 8
 		gm.hurt(0.0, "blast")   # the flinch, splatter and sound now; the damage itself over BLAST_DMG_TIME
-		# ears ringing, everything else turned down for a few seconds: only from a car, or a bomb
-		# going off inside a building, and only close in (BLAST_DEAF_R of the blast radius)
-		if pd < R * BLAST_DEAF_R and (big or (gm.S.thrown.has(br) and gm.survivors.room_at(br.x, br.y) != null)):
-			gm.synth.deafen()
 		if gm.survives(gm.G.hp, gm.G.armor, pdm): gm.blood_spray(gm.S.p.x, gm.S.p.y, Vector2(gm.S.p.x - br.x, gm.S.p.y - br.y))
 		blast_burn(gm.S.p, pdm)
 	if pd < PR: blast_push(gm.S.p, br, pd, PR, push)   # you get thrown too

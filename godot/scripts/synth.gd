@@ -279,10 +279,99 @@ func _render(kind: String) -> PackedFloat32Array:
 				_tone(b, f * 1.1, f * 0.65, d, v * 2.5, "sawtooth", 0.0, 0.0, 0.0, false, 0.015, f1)
 				_tone(b, f * 1.1, f * 0.65, d, v * 1.5, "sawtooth", 0.0, 0.0, 0.0, false, 0.015, f2)
 				_noise(b, d * .6, 900, 1.2, v * .6)
+			elif kind.begins_with("no") and kind.length() == 3:
+				_no(b)
+			elif kind.begins_with("yep"):
+				_yep(b)
+			elif kind.begins_with("smoke"):   # a smoke grenade going off: a pop, then the hiss
+				_noise(b, .08, 700, 1.0, .25); _noise(b, 1.8, 2600, .5, .14, "bandpass", .03)
 			elif kind.begins_with("heart"):
 				var v := 0.2
 				_tone(b, 58, 40, .14, v); _tone(b, 52, 36, .16, v * .8, "sine", .2)
 	return b
+
+## A survivor seeing a friend die: a short, sharp "No!" (n into a clipped "o", pitch jumping up
+## and falling). Buzzy voice through moving formants like the "Hey!"; each survivor's own voice
+## pitch is applied at playback.
+func _no(b: PackedFloat32Array) -> void:
+	var vol := 0.14
+	var lead := 0.04   # the n
+	var vd := 0.2 + randf() * 0.04
+	var total := lead + vd
+	var f0 := 125.0 * (0.97 + randf() * 0.06)
+	var lo := Vector2(250, 1600)   # n
+	var va := Vector2(480, 900)    # "o"
+	var vb := Vector2(400, 950)    # closing toward "oo"
+	var n := int(total * FS)
+	_ensure(b, n + int(0.1 * FS))
+	var s1 := [0.0, 0.0, 0.0, 0.0]
+	var s2 := [0.0, 0.0, 0.0, 0.0]
+	var s3 := [0.0, 0.0, 0.0, 0.0]
+	var c3 := _coef("bandpass", 2500, 5.0)
+	var c1: Array = []
+	var c2: Array = []
+	var ph := 0.0
+	for i in n:
+		var t := i / FS
+		var k := t / total
+		var pm: float = lerpf(1.2, 1.4, k / 0.15) if k < 0.15 else lerpf(1.4, 0.9, (k - 0.15) / 0.85)
+		ph += f0 * pm / FS
+		var F := lo
+		var amp: float
+		if t < lead:
+			amp = 0.4 * minf(1.0, t / 0.01)
+		else:
+			var tv := t - lead
+			var kv := tv / vd
+			F = lo.lerp(va.lerp(vb, smoothstep(0.5, 1.0, kv)), minf(1.0, tv / 0.035))
+			amp = lerpf(0.4, 1.2, minf(1.0, tv / 0.02)) * lerpf(1.0, 0.85, kv)
+			amp *= clampf((1.0 - kv) / 0.25, 0.0, 1.0)
+		if i % 64 == 0:
+			c1 = _coef("bandpass", F.x, 3.0)
+			c2 = _coef("bandpass", F.y, 4.0)
+		var x := 2.0 * fmod(ph, 1.0) - 1.0
+		b[i] += (_bq(x, c1, s1) * 2.5 + _bq(x, c2, s2) * 1.5 + _bq(x, c3, s3) * 0.4) * amp * vol
+
+## A survivor heading off to flank you: a quick shouted "Yep!". A buzzy voice gliding from the
+## "y" into the "e", pitch jumping up and falling, cut off by the p (a closure, then a soft puff).
+## Each survivor's own voice pitch is applied at playback.
+func _yep(b: PackedFloat32Array) -> void:
+	var vol := 0.14
+	var f0 := 125.0 * (0.97 + randf() * 0.06)
+	var yd := 0.05                      # the y
+	var ed := 0.15 + randf() * 0.03     # the e
+	var vt := yd + ed
+	var total := vt + 0.05              # then the p's puff
+	var n := int(total * FS)
+	_ensure(b, n + int(0.1 * FS))
+	var vy := Vector2(280, 2250)   # y
+	var ve := Vector2(560, 1800)   # e
+	var s1 := [0.0, 0.0, 0.0, 0.0]
+	var s2 := [0.0, 0.0, 0.0, 0.0]
+	var s3 := [0.0, 0.0, 0.0, 0.0]
+	var sp := [0.0, 0.0, 0.0, 0.0]
+	var c3 := _coef("bandpass", 2500, 5.0)
+	var cp := _coef("bandpass", 900, 1.0)   # the p's puff
+	var c1: Array = []
+	var c2: Array = []
+	var ph := 0.0
+	for i in n:
+		var t := i / FS
+		var out := 0.0
+		if t < vt:
+			var k := t / vt
+			var pm: float = lerpf(1.15, 1.4, k / 0.25) if k < 0.25 else lerpf(1.4, 1.0, (k - 0.25) / 0.75)
+			ph += f0 * pm / FS
+			var F := vy.lerp(ve, smoothstep(0.0, 1.0, t / (yd + 0.03)))
+			if i % 64 == 0:
+				c1 = _coef("bandpass", F.x, 3.0)
+				c2 = _coef("bandpass", F.y, 4.0)
+			var amp: float = lerpf(0.35, 1.2, minf(1.0, t / yd)) * clampf((vt - t) / 0.02, 0.0, 1.0)   # lips close sharply
+			var x := 2.0 * fmod(ph, 1.0) - 1.0
+			out += (_bq(x, c1, s1) * 2.5 + _bq(x, c2, s2) * 1.5 + _bq(x, c3, s3) * 0.4) * amp
+		elif t > vt + 0.03:   # the p released: a short soft puff of air
+			out += _bq(randf() * 2.0 - 1.0, cp, sp) * 0.25 * (1.0 - (t - vt - 0.03) / 0.02)
+		b[i] += out * vol
 
 func _to_stream(b: PackedFloat32Array) -> AudioStreamWAV:
 	var data := PackedByteArray()
@@ -297,7 +386,7 @@ func _to_stream(b: PackedFloat32Array) -> AudioStreamWAV:
 	w.data = data
 	return w
 
-const REF := {"groan": 0.06, "snarl": 0.12, "heart": 0.2, "yell": 0.14, "cry": 0.14, "ugh": 0.14}
+const REF := {"groan": 0.06, "snarl": 0.12, "heart": 0.2, "yell": 0.14, "cry": 0.14, "ugh": 0.14, "no": 0.14, "yep": 0.14, "smoke": 0.14}
 # Each survivor gets a voice pitch at spawn ("voice", a playback pitch scale in this range) used
 # for all their speech ("yell", "cry", "ugh"): about 105-135 Hz for the "Hey!", 150-190 Hz for the cry.
 const VOICE := Vector2(0.875, 1.125)

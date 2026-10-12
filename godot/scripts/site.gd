@@ -48,26 +48,45 @@ func box(c0: int, r0: int, w: int, h: int, o: Dictionary = {}) -> void:
 			var e := r == r0 or r == r0 + h - 1 or c == c0 or c == c0 + w - 1
 			set_(c, r, 1 if e else 2)
 	var top: bool = o.get("top", false)
-	var dw := 4 if o.get("wide", false) else 2
-	var dc := c0 + 1 + int(R() * (w - dw - 1))
-	var dr := r0 if top else r0 + h - 1
-	for k in dw: set_(dc + k, dr, 2)
-	if o.get("extra", true) != false and R() < 0.6:
-		if R() < 0.5:
-			var d := r0 + 1 + int(R() * (h - 3))
-			var sd := c0 if R() < 0.5 else c0 + w - 1
-			set_(sd, d, 2); set_(sd, d + 1, 2)
-		else:
-			var d := c0 + 1 + int(R() * (w - 3))
-			var r2 := r0 + h - 1 if top else r0
-			set_(d, r2, 2); set_(d + 1, r2, 2)
+	# Doors and inner-wall gaps keep a full wall tile between them and any corner or wall
+	# junction, so on a narrow building the doorway shrinks (5 wide gets a 1-tile door).
+	var scs: Array = []
 	if o.get("split", false) and w >= 10:
 		var n := 2 if w >= 16 else 1
 		for k in range(1, n + 1):
 			var sc := c0 + int(round(w * k / float(n + 1)))
+			scs.append(sc)
 			for r in range(r0 + 1, r0 + h - 1): set_(sc, r, 1)
-			var gp := r0 + 1 + int(R() * (h - 3))
-			set_(sc, gp, 2); set_(sc, gp + 1, 2)
+			var n2 := mini(2, h - 4)
+			var gp := r0 + 2 + int(R() * maxi(1, h - 3 - n2))
+			for q in n2: set_(sc, gp + q, 2)
+	# a door start along the top/bottom wall, clear of the corners and the inner walls
+	var door_at := func(dw2: int) -> int:
+		var cand: Array = []
+		for d in range(c0 + 2, c0 + w - 1 - dw2):
+			var ok := true
+			for sc in scs:
+				if sc >= d - 1 and sc <= d + dw2: ok = false
+			if ok: cand.append(d)
+		var pick := R()
+		if cand.is_empty(): return c0 + 2 + int(pick * maxi(1, w - 3 - dw2))
+		return cand[int(pick * cand.size())]
+	var dw := mini(4 if o.get("wide", false) else 2, maxi(1, w - 4))
+	var dc: int = door_at.call(dw)
+	var dr := r0 if top else r0 + h - 1
+	for k in dw: set_(dc + k, dr, 2)
+	if o.get("extra", true) != false and R() < 0.6:
+		# a side door needs the building 6 tall to stay 2 wide; shorter ones get it front or back
+		if R() < 0.5 and h >= 6:
+			var n2 := mini(2, h - 4)
+			var d := r0 + 2 + int(R() * maxi(1, h - 3 - n2))
+			var sd := c0 if R() < 0.5 else c0 + w - 1
+			for k in n2: set_(sd, d + k, 2)
+		else:
+			var n2 := mini(2, w - 4)
+			var d: int = door_at.call(n2)
+			var r2 := r0 + h - 1 if top else r0
+			for k in n2: set_(d + k, r2, 2)
 	var rf = o.get("roof", null)
 	if rf == null:
 		var ar: Array = D.ARCHROOF[A]
@@ -155,13 +174,13 @@ func build(gm, s: Dictionary) -> Dictionary:
 		dock_end = [lx, ly]
 		box_at(8, 6, {"loot": [2, 3]})
 		for k in 3:
-			var w := ri(5, 7)
+			var w := ri(6, 7)
 			box_at(w, ri(4, 5), {"loot": [1, 2]})
 		cars_rand(ri(1, 3)); barrels_rand(ri(2, 3)); trees(ri(45, 60))
 	elif A == "county":
 		var tw := ri(16, 20); var th := ri(7, 8); var tc0 := ri(13, AC - 3 - tw); var tr0 := ry - 6 - th
 		rect_(12, ry - 5, AC - 14, 4, 11); box(tc0, tr0, tw, th, {"split": true, "loot": [3, 5]})
-		box_at(11, 8, {"wide": true, "loot": [2, 3]}, [2, 2, AC - 3, ry - 8]); box_at(4, 4, {"extra": false, "loot": [1, 1]})
+		box_at(11, 8, {"wide": true, "loot": [2, 3]}, [2, 2, AC - 3, ry - 8]); box_at(6, 4, {"extra": false, "loot": [1, 1]})
 		var lw := ri(12, 16); var lh := 7
 		var lp = place(lw, lh, 1)
 		if lp:
@@ -189,9 +208,9 @@ func build(gm, s: Dictionary) -> Dictionary:
 		var area := [f0 + 3, g0 + 3, f1 - 2, g1 - 2]
 		for k in 2:
 			var w := ri(10, 12)
-			box_at(w, 5, {"split": true, "loot": [2, 3]}, area)
+			box_at(w, 6, {"split": true, "loot": [2, 3]}, area)
 		box_at(8, 6, {"wide": true, "loot": [3, 4]}, area)
-		for k in 3: box_at(5, 4, {"extra": false, "loot": [1, 2]}, area)
+		for k in 3: box_at(6, 4, {"extra": false, "loot": [1, 2]}, area)
 		var nsb := ri(4, 6)
 		var k2 := 0
 		var q2 := 0
@@ -246,7 +265,7 @@ func build(gm, s: Dictionary) -> Dictionary:
 		var w1 := ri(11, 13)
 		box_at(w1, ri(7, 8), {"wide": true, "loot": [2, 4]})
 		var w2 := ri(7, 8)
-		box_at(w2, 6, {"loot": [1, 3]}); box_at(5, 4, {"loot": [1, 2]})
+		box_at(w2, 6, {"loot": [1, 3]}); box_at(6, 4, {"loot": [1, 2]})
 		silo(place(2, 2, 1)); silo(place(2, 2, 1))
 		var pw := ri(8, 12); var ph := ri(5, 7)
 		var pp = place(pw, ph, 1)
@@ -298,8 +317,8 @@ func build(gm, s: Dictionary) -> Dictionary:
 		for hr in [sr + 13, sr + 19]:
 			if hr + 5 >= ry - 1: continue
 			c = T0
-			while c + 5 <= T1:
-				var w := ri(5, 7); var h := 5
+			while c + 6 <= T1:
+				var w := ri(6, 7); var h := 5
 				if c < vc + 3 and c + w > vc - 1:
 					c = vc + 3
 					continue
@@ -377,6 +396,26 @@ func build(gm, s: Dictionary) -> Dictionary:
 				if at(c, r) == 2:
 					add_crate.call(c, r, pair[0])
 					break
+	# windows (tile 15): every third outer-wall tile with floor behind it, but none within
+	# 2 tiles of a doorway. A low wall under the window: can't walk through it, but sight
+	# and bullets pass over it.
+	var out_w := func(v2: int) -> bool: return v2 == 0 or v2 == 11 or v2 == 14 or v2 == 3 or v2 == 9
+	for r in ROWS:
+		for c in COLS:
+			if g[r * COLS + c] != 1 or (c + r) % 3 != 0: continue
+			if (out_w.call(at(c, r + 1)) and at(c, r - 1) == 2) or (out_w.call(at(c, r - 1)) and at(c, r + 1) == 2) \
+				or (out_w.call(at(c + 1, r)) and at(c - 1, r) == 2) or (out_w.call(at(c - 1, r)) and at(c + 1, r) == 2):
+				var horiz: bool = at(c, r - 1) == 2 or at(c, r + 1) == 2   # wall runs left-right
+				var near_door := false
+				for k in [-2, -1, 1, 2]:
+					if (at(c + k, r) if horiz else at(c, r + k)) == 2: near_door = true
+				# and a full wall tile between the window and any corner or wall junction
+				for k in [-1, 1]:
+					var cc2: int = c + k if horiz else c
+					var rr2: int = r if horiz else r + k
+					var perp: bool = (at(cc2, rr2 - 1) == 1 or at(cc2, rr2 + 1) == 1) if horiz else (at(cc2 - 1, rr2) == 1 or at(cc2 + 1, rr2) == 1)
+					if perp: near_door = true
+				if not near_door: set_(c, r, 15)
 	var tc := PackedColorArray()
 	tc.resize(COLS * ROWS)
 	for r in ROWS:
@@ -386,7 +425,7 @@ func build(gm, s: Dictionary) -> Dictionary:
 			var j := (U.hash3(c, r, s.id + 11) - 0.5) * 5
 			var b: Array
 			if v == 2: b = [104 + j, 86 + j, 64 + j]
-			elif v == 1: b = [40, 36, 31]
+			elif v == 1 or v == 15: b = [40, 36, 31]
 			elif v == 3: b = [122 + j, 104 + j, 72 + j] if s.type == "dirt" else [58 + j * .4, 57 + j * .4, 55 + j * .4]
 			elif v == 6: b = [76 + gj, 90 + gj, 52 + gj * .6]
 			elif v == 8: b = [40 + j * .3, 66 + j * .3, 78 + j * .3]
@@ -440,6 +479,42 @@ static func bake_draw(g: Pen, st: Dictionary) -> void:
 		return G1[r * cols + cc]
 	var H1 := func(a: int, b: int, k: int) -> float: return U.hash3(a, b, sid * 7 + k)
 	var dirt: bool = st.s.type == "dirt"
+	# Walls (1) and windows (15) are half a tile thick (same shape as Game.wall_part): a
+	# band down the middle with arms to the neighbouring wall tiles; a wall end also
+	# reaches its far edge. The rest of the tile shows what is next to it.
+	var wl := func(v2: int) -> bool: return v2 == 1 or v2 == 15
+	var arms := func(cc: int, r: int) -> Array:
+		var L: bool = wl.call(at.call(cc - 1, r))
+		var R: bool = wl.call(at.call(cc + 1, r))
+		var Up: bool = wl.call(at.call(cc, r - 1))
+		var Dn: bool = wl.call(at.call(cc, r + 1))
+		if int(L) + int(R) + int(Up) + int(Dn) == 1:
+			L = L or R; R = L; Up = Up or Dn; Dn = Up
+		return [L, R, Up, Dn]
+	var WI := TS / 4.0
+	var band := func(x: float, y: float, a: Array) -> Array:   # rects [x, y, w, h]
+		var o := [[x + WI, y + WI, TS / 2.0, TS / 2.0]]
+		if a[0]: o.append([x, y + WI, WI, TS / 2.0])
+		if a[1]: o.append([x + TS - WI, y + WI, WI, TS / 2.0])
+		if a[2]: o.append([x + WI, y, TS / 2.0, WI])
+		if a[3]: o.append([x + WI, y + TS - WI, TS / 2.0, WI])
+		return o
+	# ground colour each tile shows, with the room floors that are drawn later
+	var nc := tc.duplicate()
+	for rm in st.rooms:
+		if rm.floor == null: continue
+		var fs: String = rm.floor
+		var fcol: Color
+		if fs.begins_with("checker"):
+			var cA: Array = ["#d8d6cf", "#a9aaa6"] if fs == "checker" else (["#d8d6cf", "#5e7a5a"] if fs == "checker2" else ["#d8d6cf", "#8a3a2a"])
+			fcol = U.hx(cA[0]).lerp(U.hx(cA[1]), .5)
+		else: fcol = U.hx(fs)
+		for r in range(rm.r + 1, rm.r + rm.h - 1):
+			for cc in range(rm.c + 1, rm.c + rm.w - 1):
+				if G1[r * cols + cc] == 2: nc[r * cols + cc] = fcol
+	var gcol := func(cc: int, r: int, dflt: Color) -> Color:
+		if cc < 0 or r < 0 or cc >= cols or r >= rows: return dflt
+		return nc[r * cols + cc]
 	for r in rows:
 		for cc in cols:
 			var i := r * cols + cc
@@ -447,6 +522,22 @@ static func bake_draw(g: Pen, st: Dictionary) -> void:
 			var x := cc * TS
 			var y := r * TS
 			g.rect(x, y, TS + 0.5, TS + 0.5, tc[i])
+			if v == 1 or v == 15:
+				# the open strips around the band, in 8px cells, coloured like their neighbour
+				var a: Array = arms.call(cc, r)
+				for ca in 4:
+					for cb in 4:
+						var mx := ca == 1 or ca == 2
+						var my := cb == 1 or cb == 2
+						if mx and my: continue
+						if my and ((ca == 0 and a[0]) or (ca == 3 and a[1])): continue
+						if mx and ((cb == 0 and a[2]) or (cb == 3 and a[3])): continue
+						var dx := 0 if mx else (-1 if ca == 0 else 1)
+						var dy := 0 if my else (-1 if cb == 0 else 1)
+						if dx != 0 and dy != 0 and wl.call(at.call(cc + dx, r + dy)):
+							if not wl.call(at.call(cc, r + dy)): dx = 0
+							elif not wl.call(at.call(cc + dx, r)): dy = 0
+						g.rect(x + ca * 8, y + cb * 8, 8.5, 8.5, gcol.call(cc + dx, r + dy, tc[i]))
 			if v == 0 or v == 5 or v == 7 or v == 10 or v == 13:
 				for k in 7:
 					var px: float = x + H1.call(cc * 9 + k, r, 1) * TS
@@ -507,7 +598,9 @@ static func bake_draw(g: Pen, st: Dictionary) -> void:
 	for r in rows:
 		for cc in cols:
 			var v := G1[r * cols + cc]
-			if v == 1 or v == 10: g.rect(cc * TS + 5, r * TS + 7, TS, TS, Color(0, 0, 0, .3))
+			if v == 10: g.rect(cc * TS + 5, r * TS + 7, TS, TS, Color(0, 0, 0, .3))
+			elif v == 1 or v == 15:
+				for b in band.call(cc * TS + 5, r * TS + 7, arms.call(cc, r)): g.rect(b[0], b[1], b[2], b[3], Color(0, 0, 0, .3))
 	for r in rows:
 		for cc in cols:
 			if G1[r * cols + cc] == 5: g.ellipse((cc + .5) * TS + 9, (r + .5) * TS + 12, 30, 24, 0, U.rgb(10, 18, 8, .33))
@@ -516,15 +609,36 @@ static func bake_draw(g: Pen, st: Dictionary) -> void:
 			var v := G1[r * cols + cc]
 			var x := cc * TS
 			var y := r * TS
-			if v == 1:
-				g.rect(x, y, TS, TS, U.hx("#3a332b"))
-				var c1 := U.hx("#5b4f41")
-				if at.call(cc, r - 1) != 1: g.rect(x, y, TS, 6, c1)
-				if at.call(cc - 1, r) != 1: g.rect(x, y, 4, TS, c1)
-				var c2 := U.hx("#221d18")
-				if at.call(cc, r + 1) != 1: g.rect(x, y + TS - 4, TS, 4, c2)
-				if at.call(cc + 1, r) != 1: g.rect(x + TS - 3, y, 3, TS, c2)
-				g.rect(x + int(H1.call(cc, r, 15) * 20), y + 12, 9, 1, Color(0, 0, 0, .2))
+			if v == 1 or v == 15:
+				var a: Array = arms.call(cc, r)
+				var h := TS / 2.0
+				if v == 15:   # window: the low wall under it, lighter than the full-height wall
+					var lw := U.hx("#5e5242")
+					var lt := U.hx("#706350")
+					var jb := U.hx("#221d18")
+					if a[0] or a[1]:   # wall runs left-right
+						g.rect(x, y + WI, TS, h, lw)
+						g.rect(x, y + WI, TS, 2, lt)   # sill catching the light
+						g.rect(x, y + WI - 1, 2, h + 2, jb); g.rect(x + TS - 2, y + WI - 1, 2, h + 2, jb)
+					else:
+						g.rect(x + WI, y, h, TS, lw)
+						g.rect(x + WI, y, 2, TS, lt)
+						g.rect(x + WI - 1, y, h + 2, 2, jb); g.rect(x + WI - 1, y + TS - 2, h + 2, 2, jb)
+				else:
+					for b in band.call(x, y, a): g.rect(b[0], b[1], b[2], b[3], U.hx("#3a332b"))
+					var c1 := U.hx("#5b4f41")
+					var c2 := U.hx("#221d18")
+					# lit top/left faces, shaded bottom/right faces, wherever the band is exposed
+					if not a[2]: g.rect(x + WI, y + WI, h, 3, c1)
+					if not a[3]: g.rect(x + WI, y + TS - WI - 2, h, 2, c2)
+					if not a[0]: g.rect(x + WI, y + WI, 2, h, c1)
+					if not a[1]: g.rect(x + TS - WI - 2, y + WI, 2, h, c2)
+					if a[0]: g.rect(x, y + WI, WI, 3, c1); g.rect(x, y + TS - WI - 2, WI, 2, c2)
+					if a[1]: g.rect(x + TS - WI, y + WI, WI, 3, c1); g.rect(x + TS - WI, y + TS - WI - 2, WI, 2, c2)
+					if a[2]: g.rect(x + WI, y, 2, WI, c1); g.rect(x + TS - WI - 2, y, 2, WI, c2)
+					if a[3]: g.rect(x + WI, y + TS - WI, 2, WI, c1); g.rect(x + TS - WI - 2, y + TS - WI, 2, WI, c2)
+					if a[0] or a[1]: g.rect(x + int(H1.call(cc, r, 15) * 20) + 2, y + 15, 9, 1, Color(0, 0, 0, .2))
+					elif a[2] or a[3]: g.rect(x + 15, y + int(H1.call(cc, r, 15) * 20) + 2, 1, 9, Color(0, 0, 0, .2))
 			elif v == 6:
 				var ln := PackedVector2Array()
 				if at.call(cc + 1, r) == 6:
@@ -659,35 +773,6 @@ static func bake_draw(g: Pen, st: Dictionary) -> void:
 			else:
 				g.rect(-10, -5, 26, 18, sh); g.rect(-12, -7, 26, 16, U.hx("#b8ae98")); g.ellipse(2, 1, 6, 4, .3, U.rgb(110, 70, 40, .4))
 			g.restore()
-	var out_f := func(v2: int) -> bool: return v2 == 0 or v2 == 11 or v2 == 14 or v2 == 3 or v2 == 9
-	for r in rows:
-		for cc in cols:
-			if G1[r * cols + cc] != 1: continue
-			var x := cc * TS
-			var y := r * TS
-			var hz = null
-			if out_f.call(at.call(cc, r + 1)) and at.call(cc, r - 1) == 2: hz = [0, 1]
-			elif out_f.call(at.call(cc, r - 1)) and at.call(cc, r + 1) == 2: hz = [0, -1]
-			elif out_f.call(at.call(cc + 1, r)) and at.call(cc - 1, r) == 2: hz = [1, 0]
-			elif out_f.call(at.call(cc - 1, r)) and at.call(cc + 1, r) == 2: hz = [-1, 0]
-			if hz == null or (cc + r) % 3 != 0: continue
-			var q: float = H1.call(cc, r, 86)
-			var horiz: bool = hz[0] == 0
-			if horiz: g.rect(x + 6, y + 12, 20, 8, U.hx("#4a5a62"))
-			else: g.rect(x + 12, y + 6, 8, 20, U.hx("#4a5a62"))
-			if q < .3:
-				var bc := U.hx("#6a5236")
-				if horiz:
-					g.rect(x + 3, y + 11, 26, 3, bc); g.rect(x + 3, y + 18, 26, 3, bc)
-				else:
-					g.rect(x + 11, y + 3, 3, 26, bc); g.rect(x + 18, y + 3, 3, 26, bc)
-			else:
-				var gl := U.rgb(220, 235, 240, .5)
-				if horiz: g.polyline(PackedVector2Array([Vector2(x + 8, y + 13), Vector2(x + 16, y + 19), Vector2(x + 22, y + 13)]), gl, 1)
-				else: g.polyline(PackedVector2Array([Vector2(x + 13, y + 8), Vector2(x + 19, y + 16), Vector2(x + 13, y + 22)]), gl, 1)
-				if q < .65:
-					for z in 5:
-						g.rect(x + 16 + hz[0] * (18 + H1.call(z, cc, 87) * 14) + (H1.call(cc, z, 88) - .5) * 16, y + 16 + hz[1] * (18 + H1.call(z, r, 89) * 14) + (H1.call(r, z, 90) - .5) * 16, 2, 1.5, U.rgb(200, 220, 230, .55))
 	for k in 7:
 		var cc := 1 + int(H1.call(k, 3, 91) * (cols - 2))
 		var r := 1 + int(H1.call(k, 4, 92) * (rows - 2))

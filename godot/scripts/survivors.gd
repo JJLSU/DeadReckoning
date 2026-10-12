@@ -8,6 +8,7 @@ const GARRISON_MIN := 11       # total armed survivors at one of these strips...
 const GARRISON_MAX := 18
 const GARRISON_OUT_MIN := 6    # ...of which this many start outside; the rest wait in buildings
 const GARRISON_OUT_MAX := 9
+const GARRISON_SPREAD_TRIES := 24   # candidate spots per outside patrol group (more = more even)
 # Reinforcements (noise waves, see Game.upd_spawns()) don't all turn up at once: each wave is
 # queued (S.svq) and they arrive in groups of SV_REINF_GROUP, SV_REINF_GAP seconds apart, each
 # group together from a random map edge. They only know roughly where you are and sweep toward
@@ -20,10 +21,25 @@ const SV_PATROL_MAX := 6.0
 const SV_PATROL_SPD := 0.4     # walking speed while patrolling, fraction of their normal 85 px/s
 # Getting clear of blasts (see sv_flee()): anyone inside the blast radius (plus SV_FLEE_MARGIN) of a
 # lit bomb, a burning car or a lit barrel, with no wall shielding them, drops what they're doing
-# after a reaction time of SV_FLEE_REACT seconds and runs out of it at SV_FLEE_SPD.
+# after a reaction time of SV_FLEE_REACT seconds and runs at SV_FLEE_SPD for a refuge: a spot
+# with a wall between them and the blast at least SV_REFUGE_MIN x its radius from it, or failing
+# that one clear of the radius. There they wait until it has gone off.
+# Under fire (sv_near_miss(), sv_dodge()): in a fight, your bullets passing within SV_SUP_R px of
+# a survivor (or hitting them) spook them: after a SV_SUP_WAIT beat, for SV_SUP_T s they get out of the line of fire,
+# sideways away from where it passed, at SV_SUP_SPD, loosing off wild snap shots if they can see
+# you. Only those with no cover dodge: in cover or heading for it (a wall or smoke) they hold or
+# keep going, peekers ducking back in.
+const SV_SUP_R := 48.0   # 1.5 tiles (Greg)
+const SV_SUP_T := Vector2(0.2, 0.3)   # a dodge is a quick sidestep: never more than 0.3 s on the move (Greg)
+const SV_SUP_NODG := 1.5       # driven out of cover (flanked), they don't dodge for this long while they find more
+const SV_SUP_SPD := 1.3
+const SV_SUP_WAIT := Vector2(0.3, 0.6)   # a beat before each dodge: they don't react instantly (Greg)
 const SV_FLEE_MARGIN := 24.0
 const SV_FLEE_REACT := Vector2(0.25, 0.7)
 const SV_FLEE_SPD := 1.25
+const SV_REFUGE_MIN := 0.8       # shielded refuge at least this fraction of the blast radius from it
+const SV_REFUGE_OPEN_PEN := 96.0 # a refuge in the open (clear of the radius, no wall) scored as if this many px further
+const SV_REFUGE_SEARCH := 3      # look this many tiles past the blast's reach round the survivor
 const SV_SPD_VAR := Vector2(0.85, 1.0)   # each survivor's own speed multiplier (on everything they do) is picked from this range
 const SV_PAUSE_MIN := 1.5      # seconds standing and looking around between legs
 const SV_PAUSE_MAX := 4.5
@@ -44,6 +60,65 @@ const SV_WANDER_CHANCE := 0.10
 const SV_VIEW_HALF := 60.0
 const SV_VIEW_HALF_ALERT := 90.0
 const SV_SENSE := 80.0
+const SV_SPOT_R := 420.0
+# Looking through a window (tile 15), a survivor sees only SV_WINDOW_SIGHT tiles past it.
+const SV_WINDOW_SIGHT := 3.0
+# Each survivor has an intelligence stat v.iq from SV_IQ (picked when they spawn). Unalerted, their
+# spotting range, SV_SENSE and view cone are scaled by it; their reaction time to a lit blast is
+# divided by it; and their chance to look for cover each time is SV_COVER_SEEK x iq (capped at 1).
+const SV_IQ := Vector2(0.75, 1.25)
+const SV_COVER_SEEK := 0.8
+# Names, and reacting to a friend's death (sv_mourn()): of those who see a survivor die, only the
+# SV_MOURN_MAX closest may cry out "No!" with the dead man's name popping up over them,
+# SV_MOURN_ALERT of the time mid-fight, SV_MOURN_CALM if they weren't alerted, and only if they're
+# on your screen (nobody cries out off screen). They turn to the body straight away (at
+# SV_WHIP_SPD) and stand stunned; the first cries out at once, the others SV_MOURN_STAGGER s
+# apart, each staying frozen SV_MOURN_STUN s after their cry.
+# Bodies (S.svBodies) stay where they fell. An unalerted survivor who sees one within SV_EXAM_R
+# tiles always goes over to look (sv_exam()): cries out "No!" and the name on reaching it, a moment
+# later asks one of SV_EXAM_LINES, then patrols round it. Unalerted witnesses of the death that
+# close go over too, without crying out again (or at all, if it wasn't their place to).
+const SV_NAMES := ["Jack", "Jake", "John", "Joe", "Jim", "Jeff", "Tom", "Tim", "Ted", "Bob", "Bill", "Ben", "Dan", "Dave",
+	"Don", "Doug", "Frank", "Fred", "Hank", "Mike", "Mark", "Matt", "Nick", "Pete", "Paul", "Ray", "Rick", "Sam", "Steve", "Walt"]
+const SV_MOURN_ALERT := 0.15
+const SV_MOURN_CALM := 0.75
+const SV_MOURN_MAX := 3
+const SV_MOURN_STUN := 1.0
+const SV_MOURN_STAGGER := Vector2(0.12, 0.3)
+const SV_EXAM_R := 6.0          # tiles: an unalerted survivor who sees a body this close goes to look
+const SV_EXAM_NEAR := 30.0      # px from the body where they stop
+const SV_EXAM_SPD := 0.7        # walking over, fraction of 85 px/s
+const SV_EXAM_WALK := 10.0      # give up walking over after this many seconds
+const SV_EXAM_CRY := 0.4        # seconds at the body before crying out
+const SV_EXAM_ASK := Vector2(1.2, 1.8)   # then this long before asking...
+const SV_EXAM_LINES := ["What happened here?", "Who did this?"]
+const SV_EXAM_DONE := 1.5       # ...and this long standing there before they patrol
+const SV_EXAM_PATROL := 4.0     # patrol radius round the body afterwards, tiles
+const SV_COVER_SKIP_T := Vector2(2.0, 4.0)
+# Smoke grenades (upd_smoke(), sv_smoke_throw()): SV_SMOKE_CHANCE of survivors carry one. In a fight
+# with no cover close by they lob it toward you, between you and them: SV_SMOKE_FRAC of the way
+# (SV_SMOKE_THROW px min to max), never so far its cloud would reach you. It lands and blooms
+# into a cloud of radius SV_SMOKE_R over SV_SMOKE_BLOOM s that stays thick, then thins out and spreads from
+# SV_SMOKE_THIN of the way through its SV_SMOKE_LIFE s until it's gone. Thick enough smoke
+# (density over SV_SMOKE_SIGHT) blocks sight both ways and hides whoever's in it; survivors use
+# it as cover (lying low in it, then firing out of it without stepping out) while it's still
+# thicker than SV_SMOKE_HOLD. Other carriers who see a smoke thrown may add theirs to either side
+# of it (sv_smoke_join()), never more than SV_SMOKE_MAX out at once.
+const SV_SMOKE_CHANCE := 0.35
+const SV_SMOKE_THROW := Vector2(80.0, 220.0)   # shortest and longest throw, px
+const SV_SMOKE_FRAC := 0.5      # fraction of the way to you they aim for
+const SV_SMOKE_R := 72.0
+const SV_SMOKE_BLOOM := 1.5
+const SV_SMOKE_LIFE := 20.0
+const SV_SMOKE_THIN := 0.55
+const SV_SMOKE_SIGHT := 0.35
+const SV_SMOKE_HOLD := 0.6
+const SV_SMOKE_JOIN := 0.6     # chance a smoke carrier who sees a friend throw smoke throws theirs alongside...
+const SV_SMOKE_GAP := 0.8      # ...this many cloud diameters to one side of the first, widening the screen
+const SV_SMOKE_REACT := Vector2(0.2, 0.6)   # seconds before they start winding up
+const SV_SMOKE_MAX := 3        # most smokes out at once (clouds, in the air, or being wound up)
+const SV_SMOKE_BLIND := 2.0     # firing out of smoke at where they last saw or heard you: this many times their usual spread
+const SV_SMOKE_PEN := 24.0   # smoke scored as if this many px further than a wall   # didn't think of cover: fight in the open this long before the next chance
 const SV_ALARM_R := 500.0      # a survivor spotting you sends everyone within this many px (of them) searching
 const SV_SWEEP_SPREAD := 6.0   # how far off your actual position they aim, tiles
 const SV_SWEEP_SPD := 0.8     # sweep speed, fraction of 85 px/s
@@ -52,6 +127,14 @@ const SV_SWEEP_R := 7.0        # patrol radius once they get there, tiles
 # yells before opening fire. The yell itself adds nothing to the noise meter.
 const SV_YELL_MIN := 0.7       # seconds between the yell and their first shot
 const SV_YELL_MAX := 1.0
+# Reacting to spotting you: a startled hop (SV_STARTLE_T s, drawn as a little jump), a fast but
+# visible turn to face you while they yell (SV_WHIP_SPD rad/s), and the gun, carried lowered
+# across the body while unalerted, coming up to aim over SV_RAISE_T s (lowered again over
+# SV_LOWER_T s once they stand down). v.gup: 0 lowered, 1 aiming.
+const SV_STARTLE_T := 0.25
+const SV_WHIP_SPD := 14.0
+const SV_RAISE_T := 0.35
+const SV_LOWER_T := 1.2
 const SV_YELL_GAP := Vector2(3.0, 15.0)   # seconds (random in this range) before anyone else may yell
 # In a firefight (after the yell) survivors fight from cover, see sv_cover_fight(): they pick a
 # spot near them with something bullet-proof between it and you (a wall, sandbags, rocks, a
@@ -71,13 +154,18 @@ const SV_PEEK_AIM := 0.35       # stepping out: seconds from seeing you to their
 const SV_PEEK_MIN := 1.25       # seconds they stay out shooting once they see you
 const SV_PEEK_MAX := 2.5
 const SV_PEEK_LOOK := 1.5       # out this long without seeing you counts as a miss...
-const SV_PEEK_MISSES := 2       # ...and after this many misses in a row they leave cover to hunt for you
+const SV_PEEK_MISSES := 3       # ...and after this many misses in a row they leave cover to hunt for you
 const SV_COVER_CAR_PEN := 64.0  # an intact car is worse cover than a wall: scored as if this many px further away
 const SV_COVER_BARREL := 110.0  # won't take cover within this many px of a red barrel
+const SV_COVER_FAR_PREF := 1.0   # lever rifle and crossbow: prefer cover at the far end of their range, weighted this much (others 0.5, mid-range)
 const SV_SNAP_SPREAD := 3.5     # running to cover they fire snap shots, this many times their usual spread
 const SV_LEAP_PEEKS := 3        # after this many peeks with shots they move up to cover closer to you...
-const SV_LEAP_R := 4.0          # ...looking this many tiles round them, at least a tile nearer you
+const SV_LEAP_R := 4.0          # ...looking this many tiles round them, at least a tile nearer you (never inside their gun's near range)
+const SV_RANGE_K := 1.25        # scales every gun's preferred fighting distance (sv_range())
+const SV_RANGE_CAP := 440.0     # ...but nobody wants to be further than this (they see 520)
 const SV_RUSH_CHANCE := 0.2     # rushers never take cover or flank: they push in on you firing
+const SV_STRAFE := 0.35        # sideways speed strafing round you in the open, fraction of 85 px/s (was 0.7)
+const SV_STRAFE_PAUSE := Vector2(0.5, 1.5)   # standing still (still shooting) between strafes, seconds
 const SV_RUSH_NEAR := 130.0     # how close (px) a rusher pushes before strafing round you
 # Flanking (see sv_squad() and sv_flank()): while SV_FLANK_MIN or more survivors are fighting
 # you, half of them circle round to your left and right, about SV_FLANK_ANGLE from the side
@@ -92,6 +180,7 @@ const SV_FLANK_PATH := 40        # longest walk to a flanking spot, tiles
 const SV_FLANK_MOVE := 4.0       # pick a new flanking spot once you've moved this many tiles
 const SV_FLANK_MAXT := 10.0      # give up on a flank not reached in this many seconds
 const SV_FLANK_ENGAGE := 150.0   # a flanker this close to you (px) and seeing you stops sneaking and fights
+const SV_FLANK_CALL_GAP := Vector2(3.0, 6.0)   # a new flanker calls out "Flanking!"; nobody else does for this long
 const SV_FLANK_REST := 8.0       # after giving up, not picked to flank again for this many seconds
 # Armed survivors' guns. Chance of each weapon ~ exp(-price / (SV_GUN_BASE + SV_GUN_STEP x danger)):
 # cheaper guns are always more common (scarcity), but dearer ones show up more where danger is high.
@@ -156,13 +245,147 @@ func pick_sv_weapon(danger: int) -> int:
 		if r <= 0: return i
 	return 0
 
+## A name for a new survivor, one nobody else on this strip has if possible.
+func sv_name() -> String:
+	var used := {}
+	if gm.S:
+		for o in gm.S.get("sv", []): used[o.get("name", "")] = true
+	var avail: Array = SV_NAMES.filter(func(nm): return not used.has(nm))
+	if avail.is_empty(): avail = SV_NAMES
+	return avail[randi() % avail.size()]
+
+## Is (x1, y1) close enough to the last window the sightline from (x0, y0) crosses?
+## True when the line crosses no window at all.
+func window_sight_ok(x0: float, y0: float, x1: float, y1: float) -> bool:
+	var S = gm.S
+	var d := Vector2(x1 - x0, y1 - y0).length()
+	var n := int(ceil(d / 8.0))
+	var wc := -1
+	var wr := -1
+	for i in range(1, n):
+		var t := float(i) / n
+		var c := int(floor((x0 + (x1 - x0) * t) / gm.TS))
+		var r := int(floor((y0 + (y1 - y0) * t) / gm.TS))
+		if c >= 0 and r >= 0 and c < S.cols and r < S.rows and S.g[r * S.cols + c] == 15: wc = c; wr = r
+	if wc < 0: return true
+	return Vector2(x1 - (wc + 0.5) * gm.TS, y1 - (wr + 0.5) * gm.TS).length() <= (SV_WINDOW_SIGHT + 0.5) * gm.TS
+
+## Would survivor v see something happen at (x, y)? Same rules as spotting you.
+func sv_sees(v: Dictionary, x: float, y: float) -> bool:
+	var d := Vector2(x - v.x, y - v.y).length()
+	if d >= 520 or not gm.los(v.x, v.y, x, y) or not window_sight_ok(v.x, v.y, x, y): return false
+	var fa := absf(U.ang_diff(atan2(y - v.y, x - v.x), float(v.ang)))
+	if v.alert: return d < SV_SENSE or fa < deg_to_rad(SV_VIEW_HALF_ALERT)
+	var iq: float = v.get("iq", 1.0)
+	return d < SV_SPOT_R * iq and (d < SV_SENSE * iq or fa < deg_to_rad(SV_VIEW_HALF * iq))
+
+## Survivor `dead` has just been killed: their body is left for others to find, and some of
+## those who saw it cry out.
+func sv_mourn(dead: Dictionary) -> void:
+	if gm.S == null or not dead.has("name"): return
+	gm.S.svBodyN = int(gm.S.get("svBodyN", 0)) + 1
+	var bd := {"id": gm.S.svBodyN, "x": dead.x, "y": dead.y, "name": String(dead.name)}
+	if not gm.S.has("svBodies"): gm.S.svBodies = []
+	gm.S.svBodies.append(bd)
+	var ws: Array = []
+	for v in gm.S.sv:
+		if v.dead or is_same(v, dead): continue
+		if sv_sees(v, dead.x, dead.y): ws.append(v)
+	# closest first: only the nearest SV_MOURN_MAX may cry out
+	ws.sort_custom(func(a, b): return Vector2(a.x - dead.x, a.y - dead.y).length_squared() < Vector2(b.x - dead.x, b.y - dead.y).length_squared())
+	var at := 0.0
+	var first := true
+	for i in ws.size():
+		var v: Dictionary = ws[i]
+		sv_know_body(v, bd)
+		if i < SV_MOURN_MAX and on_screen(v.x, v.y) and randf() < (SV_MOURN_ALERT if v.alert else SV_MOURN_CALM):
+			# frozen, turning to the body, until SV_MOURN_STUN after their cry
+			v.mourn = {"name": String(dead.name), "t": at, "x": dead.x, "y": dead.y}
+			v.mst = at + SV_MOURN_STUN
+			if first: sv_mourn_tick(v, 0.0)   # the first cries out at once
+			first = false
+			at += randf_range(SV_MOURN_STAGGER.x, SV_MOURN_STAGGER.y)
+		if not v.alert and Vector2(v.x - dead.x, v.y - dead.y).length() <= SV_EXAM_R * gm.TS:
+			sv_exam_start(v, bd, true)   # then over to look (no second cry)
+
+## A witness frozen by a friend's death: turns to face the body, and cries out "No!" in their
+## own voice (quieter further from you) when their turn comes, the name popping up over them.
+func sv_mourn_tick(v: Dictionary, dt: float) -> void:
+	var m: Dictionary = v.mourn
+	v.ang = rotate_toward(float(v.ang), atan2(m.y - v.y, m.x - v.x), SV_WHIP_SPD * dt)
+	if m.t < 0: return   # already cried out
+	m.t -= dt
+	if m.t > 0: return
+	m.t = -1.0
+	sv_say(v, String(m.name) + "!", "no")
+
+## Survivor v says something over their head, out loud in their own voice if `snd` names a synth
+## voice sound ("no", "yep"; quieter further from you). Only if they're on your screen: nobody
+## calls out off it.
+func sv_say(v: Dictionary, text: String, snd: String = "") -> void:
+	if not on_screen(v.x, v.y): return
+	if snd != "":
+		var d := Vector2(v.x - gm.S.p.x, v.y - gm.S.p.y).length()
+		gm.sfx(snd, 0.14 * (1.0 - 0.6 * minf(1.0, d / 900.0)), v.get("voice", 1.0))
+	gm.floater(v.x, v.y - 26, text, "#e8d8b0", true)   # over the speaker's head
+
+## Is (x, y) inside the screen?
+func on_screen(x: float, y: float) -> bool:
+	var gs: float = gm.ground_scale()
+	return absf(x - float(gm.S.get("cx", gm.S.p.x))) < gm.Wv * 0.5 / gs and absf(y - float(gm.S.get("cy", gm.S.p.y))) < gm.Hv * 0.5 / gs
+
+## Survivor v now knows about body bd (won't go and look at it again).
+func sv_know_body(v: Dictionary, bd: Dictionary) -> void:
+	if not v.has("kd"): v.kd = []
+	if not v.kd.has(bd.id): v.kd.append(bd.id)
+
+## Unalerted v looks for bodies they haven't seen yet within SV_EXAM_R tiles; one they spot,
+## they go and look at.
+func sv_find_body(v: Dictionary) -> void:
+	for bd in gm.S.get("svBodies", []):
+		if v.get("kd", []).has(bd.id): continue
+		if Vector2(bd.x - v.x, bd.y - v.y).length() > SV_EXAM_R * gm.TS or not sv_sees(v, bd.x, bd.y): continue
+		sv_know_body(v, bd)
+		sv_exam_start(v, bd, false)
+		return
+
+## v heads over to look at body bd. `quiet`: they've cried out already (or weren't to).
+func sv_exam_start(v: Dictionary, bd: Dictionary, quiet: bool) -> void:
+	v.exam = {"x": bd.x, "y": bd.y, "name": bd.name, "ph": 0, "t": SV_EXAM_WALK, "quiet": quiet}
+
+## Looking at a body: walk over, cry out its name, ask what happened, then patrol round it.
+## Returns the steer vector.
+func sv_exam(v: Dictionary, dt: float) -> Vector2:
+	var e: Dictionary = v.exam
+	var to := Vector2(e.x - v.x, e.y - v.y)
+	if e.ph == 0:   # walking over
+		e.t -= dt
+		if to.length() > SV_EXAM_NEAR and e.t > 0:
+			var nv := sv_nav(v, e.x, e.y) * SV_EXAM_SPD
+			if nv.length() > 0: v.ang = atan2(nv.y, nv.x)
+			return nv
+		e.ph = 1; e.t = SV_EXAM_CRY
+	v.ang = rotate_toward(float(v.ang), to.angle(), SV_WHIP_SPD * 0.3 * dt)   # looking down at it
+	e.t -= dt
+	if e.t > 0: return Vector2.ZERO
+	if e.ph == 1:
+		if not e.quiet: sv_say(v, String(e.name) + "!", "no")
+		e.ph = 2; e.t = randf_range(SV_EXAM_ASK.x, SV_EXAM_ASK.y)
+	elif e.ph == 2:
+		sv_say(v, String(SV_EXAM_LINES[randi() % SV_EXAM_LINES.size()]))
+		e.ph = 3; e.t = SV_EXAM_DONE
+	else:
+		v.erase("exam")
+		if not v.has("rm"): sv_repost(v, e.x, e.y, SV_EXAM_PATROL)   # (indoor ones go back to their room)
+	return Vector2.ZERO
+
 ## One armed survivor.
 func new_sv(x: float, y: float) -> Dictionary:
 	var dg: int = int(gm.S.danger) if gm.S else 1
 	var arm: float = SV_ARMOR if randf() < float(SV_ARMOR_CHANCE[clampi(dg, 0, SV_ARMOR_CHANCE.size() - 1)]) else 0.0
 	var bomb := dg >= 2 and randf() < SV_BOMB_BASE + SV_BOMB_STEP * (dg - 2)
 	return {"x": x, "y": y, "w": pick_sv_weapon(dg), "burst": 0, "armor": arm, "shirt": ["#5a5f3a", "#4a3a2a", "#3f4f5f"][randi() % 3], "skin": D.sv_skin(),
-		"cap": "#3a3226" if randf() < 0.5 else "", "bomb": bomb, "rush": randf() < SV_RUSH_CHANCE, "spm": randf_range(SV_SPD_VAR.x, SV_SPD_VAR.y), "wk": 0.0, "hp": 70.0, "voice": randf_range(Synth.VOICE.x, Synth.VOICE.y), "cd": 1 + randf(), "ang": 0.0, "alert": false, "hit": 0.0, "sw": 0.0, "sd": 1.0, "dead": false}
+		"cap": "#3a3226" if randf() < 0.5 else "", "bomb": bomb, "smk": randf() < SV_SMOKE_CHANCE, "name": sv_name(), "iq": randf_range(SV_IQ.x, SV_IQ.y), "rush": randf() < SV_RUSH_CHANCE, "spm": randf_range(SV_SPD_VAR.x, SV_SPD_VAR.y), "wk": 0.0, "hp": 70.0, "voice": randf_range(Synth.VOICE.x, Synth.VOICE.y), "cd": 1 + randf(), "ang": 0.0, "alert": false, "hit": 0.0, "sw": 0.0, "sd": 1.0, "dead": false}
 
 ## Unalerted survivors pace around their post: walk to a nearby spot they can see,
 ## stop and look around for a few seconds, pick another. Returns a steer vector
@@ -187,10 +410,66 @@ func sv_repost(v: Dictionary, x: float, y: float, r: float) -> void:
 ## A survivor hears or feels something at (x, y): alerted, and that's where they think you are.
 func sv_hear(v: Dictionary, x: float, y: float) -> void:
 	v.alert = true
+	v.erase("exam")
 	v.lkx = x; v.lky = y
 	v.lost = 0.0
 	v.srch = false
 	v.trav = false
+
+## One of your bullets is at (bx, by) moving (bvx, bvy): survivors in a fight close enough to
+## feel it are spooked (see SV_SUP_R).
+func sv_near_miss(bx: float, by: float, bvx: float, bvy: float) -> void:
+	for v in gm.S.sv:
+		if not v.dead and v.alert and Vector2(v.x - bx, v.y - by).length() < SV_SUP_R:
+			sv_suppress(v, bx, by, bvx, bvy)
+
+## Survivor v has had your fire pass at (bx, by) moving (bvx, bvy), or been hit by it.
+func sv_suppress(v: Dictionary, bx: float, by: float, bvx: float, bvy: float) -> void:
+	if v.dead or not v.alert: return
+	if v.has("cv"):   # in cover or on their way to it (a wall or smoke): they don't dodge
+		if v.cph == 2:   # peeking out: duck straight back in
+			v.cph = 1; v.cpt = 0.0
+			v.hide = randf_range(SV_HIDE_MIN, SV_HIDE_MAX)
+		return
+	if gm.S.t < float(v.get("nodg", -1.0)): return   # just driven out of cover: off to find more, not dodging
+	if v.has("sup") or v.has("supW"): return   # mid-dodge (it's short, it isn't stretched) or about to
+	v.supW = {"t": randf_range(SV_SUP_WAIT.x, SV_SUP_WAIT.y), "bx": bx, "by": by, "bvx": bvx, "bvy": bvy}
+
+## Ticks a dodge survivor v is about to make (v.supW); when the beat is up they go, unless
+## they've since got cover or calmed down.
+func sv_dodge_wait(v: Dictionary, dt: float) -> void:
+	var w: Dictionary = v.supW
+	w.t -= dt
+	if w.t > 0: return
+	v.erase("supW")
+	if v.dead or not v.alert or v.has("cv") or v.has("sup") or gm.S.t < float(v.get("nodg", -1.0)): return
+	# out of the line of fire: sideways off the bullet's track, on their side of it
+	var u := Vector2(w.bvx, w.bvy).normalized()
+	var off := Vector2(v.x - w.bx, v.y - w.by)
+	off -= u * off.dot(u)
+	var dir := off.normalized() if off.length() > 2.0 else Vector2(-u.y, u.x) * (1.0 if randf() < 0.5 else -1.0)
+	v.sup = {"dx": dir.x, "dy": dir.y, "t": randf_range(SV_SUP_T.x, SV_SUP_T.y), "age": 0.0, "flip": false}
+
+## Spooked by your fire: getting out of its way. Returns the steer vector while it lasts, else null.
+func sv_dodge(v: Dictionary, p: Dictionary, see: bool, dt: float) -> Variant:
+	if not v.has("sup"): return null
+	var s: Dictionary = v.sup
+	s.t -= dt
+	s.age += dt
+	if s.t <= 0 or v.has("cv"):   # over, or they've got cover to go to
+		v.erase("sup")
+		return null
+	var dir := Vector2(s.dx, s.dy)
+	if dir.length() > 0 and not gm.walk_clear(v.x, v.y, v.x + dir.x * 20.0, v.y + dir.y * 20.0):
+		# wall that way: the other side of the line (only once), else just hunker where they are
+		dir = -dir if not s.flip and gm.walk_clear(v.x, v.y, v.x - dir.x * 20.0, v.y - dir.y * 20.0) else Vector2.ZERO
+		s.flip = true
+		s.dx = dir.x; s.dy = dir.y
+	if see:   # wild shots back as they go
+		v.ang = atan2(p.y - v.y, p.x - v.x)
+		if v.cd <= 0: sv_fire(v, SV_SNAP_SPREAD)
+	elif dir.length() > 0: v.ang = dir.angle()
+	return dir * SV_SUP_SPD
 
 ## Steer toward (tx, ty): straight if the body fits along the line, otherwise along an A*
 ## path round the walls (cached per survivor, recomputed when the target tile changes).
@@ -281,38 +560,70 @@ func sv_patrol(v: Dictionary, dt: float) -> Vector2:
 func _garrison_spot_ok(site: Dictionary, x: float, y: float) -> bool:
 	return not gm.solid(x, y) and Vector2(x - site.p.x, y - site.p.y).length() > 450
 
-## Garrison for a survivor-held strip: a few posted outside near building doors, the
+## Is (x, y) inside one of the site's buildings?
+func _in_room(site: Dictionary, x: float, y: float) -> bool:
+	var ts: float = gm.TS
+	for rm in site.rooms:
+		if x > rm.c * ts and x < (rm.c + rm.w) * ts and y > rm.r * ts and y < (rm.r + rm.h) * ts: return true
+	return false
+
+## The outside patrols: groups of one or two, spread evenly over the whole map (each group's
+## spot is the best of GARRISON_SPREAD_TRIES random ones, farthest from the groups already out).
+## A pair starts a tile or two apart and paces about the same post.
+func _spawn_patrols(site: Dictionary, n: int) -> void:
+	var posts: Array = []
+	var ts: float = gm.TS
+	while n > 0:
+		var size := 2 if n >= 2 and randf() < 0.5 else 1
+		var best = null
+		var best_d := -1.0
+		for t in GARRISON_SPREAD_TRIES:
+			var x: float = (2.0 + randf() * (site.cols - 4)) * ts
+			var y: float = (2.0 + randf() * (site.rows - 4)) * ts
+			if not _garrison_spot_ok(site, x, y) or _in_room(site, x, y): continue
+			var md := INF
+			for q in posts: md = minf(md, Vector2(x - q.x, y - q.y).length())
+			if md > best_d: best_d = md; best = Vector2(x, y)
+		if not (best is Vector2): break   # nowhere left to stand
+		var bp: Vector2 = best
+		posts.append(bp)
+		var lead := new_sv(bp.x, bp.y)
+		sv_patrol_init(lead)
+		site.sv.append(lead)
+		n -= 1
+		if size == 2:
+			for t in 20:   # their mate, a tile or two off where they can see each other
+				var a := randf() * TAU
+				var r := (1.0 + randf()) * ts
+				var x := bp.x + cos(a) * r
+				var y := bp.y + sin(a) * r
+				if not _garrison_spot_ok(site, x, y) or _in_room(site, x, y) or not gm.los(bp.x, bp.y, x, y): continue
+				var mate := new_sv(x, y)
+				mate.hx = bp.x; mate.hy = bp.y   # same post
+				sv_patrol_init(mate)
+				mate.pr = lead.pr
+				site.sv.append(mate)
+				n -= 1
+				break
+
+## Garrison for a survivor-held strip: patrols of one or two spread over the map outside, the
 ## rest inside the buildings (see upd_garrison() and call_out() for how they come out).
 func spawn_garrison(site: Dictionary) -> void:
 	var total := GARRISON_MIN + randi() % (GARRISON_MAX - GARRISON_MIN + 1)
 	var outside := mini(total, GARRISON_OUT_MIN + randi() % (GARRISON_OUT_MAX - GARRISON_OUT_MIN + 1))
 	var rooms: Array = site.rooms
-	for i in total:
-		var out_now := i < outside
+	_spawn_patrols(site, outside if rooms.size() else total)
+	if rooms.is_empty(): return
+	for i in total - outside:
 		for t in 40:
 			var x: float
 			var y: float
 			var rm = null
-			if rooms.size() and not out_now:
-				# somewhere on the floor inside a building
-				rm = rooms[randi() % rooms.size()]
-				x = (rm.c + 1.5 + randf() * (rm.w - 3)) * gm.TS
-				y = (rm.r + 1.5 + randf() * (rm.h - 3)) * gm.TS
-				if gm.hit_box(x, y, 10): continue
-			elif rooms.size():
-				# the tile just outside a building's door
-				rm = rooms[randi() % rooms.size()]
-				var top: bool = rm.door[2]
-				var dirn := -1.0 if top else 1.0
-				x = (rm.door[0] + 1.0) * gm.TS
-				y = (rm.door[1] + 0.5 + dirn) * gm.TS
-				# posted a little way off from the door
-				x += (randf() - 0.5) * 6.0 * gm.TS
-				y += dirn * randf() * 3.0 * gm.TS
-				rm = null
-			else:
-				x = (1.5 + randf() * (site.cols - 3)) * gm.TS
-				y = (1.5 + randf() * (site.ry - 3)) * gm.TS
+			# somewhere on the floor inside a building
+			rm = rooms[randi() % rooms.size()]
+			x = (rm.c + 1.5 + randf() * (rm.w - 3)) * gm.TS
+			y = (rm.r + 1.5 + randf() * (rm.h - 3)) * gm.TS
+			if gm.hit_box(x, y, 10): continue
 			if not _garrison_spot_ok(site, x, y): continue
 			var v := new_sv(x, y)
 			if rm is Dictionary:   # indoors: paces about the building like a patrol, but stays in
@@ -397,12 +708,18 @@ func sv_sweep(v: Dictionary, px: float, py: float) -> void:
 # cover and flanking
 # ======================================================================
 ## How close a survivor likes to fight with their gun, Vector2(near, far) in px:
-## shotguns close in, rifles hang back.
+## shotguns close in, rifles hang back. All scaled by SV_RANGE_K, far end capped at SV_RANGE_CAP.
 func sv_range(v: Dictionary) -> Vector2:
 	var w: Dictionary = D.WEAPONS[int(v.get("w", 0))]
-	if w.pel > 1: return Vector2(110, 200)
-	if w.spr < 0.02: return Vector2(260, 380)
-	return Vector2(180, 300)
+	var rg := Vector2(180, 300)
+	if w.pel > 1: rg = Vector2(110, 200)
+	elif w.spr < 0.02: rg = Vector2(260, 380)
+	rg *= SV_RANGE_K
+	return Vector2(minf(rg.x, SV_RANGE_CAP - 60.0), minf(rg.y, SV_RANGE_CAP))
+
+## Lever rifle or crossbow (the accurate long guns).
+func long_gun(v: Dictionary) -> bool:
+	return float(D.WEAPONS[int(v.get("w", 0))].spr) < 0.02
 
 ## Is (x, y) a bad place to hide: inside a burning car's blast radius, or next to a red barrel?
 func cover_hazard(x: float, y: float) -> bool:
@@ -444,6 +761,9 @@ func sv_peek_spot(x: float, y: float, p: Dictionary, n: Vector2) -> Variant:
 func sv_find_cover(v: Dictionary, p: Dictionary, center = null, rad: float = SV_COVER_R, path_max: float = SV_COVER_R * 1.6, closer_than: float = INF) -> Variant:
 	var rg := sv_range(v)
 	var pref := (rg.x + rg.y) * 0.5
+	var pw := 0.5
+	if long_gun(v):   # lever rifle, crossbow: hang back
+		pref = rg.y; pw = SV_COVER_FAR_PREF
 	var ctr: Vector2 = center if center is Vector2 else Vector2(v.x, v.y)
 	var R := int(ceil(rad))
 	var vc := int(floor(ctr.x / gm.TS))
@@ -473,15 +793,34 @@ func sv_find_cover(v: Dictionary, p: Dictionary, center = null, rad: float = SV_
 			if sv_cover_taken(v, x, y): continue
 			var pk = sv_peek_spot(x, y, p, n)
 			if not (pk is Vector2): continue
-			var sc := dv + absf(dp - pref) * 0.5 + (SV_COVER_CAR_PEN if car is Dictionary and not car.dead else 0.0)
-			cands.append([sc, x, y, pk, car])
+			var sc := dv + absf(dp - pref) * pw + (SV_COVER_CAR_PEN if car is Dictionary and not car.dead else 0.0)
+			cands.append([sc, x, y, pk, car, null])
+	# smoke clouds: a spot inside to shoot out of (pk, at the edge facing you, just has to see you)
+	for cl in gm.S.get("clouds", []):
+		if cl.den < SV_SMOKE_HOLD or cl.age > SV_SMOKE_LIFE * SV_SMOKE_THIN: continue
+		var cc := Vector2(cl.x, cl.y)
+		var cr: float = cl.r
+		for t2 in 4:
+			var q := cc + Vector2(randf_range(-0.35, 0.35), randf_range(-0.35, 0.35)) * cr
+			var dv := q.distance_to(ctr)
+			if dv > rad * gm.TS: continue
+			var dp := q.distance_to(Vector2(p.x, p.y))
+			if dp < SV_COVER_MIN_D or dp > rg.y + 60.0 or dp >= closer_than: continue
+			if gm.solid(q.x, q.y) or gm.hit_box(q.x, q.y, 10) or cover_hazard(q.x, q.y) or sv_cover_taken(v, q.x, q.y): continue
+			var u := (Vector2(p.x, p.y) - cc).normalized()
+			var pk := cc + u * (cr * 0.95)
+			if not gm.walk_clear(q.x, q.y, pk.x, pk.y) or not gm.los(pk.x, pk.y, p.x, p.y): continue
+			cands.append([dv + absf(dp - pref) * pw + SV_SMOKE_PEN, q.x, q.y, pk, null, cl])
+			break
 	cands.sort_custom(func(a, b): return a[0] < b[0])
 	for k in mini(cands.size(), 4):   # the best few that are actually a short walk away
 		var cd: Array = cands[k]
 		if not gm.walk_clear(v.x, v.y, cd[1], cd[2]):
 			var path := astar_path(v.x, v.y, Vector2i(int(floor(cd[1] / gm.TS)), int(floor(cd[2] / gm.TS))))
 			if path.is_empty() or path.size() > path_max: continue
-		return {"x": cd[1], "y": cd[2], "pk": cd[3], "car": cd[4]}
+		var out := {"x": cd[1], "y": cd[2], "pk": cd[3], "car": cd[4]}
+		if cd[5] is Dictionary: out.sm = cd[5]
+		return out
 	return null
 
 ## Once every SV_SQUAD_T seconds: if SV_FLANK_MIN or more survivors are fighting you, make
@@ -537,6 +876,9 @@ func sv_squad(p: Dictionary, dt: float) -> void:
 		var v: Dictionary = c[2]
 		v.fl = {"side": sd, "back": back}
 		need -= 1
+		if gm.S.t >= float(gm.S.get("flankCallT", -1.0)) and on_screen(v.x, v.y):   # one call at a time
+			gm.S.flankCallT = gm.S.t + randf_range(SV_FLANK_CALL_GAP.x, SV_FLANK_CALL_GAP.y)
+			sv_say(v, "Flanking!")   # (text only, no voice)
 
 ## A flanker: work out the flanking spot (round to their side of you at their gun's range),
 ## find cover near it, and go there without shooting. Returns the steer vector, or null once
@@ -590,12 +932,16 @@ func sv_flank_quit(v: Dictionary) -> void:
 func sv_cover_holds(v: Dictionary, p: Dictionary, see: bool, dt: float) -> bool:
 	var cv: Dictionary = v.cv
 	if car_unsafe(cv.car) or cover_hazard(cv.x, cv.y): return false
+	if cv.has("sm") and (cv.sm.dead or cv.sm.den < SV_SMOKE_HOLD): return false   # the smoke's thinning out
 	var dp := Vector2(p.x - cv.x, p.y - cv.y).length()
 	if dp < SV_COVER_MIN_D or dp > sv_range(v).y + 160.0: return false
 	if v.cph == 0 and v.cpt > SV_COVER_MAXT: return false
-	if v.cph == 1 and Vector2(cv.x - v.x, cv.y - v.y).length() < 8.0 and (see or v.hit > 0):
+	if v.cph == 1 and not cv.has("sm") and Vector2(cv.x - v.x, cv.y - v.y).length() < 8.0 and (see or v.hit > 0):
+		# (a hit in smoke is just a lucky shot: they stay put)
 		v.flk += dt
-		if v.flk > 0.3 or v.hit > 0: return false
+		if v.flk > 0.3 or v.hit > 0:
+			v.nodg = gm.S.t + SV_SUP_NODG   # straight off to better cover, no dodging on the way
+			return false
 	else:
 		v.flk = 0.0
 	return true
@@ -618,9 +964,16 @@ func sv_cover_fight(v: Dictionary, p: Dictionary, see: bool, dt: float) -> Varia
 	if v.has("cv") and not sv_cover_holds(v, p, see, dt): sv_drop_cover(v, 0.0)
 	if not v.has("cv"):
 		if not see or v.cvT > 0: return null
+		if randf() >= SV_COVER_SEEK * float(v.get("iq", 1.0)):   # doesn't think of it this time
+			v.cvT = randf_range(SV_COVER_SKIP_T.x, SV_COVER_SKIP_T.y)
+			return null
 		var found = sv_find_cover(v, p)
 		v.cvT = SV_COVER_RETRY
-		if not (found is Dictionary): return null
+		if not (found is Dictionary):
+			if v.get("smk", false) and sv_smoke_throw(v, p):
+				v.cvT = SV_BOMB_WIND + 0.6   # look again once it's up
+				return Vector2.ZERO
+			return null
 		v.cv = found
 		v.cph = 0; v.cpt = 0.0; v.miss = 0; v.flk = 0.0; v.pks = 0
 	var cv: Dictionary = v.cv
@@ -642,6 +995,8 @@ func sv_cover_fight(v: Dictionary, p: Dictionary, see: bool, dt: float) -> Varia
 		if v.cpt >= v.hide:
 			v.cph = 2; v.cpt = 0.0; v.seen = -1.0; v.shots = 0
 		return Vector2.ZERO if at_cover else sv_nav(v, cv.x, cv.y)
+	if cv.has("sm"):   # in smoke: no stepping out, they shoot from inside it
+		return sv_smoke_fire(v, p, see, cv, dt)
 	# stepping out
 	if see:
 		if v.seen < 0:   # there you are: a moment to aim, then shoot for a second or two
@@ -658,10 +1013,11 @@ func sv_cover_fight(v: Dictionary, p: Dictionary, see: bool, dt: float) -> Varia
 			v.cph = 1; v.cpt = 0.0
 			v.hide = randf_range(SV_HIDE_MIN, SV_HIDE_MAX)
 			v.pks = v.get("pks", 0) + 1
-			if v.pks >= SV_LEAP_PEEKS:   # move up: cover at least a tile nearer you, if there's any
-				var dp := Vector2(p.x - cv.x, p.y - cv.y).length()
+			var rgx := sv_range(v).x
+			var dp := Vector2(p.x - cv.x, p.y - cv.y).length()
+			if v.pks >= SV_LEAP_PEEKS and dp - gm.TS >= rgx:   # move up: cover at least a tile nearer you, if there's any
 				var nc = sv_find_cover(v, p, null, SV_LEAP_R, SV_LEAP_R * 1.6, dp - gm.TS)
-				if nc is Dictionary:
+				if nc is Dictionary and Vector2(p.x - nc.x, p.y - nc.y).length() >= rgx:
 					v.cv = nc
 					v.cph = 0; v.cpt = 0.0; v.miss = 0; v.flk = 0.0; v.pks = 0
 		return Vector2.ZERO   # stand there and shoot, no need to go further out
@@ -998,8 +1354,171 @@ func sv_throw(v: Dictionary, tx: float, ty: float) -> void:
 	var ft := 0.35 + l / 700.0   # seconds in the air
 	gm.S.thrown.append({"x": sx, "y": sy, "vx": (tx - sx) / ft, "vy": (ty - sy) / ft, "fuse": ft + SV_BOMB_FUSE, "dead": false, "spin": 0.0,
 		"air": ft, "air0": ft, "h": clampf(l * 0.22, 18.0, 70.0), "z": 0.0})
-	gm.floater(v.x, v.y - 18, "Bomb!", "#ff6a50")
+	gm.floater(v.x, v.y - 18, "Bomb Out!", "#ff6a50", true)
 	gm.sfx("swing")
+
+# ======================================================================
+# smoke grenades
+# ======================================================================
+## No cover close by: wind up to lob a smoke grenade the way they want to go (thrown just like a
+## pipe bomb: SV_BOMB_WIND s standing still, then sv_smoke_launch()). Returns true if they will.
+func sv_smoke_throw(v: Dictionary, p: Dictionary) -> bool:
+	var to := Vector2(p.x - v.x, p.y - v.y)
+	var d := to.length()
+	if smoke_out() >= SV_SMOKE_MAX: return false
+	# between you and them, its cloud stopping short of you
+	var far := minf(clampf(d * SV_SMOKE_FRAC, SV_SMOKE_THROW.x, SV_SMOKE_THROW.y), d - SV_SMOKE_R)
+	if far < SV_SMOKE_THROW.x: return false   # you're too close for it to help
+	var u := to / d
+	for cl in gm.S.get("clouds", []):   # there's already smoke that way
+		if Vector2(cl.x - (v.x + u.x * far), cl.y - (v.y + u.y * far)).length() < far * 0.5 + cl.r and cl.den >= SV_SMOKE_HOLD: return false
+	for k in [1.0, 0.75]:   # shorten the throw if the spot can't be reached
+		for deg in [0.0, 15.0, -15.0, 30.0, -30.0]:
+			var dd := u.rotated(deg_to_rad(deg))
+			var l: float = maxf(SV_SMOKE_THROW.x, far * k)
+			var tx: float = v.x + dd.x * l
+			var ty: float = v.y + dd.y * l
+			if gm.solid(tx, ty) or not gm.walk_clear(v.x, v.y, tx, ty): continue
+			v.smk = false
+			v.smw = {"x": tx, "y": ty, "t": SV_BOMB_WIND}
+			v.ang = dd.angle()
+			return true
+	return false
+
+## Winding up a smoke grenade throw: stand still facing the spot, then let it go. Returns the
+## steer vector while busy, else null.
+func sv_smoke_wind(v: Dictionary, dt: float) -> Variant:
+	if not v.has("smw"): return null
+	var w: Dictionary = v.smw
+	w.t -= dt
+	v.ang = atan2(w.y - v.y, w.x - v.x)
+	if w.t <= 0:
+		v.erase("smw")
+		sv_smoke_launch(v, w.x, w.y, w.get("o", Vector2(w.x, w.y)))
+	return Vector2.ZERO
+
+## The smoke grenade leaves their hand: the same lob as a pipe bomb (sv_throw()), but it goes
+## off as soon as it lands. `o`: where the first smoke of this screen went.
+func sv_smoke_launch(v: Dictionary, tx: float, ty: float, o: Vector2) -> void:
+	var a := atan2(ty - v.y, tx - v.x)
+	var sx: float = v.x + cos(a) * 14
+	var sy: float = v.y + sin(a) * 14
+	var l := Vector2(tx - sx, ty - sy).length()
+	var ft := 0.35 + l / 700.0   # seconds in the air
+	if not gm.S.has("smk"): gm.S.smk = []
+	gm.S.smk.append({"x": sx, "y": sy, "vx": (tx - sx) / ft, "vy": (ty - sy) / ft, "air": ft, "air0": ft,
+		"h": clampf(l * 0.22, 18.0, 70.0), "z": 0.0, "spin": 0.0, "tx": tx, "ty": ty})
+	gm.floater(v.x, v.y - 18, "Smoke Out!", "#cfcfc4", true)
+	gm.sfx("swing")
+	sv_smoke_join(v, o)
+
+## Smokes out right now: clouds, grenades in the air and throws being wound up.
+func smoke_out() -> int:
+	var n: int = gm.S.get("clouds", []).size() + gm.S.get("smk", []).size()
+	for w in gm.S.sv:
+		if not w.dead and w.has("smw"): n += 1
+	return n
+
+## Survivor `v` has just thrown smoke (the screen started at `o`): other smoke carriers who saw it
+## may throw theirs SV_SMOKE_GAP cloud diameters to one side of it, across your view, to widen it.
+func sv_smoke_join(v: Dictionary, o: Vector2) -> void:
+	var g := SV_SMOKE_GAP * 2.0 * SV_SMOKE_R
+	var to := o - Vector2(gm.S.p.x, gm.S.p.y)
+	var side := Vector2(-to.y, to.x).normalized() if to.length() > 1.0 else Vector2.RIGHT
+	var ws: Array = gm.S.sv.duplicate()
+	ws.shuffle()
+	for w in ws:
+		if smoke_out() >= SV_SMOKE_MAX: return
+		if w.dead or is_same(w, v) or not w.alert or not w.get("smk", false) or w.has("smw"): continue
+		if w.get("mst", 0.0) > 0 or w.get("yell", 0.0) > 0 or not sv_sees(w, v.x, v.y): continue
+		if randf() >= SV_SMOKE_JOIN: continue
+		# the free side of the first smoke nearest them that they can reach
+		var best = null
+		var bd := INF
+		for sp in [o + side * g, o - side * g]:
+			var dw := Vector2(sp.x - w.x, sp.y - w.y).length()
+			if dw > SV_BOMB_RANGE or dw >= bd or gm.solid(sp.x, sp.y) or not gm.los(w.x, w.y, sp.x, sp.y): continue
+			if smoke_near(sp, g * 0.5): continue   # that side's already covered
+			best = sp; bd = dw
+		if best is Vector2:
+			w.smk = false
+			w.smw = {"x": best.x, "y": best.y, "t": SV_BOMB_WIND + randf_range(SV_SMOKE_REACT.x, SV_SMOKE_REACT.y), "o": o}
+			w.ang = atan2(best.y - w.y, best.x - w.x)
+
+## In smoke cover, their turn to shoot: they stay inside and fire out of it for a peek's length,
+## at you if they can see you, else blind (SV_SMOKE_BLIND) at where they last saw or heard you,
+## then hide again.
+func sv_smoke_fire(v: Dictionary, p: Dictionary, see: bool, cv: Dictionary, dt: float) -> Vector2:
+	if v.seen < 0:
+		v.seen = 0.0
+		v.peek = randf_range(SV_PEEK_MIN, SV_PEEK_MAX)
+		v.cd = maxf(v.cd, SV_PEEK_AIM)
+	v.seen += dt
+	var tx: float = p.x if see else float(v.get("lkx", p.x))
+	var ty: float = p.y if see else float(v.get("lky", p.y))
+	v.ang = atan2(ty - v.y, tx - v.x)
+	if v.cd <= 0:
+		sv_fire(v, 1.0 if see else SV_SMOKE_BLIND)
+		v.shots += 1
+	if v.seen >= v.peek and v.shots > 0 and v.burst <= 0:   # finish the burst, then lie low a while
+		v.cph = 1; v.cpt = 0.0
+		v.hide = randf_range(SV_HIDE_MIN, SV_HIDE_MAX)
+	if Vector2(cv.x - v.x, cv.y - v.y).length() < 8.0: return Vector2.ZERO
+	return sv_nav(v, cv.x, cv.y)
+
+## Is there smoke (a cloud, a grenade landing, or a throw being wound up) within r of q?
+func smoke_near(q: Vector2, r: float) -> bool:
+	for cl in gm.S.get("clouds", []):
+		if q.distance_to(Vector2(cl.x, cl.y)) < r: return true
+	for c in gm.S.get("smk", []):
+		if q.distance_to(Vector2(c.tx, c.ty)) < r: return true
+	for w in gm.S.sv:
+		if not w.dead and w.has("smw") and q.distance_to(Vector2(w.smw.x, w.smw.y)) < r: return true
+	return false
+
+## Smoke grenades in the air land and become clouds; clouds bloom, hold, then thin and spread
+## out until they're gone. cl.den: 0..1 thickness.
+func upd_smoke(dt: float) -> void:
+	if not gm.S.has("clouds"): gm.S.clouds = []
+	var cans: Array = gm.S.get("smk", [])
+	var i := cans.size() - 1
+	while i >= 0:
+		var c: Dictionary = cans[i]
+		c.air -= dt
+		c.spin += dt * 12
+		c.x += c.vx * dt; c.y += c.vy * dt
+		var k: float = 1.0 - maxf(0.0, c.air) / c.air0
+		c.z = 4.0 * c.h * k * (1.0 - k)
+		if c.air <= 0:   # landed: starts pouring smoke
+			gm.S.clouds.append({"x": c.x, "y": c.y, "age": 0.0, "r": SV_SMOKE_R * 0.4, "den": 0.0, "dead": false, "seed": randi() % 1000})
+			var dp := Vector2(c.x - gm.S.p.x, c.y - gm.S.p.y).length()
+			gm.sfx("smoke", 0.14 * (1.0 - 0.7 * minf(1.0, dp / 900.0)))
+			cans.remove_at(i)
+		i -= 1
+	i = gm.S.clouds.size() - 1
+	while i >= 0:
+		var cl: Dictionary = gm.S.clouds[i]
+		cl.age += dt
+		var k: float = cl.age / SV_SMOKE_LIFE
+		var bloom := minf(1.0, cl.age / SV_SMOKE_BLOOM)
+		var thin := clampf((k - SV_SMOKE_THIN) / (1.0 - SV_SMOKE_THIN), 0.0, 1.0)
+		cl.den = bloom * (1.0 - thin)
+		cl.r = SV_SMOKE_R * (0.4 + 0.6 * bloom) * (1.0 + 0.35 * thin)   # spreads as it thins
+		if cl.age >= SV_SMOKE_LIFE:
+			cl.dead = true
+			gm.S.clouds.remove_at(i)
+		i -= 1
+
+## Does thick smoke lie across the line from (x0, y0) to (x1, y1)?
+func smoke_blocks(x0: float, y0: float, x1: float, y1: float) -> bool:
+	for cl in gm.S.get("clouds", []):
+		if cl.den < SV_SMOKE_SIGHT: continue
+		var c := Vector2(cl.x, cl.y)
+		var a := Vector2(x0, y0)
+		var ab := Vector2(x1, y1) - a
+		var t: float = clampf((c - a).dot(ab) / maxf(1.0, ab.length_squared()), 0.0, 1.0)
+		if c.distance_to(a + ab * t) < float(cl.r) * 0.8 * float(cl.den): return true
+	return false
 
 # ======================================================================
 # getting clear of blasts
@@ -1016,9 +1535,9 @@ func blast_dangers() -> Array:
 	return out
 
 ## Is survivor v in the open inside one of these blasts? After a moment to react they run
-## straight out of the nearest one (or round a wall if that's blocked). Returns a steer
-## vector while running, otherwise null.
-func sv_flee(v: Dictionary, dangers: Array, dt: float) -> Variant:
+## for a refuge (sv_refuge()) and wait there until that blast has gone off, firing at you if
+## they're alerted and can see you. Returns a steer vector while fleeing or waiting, else null.
+func sv_flee(v: Dictionary, dangers: Array, see: bool, dt: float) -> Variant:
 	var worst = null
 	var depth := 0.0
 	for dg in dangers:
@@ -1028,12 +1547,39 @@ func sv_flee(v: Dictionary, dangers: Array, dt: float) -> Variant:
 		if not (worst is Dictionary) or reach - dd > depth:
 			worst = dg
 			depth = reach - dd
+	if v.has("rfg"):
+		var live := false
+		for dg in dangers:
+			if is_same(dg.src, v.rfg.src): live = true
+		var there := Vector2(v.rfg.x - v.x, v.rfg.y - v.y).length() < 6.0
+		# gone off (or fizzled): back to normal. Caught in the open by some other blast once
+		# they're at the refuge: find another
+		if not live or (there and worst is Dictionary and not is_same(worst.src, v.rfg.src)):
+			v.erase("rfg")
+		elif there:
+			if v.alert and see and v.get("yell", 0.0) <= 0 and not v.has("unarmed"):
+				v.ang = atan2(gm.S.p.y - v.y, gm.S.p.x - v.x)
+				if v.cd <= 0: sv_fire(v)
+			return Vector2.ZERO
+		else:
+			var nv := sv_nav(v, v.rfg.x, v.rfg.y)
+			if nv.length() > 0: v.ang = nv.angle()
+			return nv * SV_FLEE_SPD
 	if not (worst is Dictionary):
 		v.erase("flT")
 		return null
-	if not v.has("flT"): v.flT = randf_range(SV_FLEE_REACT.x, SV_FLEE_REACT.y)
+	if not v.has("flT"): v.flT = randf_range(SV_FLEE_REACT.x, SV_FLEE_REACT.y) / float(v.get("iq", 1.0))
 	v.flT -= dt
 	if v.flT > 0: return null   # hasn't clocked it yet
+	var rf = sv_refuge(v, worst, dangers)
+	if rf is Vector2:
+		v.rfg = {"x": rf.x, "y": rf.y, "src": worst.src}
+		v.erase("cv")   # (their old cover may be in the blast; they'll look again afterwards)
+		v.erase("flT")
+		var nv := sv_nav(v, rf.x, rf.y)
+		if nv.length() > 0: v.ang = nv.angle()
+		return nv * SV_FLEE_SPD
+	# nowhere to go that they can reach: just run straight out of it
 	var away := Vector2(v.x - worst.x, v.y - worst.y)
 	if away.length() < 1: away = Vector2.RIGHT.rotated(randf() * TAU)
 	away = away.normalized()
@@ -1046,9 +1592,51 @@ func sv_flee(v: Dictionary, dangers: Array, dt: float) -> Variant:
 			var mv := Vector2(tx - v.x, ty - v.y).normalized()
 			v.ang = mv.angle()
 			return mv * SV_FLEE_SPD
-	var nv := sv_nav(v, worst.x + away.x * out_r, worst.y + away.y * out_r)
-	if nv.length() > 0: v.ang = nv.angle()
-	return nv * SV_FLEE_SPD
+	var nv2 := sv_nav(v, worst.x + away.x * out_r, worst.y + away.y * out_r)
+	if nv2.length() > 0: v.ang = nv2.angle()
+	return nv2 * SV_FLEE_SPD
+
+## Somewhere for survivor v to sit out blast dg: an open tile safe from every lit blast,
+## meaning either behind something solid from it and at least SV_REFUGE_MIN x its radius
+## away, or out of its reach. Shielded spots are preferred; then the shortest run. Not one
+## another survivor is already heading for. Returns the spot, or null if none is reachable.
+func sv_refuge(v: Dictionary, dg: Dictionary, dangers: Array) -> Variant:
+	var R := int(ceil((float(dg.r) + SV_FLEE_MARGIN) / gm.TS)) + SV_REFUGE_SEARCH
+	var vc := int(floor(v.x / gm.TS))
+	var vr := int(floor(v.y / gm.TS))
+	var cands: Array = []
+	for r in range(vr - R, vr + R + 1):
+		for c in range(vc - R, vc + R + 1):
+			if not gm.passable(c, r): continue
+			var x := (c + 0.5) * gm.TS
+			var y := (r + 0.5) * gm.TS
+			var dv := Vector2(x - v.x, y - v.y).length()
+			if dv > R * gm.TS: continue
+			var ok := true
+			var cov := false
+			for d2 in dangers:
+				var dd := Vector2(x - d2.x, y - d2.y).length()
+				if dd >= float(d2.r) + SV_FLEE_MARGIN: continue
+				if dd >= float(d2.r) * SV_REFUGE_MIN and not gm.blasts.blast_clear(d2.src, x, y):
+					if is_same(d2.src, dg.src): cov = true
+					continue
+				ok = false
+				break
+			if not ok or gm.hit_box(x, y, 10): continue
+			var taken := false
+			for o in gm.S.sv:
+				if o != v and not o.dead and o.has("rfg") and Vector2(o.rfg.x - x, o.rfg.y - y).length() < 20.0:
+					taken = true
+					break
+			if taken: continue
+			cands.append([dv + (0.0 if cov else SV_REFUGE_OPEN_PEN), x, y])
+	cands.sort_custom(func(a, b): return a[0] < b[0])
+	for k in mini(cands.size(), 6):
+		var cd: Array = cands[k]
+		if gm.walk_clear(v.x, v.y, cd[1], cd[2]): return Vector2(cd[1], cd[2])
+		var path := astar_path(v.x, v.y, Vector2i(int(floor(cd[1] / gm.TS)), int(floor(cd[2] / gm.TS))))
+		if not path.is_empty() and path.size() <= R * 1.6: return Vector2(cd[1], cd[2])
+	return null
 
 # ======================================================================
 # per-frame update
@@ -1059,24 +1647,31 @@ func upd_survivors(p: Dictionary, dt: float) -> void:
 	if gm.S.get("hostile", false): upd_garrison(dt)
 	sv_squad(p, dt)
 	sv_bomb_watch(p)
+	upd_smoke(dt)
 	var dangers := blast_dangers()
 	for v in gm.S.sv:
 		gm.blasts.blast_dmg_tick(v, dt)
 		if v.dead: continue
 		if v.alert: v.erase("unarmed")   # alerted: picks up their gun
+		v.gup = move_toward(float(v.get("gup", 0.0)), 1.0 if v.alert else 0.0, dt / (SV_RAISE_T if v.alert else SV_LOWER_T))
+		if v.has("jt"):
+			v.jt -= dt
+			if v.jt <= 0: v.erase("jt")
 		var dx: float = p.x - v.x
 		var dy: float = p.y - v.y
 		var d := Vector2(dx, dy).length()
 		if d == 0: d = 1
-		var see := d < 520 and gm.los(v.x, v.y, p.x, p.y)
+		var see := d < 520 and gm.los(v.x, v.y, p.x, p.y) and not smoke_blocks(v.x, v.y, p.x, p.y) and window_sight_ok(v.x, v.y, p.x, p.y)
 		var fa := absf(U.ang_diff(atan2(dy, dx), float(v.ang)))   # how far off their facing you are
 		if v.alert: see = see and (d < SV_SENSE or fa < deg_to_rad(SV_VIEW_HALF_ALERT))
-		var spot: bool = see and (v.alert or (d < 420 and (d < SV_SENSE or fa < deg_to_rad(SV_VIEW_HALF))))
+		var iq: float = v.get("iq", 1.0)
+		var spot: bool = see and (v.alert or (d < SV_SPOT_R * iq and (d < SV_SENSE * iq or fa < deg_to_rad(SV_VIEW_HALF * iq))))
 		if spot:   # seen: alerted, knows exactly where you are
 			sv_hear(v, p.x, p.y)
 			gm.S.svSeenT = gm.S.t   # (for the squad: someone has eyes on you)
 			if not v.get("called", false):   # first sighting (since they last stood down): raise the alarm
 				v.called = true
+				v.jt = SV_STARTLE_T   # startled hop
 				sv_raise(v.x, v.y, p.x, p.y)
 				v.yell = SV_YELL_MIN + randf() * (SV_YELL_MAX - SV_YELL_MIN)
 				v.cd = maxf(v.cd, v.yell)
@@ -1088,24 +1683,43 @@ func upd_survivors(p: Dictionary, dt: float) -> void:
 		v.cd -= dt
 		v.yell = maxf(0.0, v.get("yell", 0.0) - dt)
 		v.hit -= dt
+		if v.has("supW"): sv_dodge_wait(v, dt)   # a dodge coming once the beat is up
 		var vx := 0.0
 		var vy := 0.0
-		var fv = sv_flee(v, dangers, dt)
-		if fv is Vector2:   # something's about to blow: getting clear comes first
+		if not v.alert and not v.has("exam"):   # a body lying nearby?
+			v.bdT = float(v.get("bdT", 0.0)) - dt
+			if v.bdT <= 0:
+				v.bdT = 0.3
+				sv_find_body(v)
+		var fv = sv_flee(v, dangers, see, dt)
+		if fv is Vector2:   # something's about to blow: getting clear (or waiting it out) comes first
 			vx = fv.x; vy = fv.y
+		elif v.get("mst", 0.0) > 0:   # just saw a friend die: stunned, not moving or shooting
+			v.mst -= dt
+			if v.has("mourn"):
+				sv_mourn_tick(v, dt)
+				if v.mst <= 0: v.erase("mourn")
+		elif v.alert and v.has("sup"):   # under fire: out of its way first
+			var dg = sv_dodge(v, p, see, dt)
+			if dg is Vector2:
+				vx = dg.x; vy = dg.y
 		elif v.alert:
-			var bs = sv_bomb(v, p, see, dt) if v.yell <= 0 else null
-			var fls = sv_flank(v, p, see, d, dt) if not (bs is Vector2) and v.yell <= 0 and v.has("fl") else null
+			var sw = sv_smoke_wind(v, dt)
+			var bs = sv_bomb(v, p, see, dt) if v.yell <= 0 and not (sw is Vector2) else null
+			var fls = sv_flank(v, p, see, d, dt) if not (sw is Vector2) and not (bs is Vector2) and v.yell <= 0 and v.has("fl") else null
 			var cvs = null
-			if not (bs is Vector2) and not (fls is Vector2) and v.yell <= 0: cvs = sv_cover_fight(v, p, see, dt)
-			if bs is Vector2:   # going to throw a bomb, or winding up to
+			if not (sw is Vector2) and not (bs is Vector2) and not (fls is Vector2) and v.yell <= 0: cvs = sv_cover_fight(v, p, see, dt)
+			if sw is Vector2:   # winding up a smoke grenade
+				vx = sw.x; vy = sw.y
+			elif bs is Vector2:   # going to throw a bomb, or winding up to
 				vx = bs.x; vy = bs.y
 			elif fls is Vector2:   # circling round to flank you, holding fire
 				vx = fls.x; vy = fls.y
 			elif cvs is Vector2:   # fighting from cover
 				vx = cvs.x; vy = cvs.y
 			elif see and v.yell > 0:
-				v.ang = atan2(dy, dx)   # just spotted you: standing and yelling, not shooting yet
+				# just spotted you: whipping round to face you and yelling, not shooting yet
+				v.ang = rotate_toward(float(v.ang), atan2(dy, dx), SV_WHIP_SPD * dt)
 			elif see:
 				v.ang = atan2(dy, dx)
 				# preferred distance depends on the gun: shotguns close in, rifles hang back
@@ -1118,12 +1732,19 @@ func upd_survivors(p: Dictionary, dt: float) -> void:
 					vx = dx / d; vy = dy / d
 				elif d < near:
 					vx = -dx / d; vy = -dy / d
+				# strafe one way for a while, stop for a moment, then pick a way again
 				v.sw -= dt
 				if v.sw <= 0:
-					v.sw = 1 + randf() * 1.5
-					v.sd = 1.0 if randf() < 0.5 else -1.0
-				vx += -dy / d * v.sd * 0.7
-				vy += dx / d * v.sd * 0.7
+					if v.get("sps", false):
+						v.sps = false
+						v.sw = 1 + randf() * 1.5
+						v.sd = 1.0 if randf() < 0.5 else -1.0
+					else:
+						v.sps = true
+						v.sw = randf_range(SV_STRAFE_PAUSE.x, SV_STRAFE_PAUSE.y)
+				if not v.get("sps", false):
+					vx += -dy / d * v.sd * SV_STRAFE
+					vy += dx / d * v.sd * SV_STRAFE
 				if v.cd <= 0: sv_fire(v)
 			else:
 				# can't see you: go to where they last saw/heard you, search there, then give up
@@ -1136,6 +1757,7 @@ func upd_survivors(p: Dictionary, dt: float) -> void:
 					v.srch = false
 					v.erase("cv")
 					v.erase("fl")
+					v.erase("smw")
 					sv_repost(v, v.x, v.y, SV_SEARCH_R)
 				elif not v.get("srch", false) and Vector2(v.lkx - v.x, v.lky - v.y).length() > 24:
 					var nv := sv_nav(v, v.lkx, v.lky)
@@ -1150,6 +1772,9 @@ func upd_survivors(p: Dictionary, dt: float) -> void:
 						sv_repost(v, v.lkx, v.lky, SV_SEARCH_R)
 					var pv := sv_patrol(v, dt)
 					vx = pv.x; vy = pv.y
+		elif v.has("exam"):   # going to look at a body
+			var ev := sv_exam(v, dt)
+			vx = ev.x; vy = ev.y
 		elif v.get("trav", false):
 			# sweeping out toward where the player was when the alarm went up
 			v.travT += dt

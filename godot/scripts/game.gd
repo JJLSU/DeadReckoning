@@ -27,7 +27,8 @@ const REGEN_RATE := 3.0   # health per second
 const ADS_MOVE := 0.5     # walk speed multiplier while aiming
 const ADS_SENS := 0.45     # mouse sensitivity multiplier while aiming
 const ADS_ZOOM := 0.25    # extra zoom at full aim (0.25 = 25% closer)
-const ADS_LEAD := 90.0    # how far (world px) the camera leans toward where you face
+const ADS_PAN_FRAC := 0.3     # on top of zooming toward the cursor, the view pans this fraction of the way to it...
+const ADS_PAN_MAX := 5 * 32.0 # ...but never more than this (world px, 5 tiles)
 
 # Screamers: must see you (clear line of sight) within SCREAM_RANGE px, roughly facing you
 # (within SCREAM_CONE degrees), for SCREAM_WINDUP seconds straight before they scream.
@@ -45,6 +46,9 @@ const HIT_SPRAY_SPREAD := 0.45   # half-width of the spray cone, radians
 const HIT_SPRAY_MIN := 60.0      # particle speed range, px/s
 const HIT_SPRAY_MAX := 170.0
 const ADS_RATE := 2.0     # ease speed in/out (higher = snappier); 2.0 = half a second each way
+const ADS_SLOW := 1.0     # ADS in/out time multiplier, per weapon ("ads_k" in D.WEAPONS overrides; lever rifle 1.5)
+const HIP_DMG_MULT := 0.6 # hip-fire damage vs fully aimed, for guns without their own "ads_dmg" (the crossbow has its own)
+const ADS_MOVE_DMG := 0.25 # shots fired while the sights ease in or out do this x the weapon's listed damage (all guns)
 const BOLT_SNEAK_MULT := 2.0   # aimed crossbow damage multiplier on a hostile survivor who isn't alerted yet
 const CAM_EDGE := 60.0    # player always stays at least this many screen px from the view's edge
 const CAM_TOP := 140.0    # ...and this far from the top (clears the status panel)
@@ -54,6 +58,7 @@ const CAM_TOP := 140.0    # ...and this far from the top (clears the status pane
 const Z_BODY := 20.0
 
 var zoom := 1.0          # world camera zoom multiplier (1 = default framing)
+const SPLAT_CLEAR := 40.0   # px (at zoom 1) kept free of blood splats around the player on screen
 var ui_scale := 1.0      # interface size multiplier on top of automatic window scaling
 var fullscreen := false
 var win_idx := 0
@@ -68,14 +73,17 @@ var blasts := Blasts.new(self)
 var flight := Flight.new(self)
 var menu := Menu.new(self)
 var layers: Array = []
+var sub_layers: Array = []   # extra draw layers parented under layers[2]: roofs (20), then what goes over them (21)
 var dark_rect: ColorRect
 var dark_mat: ShaderMaterial
+var roof_mat: ShaderMaterial   # on the roof layer (20): fades the view cone out of peeked roofs
 var post_mat: ShaderMaterial
 
 var G = null            # run state (Dictionary) or null
 var F = null            # flight state or null
 var S = null            # ground site or null
 var mode := "title"
+var invuln := false     # testing: the Invulnerable toggle (debug buttons); you take no damage
 var uist := "title"     # current overlay: "" (none), title, menu, pause, map, dead, win
 var menu_tab := "contracts"
 var known := {}
@@ -86,6 +94,7 @@ var camY := 0.0
 var cam_snap := true
 var ads := false               # aiming down sights right now
 var ads_cur := Vector2.ZERO    # virtual cursor (screen px) used while aiming
+var ads_anchor := Vector2.ZERO   # reticle's world offset from the view centre when you started aiming (unzoomed scale)
 var ads_off := Vector2.ZERO    # reticle offset from the player in WORLD units (kept steady while the camera zooms/leans)
 var ads_virtual := false       # circle is on the virtual cursor: while aiming AND while the camera eases back
 var ads_skip := false          # ignore the motion event caused by re-centring the hidden cursor
@@ -136,6 +145,17 @@ func _ready() -> void:
 			l.material = m
 		add_child(l)
 		layers.append(l)
+		if i == 2:
+			for k in [20, 21]:
+				var sl := DrawLayer.new()
+				sl.idx = k
+				sl.game = self
+				if k == 20:
+					roof_mat = ShaderMaterial.new()
+					roof_mat.shader = load("res://shaders/roof.gdshader")
+					sl.material = roof_mat
+				l.add_child(sl)
+				sub_layers.append(sl)
 	var hud := DrawLayer.new()
 	hud.idx = 7
 	hud.game = self
@@ -353,6 +373,13 @@ func set_ads(on: bool) -> void:
 		mouse.active = true
 		ads_skip = false
 		ads_virtual = true
+	if on: ads_anchor = (ads_cur - Vector2(Wv, Hv) * 0.5) * (1.0 + ADS_ZOOM * ads_ease()) / ground_scale()
+
+## True while the sights are easing in or out (pressed but not settled, or released but
+## not back yet). Shots fired then do ADS_MOVE_DMG damage (see shoot()).
+func ads_moving() -> bool:
+	var k: float = S.get("adsK", 0.0)
+	return (ads and k < 1.0) or (not ads and k > 0.0)
 
 ## Hand control back to the real (hidden) pointer, placed where the circle is.
 func end_virtual_cursor() -> void:
@@ -446,6 +473,7 @@ func _process(delta: float) -> void:
 	post_mat.set_shader_parameter("con", con)
 	for l in layers:
 		if l: l.queue_redraw()
+	for l in sub_layers: l.queue_redraw()
 	ui.update_buttons()
 
 func draw_layer(idx: int, p: Pen) -> void:
@@ -557,8 +585,8 @@ func enter_ground(s: Dictionary) -> void:
 # ======================================================================
 # ground: helpers
 # ======================================================================
-const MOVE := [0, 1, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0]
-const BLOCK := [0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0]
+const MOVE := [0, 1, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 1]   # 15 = window: low wall, blocks walking...
+const BLOCK := [0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0]   # ...but sight and bullets pass over it
 
 func solid(x: float, y: float) -> bool:
 	var c := int(floor(x / TS))
@@ -570,16 +598,53 @@ func solid(x: float, y: float) -> bool:
 		# ringing the edge of the site, and not cars or the tanker (7).
 		if v == 10: return false
 		if v == 6 and c > 0 and r > 0 and c < S.cols - 1 and r < S.rows - 1: return false
+	if v == 1 or v == 15: return wall_part(c, r, x, y)
 	return MOVE[v] == 1
 
 func solid_b(x: float, y: float) -> bool:
 	var c := int(floor(x / TS))
 	var r := int(floor(y / TS))
 	if c < 0 or r < 0 or c >= S.cols or r >= S.rows: return true
-	return BLOCK[S.g[r * S.cols + c]] == 1
+	var v: int = S.g[r * S.cols + c]
+	if v == 1: return wall_part(c, r, x, y)
+	return BLOCK[v] == 1
+
+## Building walls (1) and windows (15) are half a tile thick: a band down the middle of
+## the tile, with arms reaching the neighbouring wall tiles. A wall end (one wall
+## neighbour) also reaches the far edge, so doorways stay exactly their tile width.
+const WALL_IN := TS * 0.25
+
+func _wall_at(c: int, r: int) -> bool:
+	if c < 0 or r < 0 or c >= S.cols or r >= S.rows: return false
+	var v: int = S.g[r * S.cols + c]
+	return v == 1 or v == 15
+
+func wall_part(c: int, r: int, x: float, y: float) -> bool:
+	var lx := x - c * TS
+	var ly := y - r * TS
+	var inx := lx >= WALL_IN and lx < TS - WALL_IN
+	var iny := ly >= WALL_IN and ly < TS - WALL_IN
+	if inx and iny: return true
+	if not inx and not iny: return false
+	var L := _wall_at(c - 1, r)
+	var R := _wall_at(c + 1, r)
+	var U := _wall_at(c, r - 1)
+	var D := _wall_at(c, r + 1)
+	if int(L) + int(R) + int(U) + int(D) == 1:
+		L = L or R; R = L; U = U or D; D = U
+	if iny: return L if lx < WALL_IN else R
+	return U if ly < WALL_IN else D
+
+func tile_at(x: float, y: float) -> int:
+	var c := int(floor(x / TS))
+	var r := int(floor(y / TS))
+	if c < 0 or r < 0 or c >= S.cols or r >= S.rows: return -1
+	return S.g[r * S.cols + c]
 
 func hit_box(x: float, y: float, r: float) -> bool:
-	return solid(x - r, y - r) or solid(x + r, y - r) or solid(x - r, y + r) or solid(x + r, y + r)
+	# corners plus edge midpoints and centre, so a half-tile wall can't slip between corners
+	return solid(x - r, y - r) or solid(x + r, y - r) or solid(x - r, y + r) or solid(x + r, y + r) \
+		or solid(x, y - r) or solid(x, y + r) or solid(x - r, y) or solid(x + r, y) or solid(x, y)
 
 func move_c(e: Dictionary, dx: float, dy: float, r: float) -> void:
 	var nx: float = e.x + dx
@@ -763,8 +828,29 @@ func muzzle_flash(x: float, y: float, ang: float) -> void:
 	if not S.has("mf"): S.mf = []
 	S.mf.append({"x": x + cos(ang) * 22, "y": y + sin(ang) * 22, "life": 0.06})
 
-func floater(x: float, y: float, txt: String, c: String = "#efe6cf") -> void:
-	S.fl.append({"x": x, "y": y, "txt": txt, "c": c, "life": 1.4})
+## A blood splat on the screen when you're hurt, never over the player: tries random spots
+## until one (with its drips) stays clear of you on screen, else none this time.
+func splat() -> void:
+	var gs := ground_scale()
+	var px: float = Wv / 2 + (S.p.x - S.rcx) * gs
+	var py: float = Hv / 2 + (S.p.y - S.rcy) * gs
+	var m := SPLAT_CLEAR * gs   # the player's own size on screen, plus a margin
+	for tries in 12:
+		var r := 28 + randf() * 50
+		var x := randf() * Wv
+		var y := Hv * 0.15 + randf() * Hv * 0.7
+		var ext := r * 1.2   # how far the blobs reach from the centre
+		var drip := r * 0.6 + 75.0   # and the drips below it
+		var clear_x := absf(x - px) > ext + m
+		var clear_y := y - ext > py + m or y + drip < py - m
+		if clear_x or clear_y:
+			S.splat.append({"x": x, "y": y, "r": r, "life": 1.8, "s": randf() * 999})
+			return
+
+## A short pop-up message. On foot these stack near the bottom of the screen (render.gd), out
+## of the way of the action; world = true keeps it floating at (x, y) instead (a thrower's "Bomb!").
+func floater(x: float, y: float, txt: String, c: String = "#efe6cf", world: bool = false) -> void:
+	S.fl.append({"x": x, "y": y, "txt": txt, "c": c, "life": 1.4, "w": world})
 
 func ground_scale() -> float:
 	var gs := clampf(sqrt(Wv * Hv) / 600.0, 0.72, 1.6)
@@ -875,8 +961,10 @@ func dmg_enemy(e: Dictionary, d: float) -> void:
 ## after the damage is taken; a hit that kills makes no cry. Blasts play their own cries
 ## (Blasts.BLAST_CRY_MAX), so blast damage doesn't call this.
 const HURT_CRY_CHANCE := 0.6
+const HURT_CRY_GAP := Vector2(2.0, 6.0)   # after a cry, that survivor stays quiet for a random this-many seconds
 func hurt_cry(e: Dictionary) -> void:
-	if e.hp <= 0 or randf() >= HURT_CRY_CHANCE: return
+	if e.hp <= 0 or S.t < float(e.get("cryT", -1.0)) or randf() >= HURT_CRY_CHANCE: return
+	e.cryT = S.t + randf_range(HURT_CRY_GAP.x, HURT_CRY_GAP.y)
 	var d := Vector2(e.x - S.p.x, e.y - S.p.y).length()
 	sfx("cry", 0.14 * (1.0 - 0.6 * minf(1.0, d / 900.0)), e.get("voice", 1.0))
 
@@ -951,9 +1039,12 @@ func shoot() -> void:
 	# Only counts once the aim has fully settled in (adsK reaches 1), not the moment you press.
 	var aimed: bool = ads and S.get("adsK", 0.0) >= 1.0
 	var base_dmg: float = float(w.get("ads_dmg", w.dmg)) if aimed else float(w.dmg)
+	if not aimed and not w.has("ads_dmg"): base_dmg *= HIP_DMG_MULT   # guns hit full strength only when aimed
+	var mid_ease := ads_moving()
+	if mid_ease: base_dmg = float(w.dmg) * ADS_MOVE_DMG   # fired mid-transition: weak shot
 	var scope_k := 1.2 if has("scope") else 1.0
 	# "hip_zdmg": damage to the dead when NOT aimed in (crossbow); survivors still take base_dmg
-	var zdmg: float = (float(w.hip_zdmg) if w.has("hip_zdmg") and not aimed else base_dmg) * scope_k
+	var zdmg: float = (float(w.hip_zdmg) if w.has("hip_zdmg") and not aimed and not mid_ease else base_dmg) * scope_k
 	for i in w.pel:
 		var a: float = p.ang + (randf() - 0.5) * spr * 2
 		S.bul.append({"x": p.x + cos(p.ang) * 16, "y": p.y + sin(p.ang) * 16, "vx": cos(a) * w.spd, "vy": sin(a) * w.spd, "life": w.life, "dmg": base_dmg * scope_k, "zdmg": zdmg, "aim": aimed, "pl": true, "kb": w.kb, "bolt": w.bolt})
@@ -971,7 +1062,7 @@ func shoot() -> void:
 ## fx = false: just the damage (and death), no splatter, sound or shake (used for blast
 ## damage spread over a few frames, whose effects play once when it goes off).
 func hurt(d: float, cause: String, fx: bool = true) -> void:
-	if uist != "": return
+	if uist != "" or invuln: return
 	regen_reset()
 	if not fx:
 		if G.armor > 0:
@@ -984,8 +1075,7 @@ func hurt(d: float, cause: String, fx: bool = true) -> void:
 			die(cause)
 		return
 	if S:
-		for q in 1 + (1 if d > 10 else 0):
-			S.splat.append({"x": randf() * Wv, "y": Hv * 0.15 + randf() * Hv * 0.7, "r": 28 + randf() * 50, "life": 1.8, "s": randf() * 999})
+		for q in 1 + (1 if d > 10 else 0): splat()
 	if G.armor > 0:
 		var a := minf(G.armor, d * 0.5)
 		G.armor -= a
@@ -1234,7 +1324,9 @@ func upd_ground(dt: float) -> void:
 		if z.dead: killed(z, true)
 	if S == null: return
 	for v in S.sv:
-		if v.dead: killed(v, false)
+		if v.dead:
+			killed(v, false)
+			survivors.sv_mourn(v)
 	if S == null or uist == "dead": return
 	S.zs = S.zs.filter(func(z): return not z.dead)
 	S.sv = S.sv.filter(func(v): return not v.dead)
@@ -1351,6 +1443,7 @@ func upd_bullets(p: Dictionary, dt: float) -> bool:
 			if dead: break
 			b.x += b.vx * dt / 3
 			b.y += b.vy * dt / 3
+			if b.pl: survivors.sv_near_miss(b.x, b.y, b.vx, b.vy)   # too close for comfort
 			if solid_b(b.x, b.y):
 				for n in 3: S.fx.append({"x": b.x, "y": b.y, "vx": (randf() - 0.5) * 120, "vy": (randf() - 0.5) * 120, "life": 0.25, "c": "#e8c77a", "sz": 3.0, "drag": false})
 				var car = blasts.car_at(b.x, b.y)
@@ -1397,6 +1490,7 @@ func upd_bullets(p: Dictionary, dt: float) -> bool:
 							hurt_cry(v)
 							v.hit = 0.1
 							survivors.sv_hear(v, p.x, p.y)
+							survivors.sv_suppress(v, b.x, b.y, b.vx, b.vy)
 							blood(v.x, v.y, 1)
 							if v.hp > 0: blood_spray(v.x, v.y, Vector2(b.vx, b.vy))
 							if v.hp <= 0:
@@ -1647,11 +1741,12 @@ func upd_effects(dt: float) -> bool:
 		else:
 			var f := pow(0.18, dt)
 			b.vx *= f; b.vy *= f
+			# windows (15) are low walls: a thrown bomb sails over them
 			var nx: float = b.x + b.vx * dt
-			if solid(nx, b.y): b.vx *= -0.5
+			if solid(nx, b.y) and tile_at(nx, b.y) != 15: b.vx *= -0.5
 			else: b.x = nx
 			var ny: float = b.y + b.vy * dt
-			if solid(b.x, ny): b.vy *= -0.5
+			if solid(b.x, ny) and tile_at(b.x, ny) != 15: b.vy *= -0.5
 			else: b.y = ny
 		b.fuse -= dt
 		if b.fuse <= 0:
@@ -1722,15 +1817,18 @@ func upd_tanker(p: Dictionary, ml: float, dt: float) -> void:
 
 ## Camera: aim-down-sights ease, smoothed follow and lean, kept inside the map and the player in view.
 func upd_camera(p: Dictionary, dt: float) -> void:
-	S.adsK = move_toward(S.get("adsK", 0.0), 1.0 if ads else 0.0, dt * ADS_RATE)
-	# Camera = smoothed follow of the player (bcx/bcy) + ADS lean. The lean's size
-	# uses the same eased amount as the zoom (not the follow smoothing), so zoom
-	# and lean start, run and finish together, in and out. Only the lean's
-	# direction is smoothed, so sweeping your aim doesn't jerk the camera.
+	var ads_k: float = float(D.WEAPONS[G.weapon].get("ads_k", ADS_SLOW))
+	S.adsK = move_toward(S.get("adsK", 0.0), 1.0 if ads else 0.0, dt * ADS_RATE / ads_k)
+	# Camera = smoothed follow of the player (bcx/bcy) plus, while aiming, two
+	# shifts toward where the reticle was when you started aiming (ads_anchor):
+	#  1. zoom toward it: the spot under the reticle stays put on screen while
+	#     the rest of the view grows around it (like zooming a map at the cursor);
+	#  2. a small extra pan toward it, ADS_PAN_FRAC of the way, capped at ADS_PAN_MAX.
+	# Both are driven by the same eased amount as the zoom, so however far away
+	# the cursor is, they start, run and finish together, in and out. Zoom and pan
+	# then hold until you stop aiming; moving the reticle doesn't move the view.
+	# The player-on-screen clamp below still wins.
 	var ae := ads_ease()
-	if ae <= 0.0: S.leanA = p.ang
-	else: S.leanA = lerp_angle(S.get("leanA", p.ang), p.ang, minf(1, dt * 10))
-	var lead := ADS_LEAD * ae
 	var gs := ground_scale()
 	var hw := Wv / 2 / gs
 	var hh := Hv / 2 / gs
@@ -1740,8 +1838,10 @@ func upd_camera(p: Dictionary, dt: float) -> void:
 	var by := lerpf(S.get("bcy", S.cy), p.y, minf(1, dt * 6))
 	S.bcx = clampf(bx, hw, mw - hw) if mw > 2 * hw else mw / 2
 	S.bcy = clampf(by, hh - 110 / gs, mh - hh) if mh > 2 * hh else mh / 2
-	S.cx = S.bcx + cos(S.leanA) * lead
-	S.cy = S.bcy + sin(S.leanA) * lead
+	var shift: Vector2 = ads_anchor * (1.0 - 1.0 / (1.0 + ADS_ZOOM * ae))
+	shift += (ads_anchor * ADS_PAN_FRAC).limit_length(ADS_PAN_MAX) * ae
+	S.cx = S.bcx + shift.x
+	S.cy = S.bcy + shift.y
 	S.cx = clampf(S.cx, hw, mw - hw) if mw > 2 * hw else mw / 2
 	S.cy = clampf(S.cy, hh - 110 / gs, mh - hh) if mh > 2 * hh else mh / 2
 	# Never let the player leave the view (matters near the map edge, where the
