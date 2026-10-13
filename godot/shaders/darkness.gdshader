@@ -6,6 +6,7 @@ uniform float dk = 0.0;
 uniform vec2 screen = vec2(1280.0, 720.0);
 uniform vec2 ppos = vec2(0.0);
 uniform float r0 = 110.0;
+uniform float r0_a = 1.0;   // strength of the glow round the player (1 = fully lit at the centre)
 uniform float cone_a = 0.0;
 uniform float cone_l = 430.0;
 uniform float flash_r = 0.0;
@@ -16,7 +17,7 @@ void fragment() {
 	vec2 p = UV * screen;
 	float keep = 1.0;
 	float d = distance(p, ppos);
-	keep *= 1.0 - clamp(1.0 - d / r0, 0.0, 1.0);
+	keep *= 1.0 - r0_a * clamp(1.0 - d / r0, 0.0, 1.0);
 	vec2 v = p - ppos;
 	float ang = atan(v.y, v.x) - cone_a;
 	ang = mod(ang + PI, 2.0 * PI) - PI;

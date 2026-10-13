@@ -118,7 +118,13 @@ func upd_flight(dt: float) -> void:
 		var k: float = gm.F.storm
 		if not gm.F.inStorm and k > 0.03: gm.toast("Flying into weather. Hold on.", "bad")
 		gm.F.inStorm = true
-		gm.F.tb = lerpf(gm.F.tb, (randf() - 0.5) * 2, minf(1, dt * 3))
+		# a fresh random gust 60 times a game second (not every step), so the buffeting is as strong at any frame rate
+		gm.F.tbT = gm.F.get("tbT", 0.0) - dt
+		if gm.F.tbT <= 0:
+			gm.F.tbT += 1.0 / 60.0
+			if gm.F.tbT <= 0: gm.F.tbT = 1.0 / 60.0
+			gm.F.tbG = (randf() - 0.5) * 2
+		gm.F.tb = lerpf(gm.F.tb, gm.F.get("tbG", 0.0), minf(1, dt * 3))
 		gm.F.hdg += gm.F.tb * k * 0.9 * dt
 		gm.F.alt += (randf() - 0.5) * k * 70 * dt
 		gm.F.spd = maxf(0, gm.F.spd + (randf() - 0.5) * k * 30 * dt)

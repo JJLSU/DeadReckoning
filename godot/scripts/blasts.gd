@@ -8,6 +8,7 @@ class_name Blasts
 # a random CAR_FUSE_MIN to CAR_FUSE_MAX seconds. Smoke, fire and the blast all come from one end of the
 # car (the middle of its front or rear third, picked per car). The burnt-out wreck stays put and still blocks.
 # For scale: revolver 30 a shot, lever rifle 95, a red barrel up close 160.
+const BLAST_SPRAY_K := 3.0   # blast hits: the hit blood spray x3 drops, flung ~1.7x faster and wider, away from the blast (Greg)
 const CAR_HP := 250.0
 const CAR_SMOKE_MIN := 0.6
 const CAR_SMOKE_MAX := 0.8
@@ -20,6 +21,12 @@ const CAR_BLAST_NOISE := 40.0    # added to the noise meter (a barrel adds 18)
 const CAR_SCORCH_R := 44.0       # scorch mark left on the ground, px (a barrel's is 62)
 const CAR_SCORCH_A := 0.4        # and how dark at the centre (a barrel's is 0.75)
 const CAR_SMOLDER := 30.0        # seconds the wreck's smoke plume rises afterwards, thinning out
+const CAR_AFTERBURN := Vector2(40, 60)   # seconds the wreck keeps burning after it blows (per car), dying down over the last third
+const CAR_DEBRIS := Vector2i(3, 4)        # pieces of burning wreckage a car blast throws out
+const CAR_DEBRIS_D := Vector2(50, 150)    # how far from the car they land, px
+const CAR_DEBRIS_BURN := Vector2(30, 90)  # seconds each piece keeps burning (the charred bit stays)
+const FIRE_LONG_CHANCE := 0.5    # each wreck fire and burning piece, rolled when it starts: this chance to burn...
+const FIRE_LONG_MULT := 10.0     # ...this many times longer than usual
 const BOMB_BLAST_R := 130.0       # px, a thrown bomb's (and a red barrel's) blast radius
 # Blasts throw zombies, survivors and you away from the centre: they
 # fly off at BLAST_PUSH_* px/s (at the centre, falling to 0 at BLAST_PUSH_RANGE x the blast
@@ -34,6 +41,8 @@ const BLAST_DMG_TIME := 0.4      # blast damage to people (you, zombies, survivo
 								 # so they're seen flying before they drop. Cars and barrels take theirs at once.
 const BLAST_DEAF_R := 2.0 / 3.0  # deafened (Synth.deafen) within this fraction of a car's or indoor bomb's blast radius
 const BLAST_DEAF_INDOOR := 2.0   # ...or, for a bomb indoors while you're in that same building, within this many blast radii, walls or not
+const BLAST_LIGHT_R := 2.0       # at night a blast lights up the dark out to this many blast radii
+const BLAST_LIGHT_T := 0.6       # for this many seconds: full size for the first half, then shrinking away
 const BLAST_CRY_MAX := 3         # most cries one blast sets off (the nearest survivors)
 const BLAST_CRY_DELAY := 0.12     # seconds after a barrel or bomb goes off before the first cry
 const BLAST_CRY_DELAY_CAR := 0.3  # ...and after a car blows up (its boom is longer)
@@ -67,6 +76,8 @@ func explode(br: Dictionary, big: bool = false) -> void:
 	gm.S.shake = 26.0 if big else 16.0
 	gm.S.boomFlash = 0.5 if big else 0.3
 	gm.S.scorch.append({"x": br.x, "y": br.y})   # also where the blast's light flash is drawn
+	if not gm.S.has("blit"): gm.S.blit = []
+	gm.S.blit.append({"x": br.x, "y": br.y, "r": R * BLAST_LIGHT_R, "life": BLAST_LIGHT_T})   # its light in the dark (render prep_ground)
 	if big: gm.S.bg.stamp(["scorch", br.x, br.y, CAR_SCORCH_R, CAR_SCORCH_A])
 	else: gm.stamp_scorch(br.x, br.y)
 	for i in (18 if big else 9):
@@ -87,7 +98,9 @@ func explode(br: Dictionary, big: bool = false) -> void:
 	for z in gm.S.zs:
 		var d := Vector2(z.x - br.x, z.y - br.y).length()
 		if d < PR and not blast_clear(br, z.x, z.y): d = 1e9
-		if d < R: blast_burn(z, zd * (1 - d / R / 1.3))
+		if d < R:
+			blast_burn(z, zd * (1 - d / R / 1.3))
+			if not z.get("dead", false): gm.blood_spray(z.x, z.y, Vector2(z.x - br.x, z.y - br.y), BLAST_SPRAY_K)
 		if d < PR and not z.dead: blast_push(z, br, d, PR, push)
 		if d < (900 if big else 700): z.alert = true
 	var criers: Array = []
@@ -96,7 +109,7 @@ func explode(br: Dictionary, big: bool = false) -> void:
 		var d := hd if hd >= PR or blast_clear(br, v.x, v.y) else 1e9
 		if d < R:
 			var vdm := zd * (1 - d / R / 1.3)
-			if gm.survives(v.hp, v.get("armor", 0.0), vdm): gm.blood_spray(v.x, v.y, Vector2(v.x - br.x, v.y - br.y))
+			if not v.dead: gm.blood_spray(v.x, v.y, Vector2(v.x - br.x, v.y - br.y), BLAST_SPRAY_K)
 			blast_burn(v, vdm)
 		if d < PR and not v.dead:
 			blast_push(v, br, d, PR, push)
@@ -132,7 +145,7 @@ func explode(br: Dictionary, big: bool = false) -> void:
 	if pd < R:
 		var pdm := zd * (1 - pd / R / 1.3) if big else 40 * (1 - pd / R) + 8
 		gm.hurt(0.0, "blast")   # the flinch, splatter and sound now; the damage itself over BLAST_DMG_TIME
-		if gm.survives(gm.G.hp, gm.G.armor, pdm): gm.blood_spray(gm.S.p.x, gm.S.p.y, Vector2(gm.S.p.x - br.x, gm.S.p.y - br.y))
+		gm.blood_spray(gm.S.p.x, gm.S.p.y, Vector2(gm.S.p.x - br.x, gm.S.p.y - br.y), BLAST_SPRAY_K)
 		blast_burn(gm.S.p, pdm)
 	if pd < PR: blast_push(gm.S.p, br, pd, PR, push)   # you get thrown too
 
@@ -246,6 +259,7 @@ func update_cars(dt: float) -> void:
 		var rate := 0.0
 		if car.dead:
 			car.burnT -= dt   # the plume itself is drawn in render.gd
+			car.fireT = maxf(0.0, car.get("fireT", 0.0) - dt)
 		elif car.fuse >= 0:
 			rate = 3.0
 			car.burnT += dt
@@ -261,8 +275,35 @@ func update_cars(dt: float) -> void:
 		if car.fuse >= 0 and not car.dead:
 			car.fuse -= dt
 			if car.fuse <= 0:
-				car.burnT = CAR_SMOLDER
-				car.burnMax = CAR_SMOLDER
+				car.fireT = randf_range(CAR_AFTERBURN.x, CAR_AFTERBURN.y) * (FIRE_LONG_MULT if randf() < FIRE_LONG_CHANCE else 1.0)
+				car.fireMax = car.fireT
+				car.burnT = maxf(CAR_SMOLDER, car.fireT)   # the smoke plume lasts at least as long as the fire
+				car.burnMax = car.burnT
 				gm.S.bg.stamp(["wreck", car])
+				car_debris(car)
 				explode(car, true)
 				if gm.S == null or gm.uist == "dead": return
+	for d in gm.S.get("debris", []):
+		d.t += dt
+		if d.t >= d.fly: d.fireT -= dt
+
+## A car blast throws CAR_DEBRIS pieces of burning wreckage out from its hot end, landing
+## CAR_DEBRIS_D px from the car on open ground (drawn and lit in render.gd, aged in update_cars).
+func car_debris(car: Dictionary) -> void:
+	if not gm.S.has("debris"): gm.S.debris = []
+	var mx: float = (car.c + car.w * 0.5) * gm.TS
+	var my: float = (car.r + car.h * 0.5) * gm.TS
+	for i in randi_range(CAR_DEBRIS.x, CAR_DEBRIS.y):
+		for tries in 10:
+			var a := randf() * TAU
+			var dd := randf_range(CAR_DEBRIS_D.x, CAR_DEBRIS_D.y)
+			var x := mx + cos(a) * dd
+			var y := my + sin(a) * dd
+			if gm.solid(x, y) or car_at(x, y) != null: continue
+			var pts := PackedVector2Array()
+			var n := randi_range(5, 7)
+			var sz := randf_range(4.0, 7.0)
+			for k in n: pts.append(Vector2.from_angle(TAU * k / n + randf_range(-0.3, 0.3)) * sz * randf_range(0.55, 1.0))
+			gm.S.debris.append({"x": x, "y": y, "sx": car.x, "sy": car.y, "t": 0.0, "fly": 0.3 + dd / 400.0,
+				"ang": randf() * TAU, "spin": randf_range(-14.0, 14.0), "pts": pts, "fireT": randf_range(CAR_DEBRIS_BURN.x, CAR_DEBRIS_BURN.y) * (FIRE_LONG_MULT if randf() < FIRE_LONG_CHANCE else 1.0), "ph": randf() * TAU})
+			break

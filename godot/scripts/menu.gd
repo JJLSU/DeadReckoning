@@ -116,8 +116,9 @@ func gen_offers(s: Dictionary) -> Array:
 		var d := Vector2(o.x - s.x, o.y - s.y).length()
 		var cg: Array = D.CARGO[randi() % D.CARGO.size()]
 		out.append({"id": U.rid(), "type": "", "dest": o.id, "icon": cg[0], "what": cg[1], "reward": int(round((70 + d / 100 * 8) * (1 + 0.15 * o.danger) * (0.85 + randf() * 0.3) / 5.0)) * 5})
-	if c.size() > n and randf() < 0.6:
-		var o: Dictionary = c[n]
+	var rc := c.slice(n).filter(func(o): return o.get("arch", "") != "family")   # rescues hide in a town; farms have none
+	if rc.size() and randf() < 0.6:
+		var o: Dictionary = rc[0]
 		var d := Vector2(o.x - s.x, o.y - s.y).length()
 		var who: String = D.RNAMES[randi() % D.RNAMES.size()]
 		var wk: Array = D.WHERE.keys()

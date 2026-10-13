@@ -403,3 +403,5 @@ func gen_world(seed_v: int) -> void:
 			s.fuel = false
 			s.shop = false
 			s.dealer = false
+	# Family farms: friendly grass strips at low danger (FarmFolk.FAMILY_CHANCE). Own random stream too.
+	FarmFolk.pick_farms(self, SEED)

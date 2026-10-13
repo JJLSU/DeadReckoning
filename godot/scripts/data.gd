@@ -15,13 +15,13 @@ const PLANES := [
 ]
 
 const WEAPONS := [
-	{"name": "Revolver", "dmg": 30.0, "rate": 0.36, "pel": 1, "spr": 0.035, "spd": 950.0, "life": 0.55, "price": 0, "noise": 2.5, "snd": "pistol", "kb": 6.0, "len": 15, "silent": false, "bolt": false},
-	{"name": "Pump shotgun", "dmg": 15.0, "rate": 0.8, "pel": 6, "spr": 0.3, "spd": 820.0, "life": 0.36, "price": 650, "noise": 4.0, "snd": "shotgun", "kb": 8.0, "len": 23, "silent": false, "bolt": false},
-	{"name": "Lever rifle", "dmg": 95.0, "ads_k": 1.5, "rate": 0.5, "pel": 1, "spr": 0.008, "spd": 1400.0, "life": 0.62, "price": 1100, "noise": 4.5, "snd": "rifle", "kb": 10.0, "len": 25, "silent": false, "bolt": false},
-	{"name": "Submachine gun", "dmg": 17.0, "rate": 0.085, "pel": 1, "spr": 0.1, "spd": 950.0, "life": 0.45, "price": 1500, "noise": 1.1, "snd": "smg", "kb": 3.0, "len": 18, "silent": false, "bolt": false, "auto": true},
-	{"name": "Assault rifle", "dmg": 30.0, "rate": 0.13, "pel": 1, "spr": 0.045, "spd": 1250.0, "life": 0.6, "price": 2400, "noise": 1.8, "snd": "rifle2", "kb": 6.0, "len": 25, "silent": false, "bolt": false, "auto": true},
-	{"name": "Double-barrel", "dmg": 14.0, "rate": 1.05, "pel": 10, "spr": 0.4, "spd": 800.0, "life": 0.32, "price": 950, "noise": 6.0, "snd": "shotgun2", "kb": 15.0, "len": 21, "silent": false, "bolt": false},
-	{"name": "Crossbow", "dmg": 65.0, "ads_dmg": 100.0, "hip_zdmg": 22.0, "rate": 0.95, "pel": 1, "spr": 0.01, "spd": 880.0, "life": 0.7, "price": 1300, "noise": 0.0, "snd": "bow", "kb": 12.0, "len": 18, "silent": true, "bolt": true},
+	{"name": "Revolver", "dmg": 30.0, "rate": 0.36, "pel": 1, "spr": 0.035, "spd": 950.0, "life": 0.825, "price": 0, "noise": 2.5, "snd": "pistol", "kb": 6.0, "len": 15, "silent": false, "bolt": false},
+	{"name": "Pump shotgun", "dmg": 15.0, "rate": 0.8, "pel": 6, "spr": 0.3, "spd": 820.0, "life": 0.54, "price": 650, "noise": 4.0, "snd": "shotgun", "kb": 8.0, "len": 23, "silent": false, "bolt": false},
+	{"name": "Lever rifle", "dmg": 95.0, "ads_k": 1.5, "rate": 0.5, "pel": 1, "spr": 0.008, "spd": 1400.0, "life": 0.93, "price": 1100, "noise": 4.5, "snd": "rifle", "kb": 10.0, "len": 25, "silent": false, "bolt": false},
+	{"name": "Submachine gun", "dmg": 17.0, "rate": 0.1, "pel": 1, "spr": 0.1, "spd": 950.0, "life": 0.675, "price": 1500, "noise": 1.1, "snd": "smg", "kb": 3.0, "len": 18, "silent": false, "bolt": false, "auto": true},
+	{"name": "Assault rifle", "dmg": 30.0, "rate": 0.13, "pel": 1, "spr": 0.045, "spd": 1250.0, "life": 0.9, "price": 2400, "noise": 1.8, "snd": "rifle2", "kb": 6.0, "len": 25, "silent": false, "bolt": false, "auto": true},
+	{"name": "Double-barrel", "dmg": 14.0, "rate": 1.05, "pel": 10, "spr": 0.4, "spd": 800.0, "life": 0.48, "price": 950, "noise": 6.0, "snd": "shotgun2", "kb": 15.0, "len": 21, "silent": false, "bolt": false},
+	{"name": "Crossbow", "dmg": 65.0, "ads_dmg": 100.0, "hip_zdmg": 22.0, "rate": 0.95, "pel": 1, "spr": 0.01, "spd": 880.0, "life": 1.05, "price": 1300, "noise": 0.0, "snd": "bow", "kb": 12.0, "len": 18, "silent": true, "bolt": true},
 ]
 
 const NAMES := ["Miller", "Cold Creek", "Harlan", "Pine Hollow", "Dry Fork", "Kessler", "Black Rock", "Owl Ridge", "Beaver Dam", "Grady", "Stillwater", "Red Oak", "Hatchet Lake", "Coyote", "Mercy", "Deadwood", "Fairchild", "Lonesome", "Iron Gap", "Juniper", "Sutter", "Bramble", "Cutbank", "Wolf Creek", "Tamarack", "Halcyon", "Burnt Mill", "Cedar Bluff", "Crowley", "Garnet", "Hollis", "Muddy Gap", "Pickett", "Quarry Hill", "Sawtooth", "Thistle", "Vesper", "Wick", "Yarrow", "Alder Bend", "Bitterroot", "Copper Run", "Doyle", "Elk Horn", "Fallow", "Gilead", "Hobb", "Ironwood", "Jericho", "Kettle", "Larkin", "Moss Point", "Norrel", "Oxbow", "Pruitt", "Rook", "Shiloh", "Tolliver", "Umber", "Vail", "Wren", "Ashby", "Bexley", "Calloway", "Prosper", "Lockhart", "Gallow", "Ashford", "Badger Flats", "Barlow", "Bear Paw", "Bellwether", "Birch Run", "Blackwater", "Bluestem", "Bodie", "Bonner", "Boulder Gap", "Brushy Creek", "Buckhorn", "Calico", "Canby", "Carver", "Chalk Bluff", "Cheney", "Cinder Cone", "Clearwater", "Colfax", "Cordell", "Cottonwood", "Coulter", "Cripple Creek", "Winslow", "Darby", "Deer Lodge", "Dillard", "Driftwood", "Dunmore", "Eagle Butte", "Easton", "Ember", "Fairview", "Fenwick", "Flint Ridge", "Fort Lyle", "Foxboro", "Glory", "Goshen", "Granite Falls", "Graves", "Greer", "Halfway", "Harmony", "Hartsel", "Haskell", "Hayden", "Hickory Flat", "High Lonesome", "Holloway", "Hope", "Horsetail", "Idlewild", "Yellow Jacket", "Jasper", "Kearney", "Kinsey", "Lamar", "Larch", "Last Chance", "Ledger", "Lone Pine", "Lowell", "Magpie", "Marrow", "Meeker", "Millbrook", "Mosby", "Needles", "New Bethel", "Nickel Plate", "North Fork", "Odell", "Ophir", "Paradise", "Pardee", "Pinto", "Plainview", "Quill", "Ransom", "Rattlesnake Butte", "Redmond", "Renner", "Ridgway", "Rimrock", "Rio Seco", "Rosebud", "Ruby Valley", "Saddle Butte", "Salt Lick", "Scofield", "Sentinel", "Silver Bow", "Slate Creek", "Sorrow", "Spearfish", "Stony Point", "Sulphur", "Sweetwater", "Tabor", "Tenmile", "Thatcher", "Timber Lake", "Tincup", "Truth", "Two Dot", "Upton", "Vantage", "Gunnison", "Whitehall", "Willow Bend"]
@@ -32,7 +32,7 @@ const RNAMES := ["Mara Ellis", "Doc Hollis", "June Parrish", "Eli Watts", "Rosa 
 const WHERE := {"pharmacy": "the pharmacy", "hardware": "the hardware store", "guns": "the gun shop", "bar": "the saloon", "grocery": "the grocery", "diner": "the diner", "gas": "the gas station", "post": "the post office", "house": "a house at the edge of town"}
 const FOUND := ["Thank God. I will stay right behind you.", "You are the pilot? Then let us go, now.", "I heard the engine. I knew someone would come.", "Do not leave me here. Please."]
 
-const ARCH := {"road": "Emergency road landing", "farm": "Farm strip", "lakeside": "Lakeside field", "county": "County field", "military": "Military airfield", "town": "Town airstrip"}
+const ARCH := {"road": "Emergency road landing", "farm": "Farm strip", "lakeside": "Lakeside field", "county": "County field", "military": "Military airfield", "town": "Town airstrip", "family": "Family farm"}
 const SHOPS := [
 	{"kind": "pharmacy", "sign": "PHARMACY", "mix": {"cabinet": 70, "register": 30}, "floor": "checker", "roof": "#6f7d86", "flat": true},
 	{"kind": "hardware", "sign": "HARDWARE", "mix": {"toolbox": 60, "crate": 25, "register": 15}, "floor": "#6d6a64", "roof": "#7a6a4a", "flat": true},
@@ -43,8 +43,8 @@ const SHOPS := [
 	{"kind": "gas", "sign": "GAS", "mix": {"jerry": 60, "register": 40}, "floor": "#6d6a64", "roof": "#8a8a82", "flat": true},
 	{"kind": "post", "sign": "POST OFFICE", "mix": {"desk": 60, "crate": 40}, "floor": "#6a5a44", "roof": "#4f5a63", "flat": true}]
 const HOUSEROOF := ["#6b3f33", "#4f5a63", "#6a6a5e", "#7a5a3a", "#3f4a3a", "#5a3a4a"]
-const ARCHROOF := {"farm": ["#8a3024", "#6b5040"], "lakeside": ["#5a4632", "#3f4a3a"], "county": ["#7b7f82", "#5d6266"], "military": ["#4d5638", "#5a5f48"], "town": ["#6b3f33", "#4f5a63", "#6a6a5e"], "road": ["#7b7f82", "#8a3a2a"]}
-const FLATARCH := {"farm": false, "lakeside": false, "county": true, "military": true, "town": false, "road": true}
+const ARCHROOF := {"farm": ["#8a3024", "#6b5040"], "lakeside": ["#5a4632", "#3f4a3a"], "county": ["#7b7f82", "#5d6266"], "military": ["#4d5638", "#5a5f48"], "town": ["#6b3f33", "#4f5a63", "#6a6a5e"], "road": ["#7b7f82", "#8a3a2a"], "family": ["#b03a2a", "#3f6f9f"]}
+const FLATARCH := {"farm": false, "lakeside": false, "county": true, "military": true, "town": false, "road": true, "family": false}
 const GOODS := {"whiskey": ["whiskey", 40], "cigarettes": ["cigarettes", 30], "antibiotics": ["antibiotics", 70], "jewelry": ["jewelry", 90], "batteries": ["batteries", 35]}
 const GKEYS := ["whiskey", "cigarettes", "antibiotics", "jewelry", "batteries"]
 const MIX := {"farm": {"crate": 40, "toolbox": 25, "jerry": 25, "cabinet": 10}, "lakeside": {"crate": 45, "jerry": 25, "toolbox": 15, "cabinet": 15}, "county": {"crate": 25, "desk": 25, "toolbox": 20, "cabinet": 15, "register": 15},

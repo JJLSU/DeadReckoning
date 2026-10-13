@@ -410,7 +410,7 @@ const HELP := [
 	["Flying", "Once you are above about 2,000 feet and clear of weather, click Cruise or press C to fly three times faster. When you are low and near a charted runway, approach assist steers you onto the centerline as long as you let go of the stick. Radio maydays pop up on long flights and pay well if you land there in time."],
 	["Weather and damage", "Storms drift across the map and show on your minimap as blue patches. Their cores shake the plane apart. Flying low over towns draws gunfire that can hole the hull or the fuel lines. Hard landings cost hull too. Mechanics patch everything for cash."],
 	["Noise", "Your landing, gunfire, running, explosions, and siphoning fuel all fill the noise meter. At each mark a new wave of the dead arrives from the edges of the map. When it fills, the horde comes and does not stop. The crossbow and machete make no noise. Loot what you can and leave in time."],
-	["On foot", "WASD to move, aim with the mouse and click to fire. Hold Shift to run, hold right mouse to aim down sights for steadier, slower aim, Space to jump, 1–5 to select Revolver, Pump shotgun, Lever rifle, Submachine gun, or Assault rifle; 6 for Double-barrel, 7 for Crossbow, Q to cycle owned weapons, H to heal, G to throw a pipe bomb, E to board the plane. Jumping clears sandbags and low fences inside the site, but not cars or the outer fence, and nothing can bite you in the air. Running is loud, and some of the bodies on the ground are not dead. Walk over containers to burst them open, then collect what spills out. Rarer finds glow green, blue, or gold. Locked safes take a spare part or a bomb and hold the best loot, including trinkets with permanent perks. Houses sometimes hide stashes under loose floorboards that only show up close. Footlockers hold ammo, bombs, and armor. Registers hold cash and jewelry. Toolboxes hold spare parts for field repairs. Medicine cabinets hold bandages and antibiotics. Every airfield has a small town beside it with shops and houses to search. Roofs lift away when you step inside. Each shop stocks by its trade: the pharmacy has medicine, the hardware store has parts, the gun shop has ammo. Traders pay different prices for goods at each field. Old charts reveal fields and narrow down Haven. The dead sometimes drop rounds. When you run dry you fight with a machete. Red barrels explode when shot. Gunfire draws more of the dead the longer you stay. Night falls at 18:00, and the dead move faster in the dark. You can sleep in the cockpit from the hangar tab. Return to the plane to refuel, take jobs, and upgrade."],
+	["On foot", "WASD to move, aim with the mouse and click to fire. Hold Shift to run, hold right mouse to aim down sights for steadier, slower aim, Space to jump, 1–5 to select Revolver, Pump shotgun, Lever rifle, Submachine gun, or Assault rifle; 6 for Double-barrel, 7 for Crossbow, Q to cycle owned weapons, H to heal, G to throw a pipe bomb, F to switch your flashlight on or off (lit at night, you are seen from much farther), E to board the plane. Jumping clears sandbags and low fences inside the site, but not cars or the outer fence, and nothing can bite you in the air. Running is loud, and some of the bodies on the ground are not dead. Walk over containers to burst them open, then collect what spills out. Rarer finds glow green, blue, or gold. Locked safes take a spare part or a bomb and hold the best loot, including trinkets with permanent perks. Houses sometimes hide stashes under loose floorboards that only show up close. Footlockers hold ammo, bombs, and armor. Registers hold cash and jewelry. Toolboxes hold spare parts for field repairs. Medicine cabinets hold bandages and antibiotics. Every airfield has a small town beside it with shops and houses to search. Roofs lift away when you step inside. Each shop stocks by its trade: the pharmacy has medicine, the hardware store has parts, the gun shop has ammo. Traders pay different prices for goods at each field. Old charts reveal fields and narrow down Haven. The dead sometimes drop rounds. When you run dry you fight with a machete. Red barrels explode when shot. Gunfire draws more of the dead the longer you stay. Night falls at 18:00, and the dead move faster in the dark. You can sleep in the cockpit from the hangar tab. Return to the plane to refuel, take jobs, and upgrade."],
 	["The goal", "Haven lies in one of the far corners of the map, across empty country no starter plane can cross. Old charts narrow down which. Earn a bigger airframe or bigger tanks first."],
 	["Keys", "M opens the chart. Esc or P pauses. Mouse wheel or + and − zoom the view, 0 resets it. Ctrl with + and − changes the interface size. F11 toggles fullscreen; Esc leaves fullscreen."]]
 
@@ -525,6 +525,7 @@ func render_menu() -> void:
 	tg.append(["Fuel pump, $%d/gal" % s.fuelPrice, true] if s.fuel else ["No fuel pump", false])
 	if s.shop: tg.append(["Mechanic and trader", true])
 	if s.dealer: tg.append(["Aircraft dealer", true])
+	if s.get("arch", "") == "family": tg.append(["Farm store: medicine", true])
 	if s.get("hostile", false): tg.append(["Held by armed survivors", false])
 	tags(tg)
 	note("Chalked on the hangar door: “%s”" % String(D.NOTES[int(s.seed) % D.NOTES.size()]).replace("{Dir}", World.haven_dir_name().capitalize()))
@@ -566,7 +567,11 @@ func render_menu() -> void:
 			row(c.icon, t, "%d km %s, danger %s, pays $%d%s" % [U.km(dd), game.menu.bearing(s, d), _pips(d.danger), c.reward, ", beyond current fuel" if dd > game.range_now() else ""],
 				[["Accept", "b", "accept", i, G.contracts.size() >= Pp.slots]])
 	elif mt == "shop":
-		if not s.shop:
+		if s.get("arch", "") == "family":
+			h4("Farm store")
+			row("🩹", "Medkit", "$60, you have %d, heals 45" % G.med, [["Buy", "b", "med", null, G.cash < 60]])
+			row("🩹", "Bandage", "$25, you have %d, heals 20" % G.band, [["Buy", "b", "band", null, G.cash < 25]])
+		elif not s.shop:
 			empty("Nobody here but the dead. Regional fields and airports have mechanics and traders.")
 		else:
 			var tp: int = 450 * (G.tanks + 1) + G.plane * 200
@@ -693,7 +698,7 @@ func update_buttons() -> void:
 	btns.map.visible = play
 	btns.pause.visible = play
 	btns.heal.visible = gr and (G.med > 0 or G.band > 0) and G.hp < 100
-	btns.throw.visible = gr and G.bombs > 0
+	btns.throw.visible = gr and G.bombs > 0 and not gm.unarmed_here()
 	var ok: bool = fl and gm.flight.cruise_ok()
 	btns.cruise.visible = ok
 	if not ok and F: F.cruise = false
@@ -735,7 +740,7 @@ func toggle_map() -> void:
 	var ms := maxf(220, minf(minf(vs.x - 48, vs.y - 170), 760))
 	map_cv.custom_minimum_size = Vector2(ms, ms)
 	map_note.custom_minimum_size.x = ms
-	map_note.text = "Click a charted field to set your course. Magenta rings are fields, filled ones sell fuel. Amber rings are delivery stops. Red rings with a cross are held by armed survivors: no fuel, no trade. Gray squares are road landings you made. Blue patches are storms, which drift. The dashed circle is how far your fuel reaches now."
+	map_note.text = "Click a charted field to set your course. Magenta rings are fields, filled ones sell fuel. Amber rings are delivery stops. Red rings with a cross are held by armed survivors: no fuel, no trade. Green rings are family farms: friendly folk, fuel and medicine. Brown dashed rings mark rough danger zones around home. Gray squares are road landings you made. Blue patches are storms, which drift. The dashed circle is how far your fuel reaches now."
 	map_cv.queue_redraw()
 
 
@@ -763,6 +768,8 @@ class MapView extends Control:
 	func _process(_dt: float) -> void:
 		if visible and ui.map_ov.visible: queue_redraw()
 
+	const DANGER_RINGS := [4500.0, 13500.0, 22500.0, 31500.0]   # where danger steps from 1 to 5, distance from home
+
 	func _draw() -> void:
 		var gm: Game = ui.game
 		if gm.G == null: return
@@ -786,6 +793,24 @@ class MapView extends Control:
 		else:
 			var st: Dictionary = gm.strip(G.strip)
 			me = Vector3(st.x, st.y, 0)
+		# rough danger zones: rings round the home field where danger steps up (world.gd:
+		# danger = 1 + distance / 9000, rounded, +1 near a town, give or take a little)
+		var hm: Dictionary = gm.strip(wd.START)
+		var zc := Color.html("#6a2a0a")
+		var zr := 0.0
+		for zi in DANGER_RINGS.size() + 1:
+			var r1: float = DANGER_RINGS[zi] if zi < DANGER_RINGS.size() else zr + 9000.0
+			if zi < DANGER_RINGS.size():
+				g.dashed_arc(hm.x * k, hm.y * k, r1 * k, 0, TAU, Color(1, 1, 1, 0.45), 4.0, 10, 6)
+				g.dashed_arc(hm.x * k, hm.y * k, r1 * k, 0, TAU, zc, 2.0, 10, 6)
+			var lr := (zr + r1) * 0.5 * k if zi > 0 else 0.0
+			for a in [-PI / 2, PI / 2, PI, 0.0]:   # label above the home field, or wherever it fits
+				var lx: float = hm.x * k + cos(a) * lr
+				var ly: float = hm.y * k + sin(a) * lr
+				if lx > 14 and lx < ms - 14 and ly > 14 and ly < ms - 8:
+					g.text("Danger %d" % (zi + 1), lx, ly + 5, 13, zc, 0, "900", 3.0, Color(1, 1, 1, 0.75))
+					break
+			zr = r1
 		g.dashed_arc(me.x * k, me.y * k, gm.range_now() * k, 0, TAU, Color(155 / 255.0, 42 / 255.0, 104 / 255.0, 0.9), 1.5, 5, 4)
 		for s in wd.STORMS:
 			var q: Vector2 = wd.storm_pos(s)
@@ -827,8 +852,9 @@ class MapView extends Control:
 				if ms > 420 or G.nav == s.id or s.id == G.strip:
 					g.text_base(s.name, x + r + 4, y + 4, 11, Color(20 / 255.0, 26 / 255.0, 28 / 255.0, 0.85), -1, "600")
 				continue
-			g.ring(x, y, r, mag, 2)
-			if s.fuel: g.circle(x, y, r - 2.5, mag)
+			var sc: Color = Color.html("#4a7a4c") if s.get("arch", "") == "family" else mag   # family farms in green
+			g.ring(x, y, r, sc, 2)
+			if s.fuel: g.circle(x, y, r - 2.5, sc)
 			if dests.has(s.id): g.ring(x, y, r + 5, Color.html("#d9a441"), 2.5)
 			if G.nav == s.id: g.line(me.x * k, me.y * k, x, y, Color.WHITE, 1.5)
 			if ms > 420 or dests.has(s.id) or G.nav == s.id or s.id == G.strip:

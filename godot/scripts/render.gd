@@ -142,11 +142,12 @@ static func draw_world(gm, g: Pen, cx: float, cy: float, sc: float, t: float) ->
 			if gx < cmin or gy < cmin or gx > cmax or gy > cmax: continue
 			var c: Texture2D = gm.baker.get_chunk(gx, gy)
 			if c: g.tex(c, gx * CH, gy * CH, CH + 1, CH + 1)
-	if sc > 0.5:
+	if sc > 0.512:
 		var G2 := 70.0
 		var al := clampf((sc - 0.5) / 0.22, 0, 1)
 		g.ga = al
 		var seed_v: int = wd.SEED
+		var fills := 0
 		for gy in range(int(floor(y0 / G2)) - 1, int(floor(y1 / G2)) + 2):
 			for gx in range(int(floor(x0 / G2)) - 1, int(floor(x1 / G2)) + 2):
 				var h := U.hash3(gx, gy, seed_v + 201)
@@ -154,6 +155,9 @@ static func draw_world(gm, g: Pen, cx: float, cy: float, sc: float, t: float) ->
 				var ck := gx * 100003 + gy
 				var cc = gm.TCACHE.get(ck)
 				if cc == null:
+					# spread new cells over frames so entering low altitude doesn't hitch
+					fills += 1
+					if fills > 40: continue
 					var wx0 := (gx + U.hash3(gx, gy, seed_v + 202)) * G2
 					var wy0 := (gy + U.hash3(gx, gy, seed_v + 203)) * G2
 					var t0 := wd.terr(wx0, wy0)
@@ -234,6 +238,10 @@ static func draw_strip(gm, g: Pen, s: Dictionary) -> void:
 		var pc := rgba(212, 90, 157, 0.45)
 		g.dashed(-L / 2 - 900, 0, -L / 2 - 30, 0, pc, 3, 24, 18)
 		g.dashed(L / 2 + 30, 0, L / 2 + 900, 0, pc, 3, 24, 18)
+	if s.get("arch", "") == "family":
+		FarmFolk.draw_air(gm, g, s, L, Wd)
+		g.restore()
+		return
 	var dirt: bool = s.type == "dirt"
 	var hav: bool = s.type == "haven"
 	if not dirt:
@@ -411,7 +419,8 @@ static func prep_flight(gm) -> void:
 	if gm.cam_snap:
 		gm.camX = lx; gm.camY = ly; gm.cam_snap = false
 	else:
-		gm.camX = lerpf(gm.camX, lx, 0.08); gm.camY = lerpf(gm.camY, ly, 0.08)
+		var cf := 1.0 - pow(0.92, minf(gm.get_process_delta_time(), 0.2) * 60.0)
+		gm.camX = lerpf(gm.camX, lx, cf); gm.camY = lerpf(gm.camY, ly, cf)
 	# prefetch chunks ahead of the plane
 	var ax: float = F.x + cos(F.hdg) * 1500
 	var ay: float = F.y + sin(F.hdg) * 1500
@@ -633,7 +642,7 @@ static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 		var dy: float = (s.y - F.y) * k
 		if dx * dx + dy * dy > mr * mr * 0.9: continue
 		var isnt: bool = nt != null and nt.id == s.id
-		g.ring(mx + dx, my + dy, 4.5 if isnt else 3.0, hc("#9cc063") if s.type == "haven" else hc("#e07ab3"), 2.5 if isnt else 1.5)
+		g.ring(mx + dx, my + dy, 4.5 if isnt else 3.0, hc("#9cc063") if s.type == "haven" else (hc("#8fbf88") if s.get("arch", "") == "family" else hc("#e07ab3")), 2.5 if isnt else 1.5)
 		if mdt2 != null and mdt2.id == s.id:
 			g.ring(mx + dx, my + dy, 7.0, hc("#ff2a1e"), 2.5)
 	g.save(); g.translate(mx, my); g.rotate(F.hdg)
@@ -827,11 +836,33 @@ static func prep_ground(gm) -> void:
 		m.set_shader_parameter("dk", dk)
 		m.set_shader_parameter("screen", Vector2(gm.Wv, gm.Hv))
 		m.set_shader_parameter("ppos", Vector2(vx, vy))
-		m.set_shader_parameter("r0", (150.0 if gm.has("monocle") else 110.0) * gs)
+		m.set_shader_parameter("r0", (150.0 if gm.has("monocle") else 110.0) * 1.5 * gs)   # glow round you: 1.5x wider...
+		m.set_shader_parameter("r0_a", 0.5)   # ...and half as bright (Greg, 2026-10-12)
 		m.set_shader_parameter("cone_a", p.ang)
-		m.set_shader_parameter("cone_l", (620.0 if gm.has("monocle") else 430.0) * gs * (0.3 if S.flick > 0 else 1.0))
-		m.set_shader_parameter("flash_r", 340.0 * gs if (S.flash > 0 or S.boomFlash > 0) else 0.0)
+		m.set_shader_parameter("cone_l", ((620.0 if gm.has("monocle") else 430.0) * gs * (0.3 if S.flick > 0 else 1.0)) if gm.torch else 0.0)
+		m.set_shader_parameter("flash_r", 340.0 * gs if S.flash > 0 else 0.0)
 		var arr := PackedVector3Array()
+		for b in S.get("blit", []):   # blasts light up BLAST_LIGHT_R blast radii around them, briefly
+			if arr.size() >= 16: break
+			var bx: float = gm.Wv / 2 + (b.x - S.rcx) * gs
+			var by: float = gm.Hv / 2 + (b.y - S.rcy) * gs
+			var rb: float = b.r * gs * clampf(b.life / (Blasts.BLAST_LIGHT_T * 0.5), 0.0, 1.0)
+			if bx < -rb or bx > gm.Wv + rb or by < -rb or by > gm.Hv + rb: continue
+			arr.append(Vector3(bx, by, rb))
+		for f in S.get("mf", []):   # survivors' muzzle flashes light up the dark as far as yours (flash_r)
+			if arr.size() >= 16: break
+			var fx: float = gm.Wv / 2 + (f.x - S.rcx) * gs
+			var fy: float = gm.Hv / 2 + (f.y - S.rcy) * gs
+			var rf := 340 * gs
+			if fx < -rf or fx > gm.Wv + rf or fy < -rf or fy > gm.Hv + rf: continue
+			arr.append(Vector3(fx, fy, rf))
+		for f in site_fires(S):   # fires light up the dark, breathing with their glow
+			if arr.size() >= 16: break
+			var fx: float = gm.Wv / 2 + (f[0] - S.rcx) * gs
+			var fy: float = gm.Hv / 2 + (f[1] - S.rcy) * gs
+			var rf: float = FIRE_LIGHT_R * f[2] * (0.4 + 0.6 * f[3]) * fire_pulse(gm.T, f[4]) * gs
+			if fx < -rf or fx > gm.Wv + rf or fy < -rf or fy > gm.Hv + rf: continue
+			arr.append(Vector3(fx, fy, rf))
 		for l in S.lights:
 			if not l.on: continue
 			var sx: float = gm.Wv / 2 + (l.x + 12 - S.rcx) * gs
@@ -839,13 +870,6 @@ static func prep_ground(gm) -> void:
 			var rl := 140 * gs
 			if sx < -rl or sx > gm.Wv + rl or sy < -rl or sy > gm.Hv + rl: continue
 			if arr.size() < 16: arr.append(Vector3(sx, sy, rl))
-		for f in S.get("mf", []):   # survivors' muzzle flashes light up the dark too
-			if arr.size() >= 16: break
-			var fx: float = gm.Wv / 2 + (f.x - S.rcx) * gs
-			var fy: float = gm.Hv / 2 + (f.y - S.rcy) * gs
-			var rf := 200 * gs
-			if fx < -rf or fx > gm.Wv + rf or fy < -rf or fy > gm.Hv + rf: continue
-			arr.append(Vector3(fx, fy, rf))
 		var nl := arr.size()
 		for i in range(arr.size(), 16): arr.append(Vector3.ZERO)
 		m.set_shader_parameter("lights", arr)
@@ -858,6 +882,38 @@ const FLOATER_BOTTOM := 44.0   # on foot: the newest pop-up message sits this fa
 const FLOATER_LINE := 19.0     # and older ones stack upwards this far apart
 const FLOATER_MAX := 5         # at most this many shown at once
 const SMOKE_HIDE := 0.5        # how much of the player a smoke cloud hides at full density
+const SV_FLASH_NIGHT := 2.0     # enemy muzzle flashes at night: this many times as bright as by day (drawn again over the dark)
+const FIRE_LIGHT_R := 190.0    # at night a car fire lights up this far around it (burning wreckage pieces: x their size, ~0.45)
+const FIRE_PULSE := 0.12       # how much fire glows and fire light swell and shrink as they pulse
+
+## Slow warm pulse (with a faster flicker on top) for a fire's glow and light, 1 - FIRE_PULSE..1 + FIRE_PULSE.
+static func fire_pulse(T: float, ph: float) -> float:
+	return 1.0 + FIRE_PULSE * (0.75 * sin(T * 4.0 + ph) + 0.25 * sin(T * 11.0 + ph * 1.7))
+
+## Every fire burning on the site, as [x, y, size (1 = a car), strength 0..1, pulse phase]: burning cars
+## waiting to blow, wrecks still burning after the blast, and burning pieces of wreckage once they've landed.
+static func site_fires(S: Dictionary) -> Array:
+	var out := []
+	for car in S.cars:
+		if not car.dead and car.fuse >= 0: out.append([car.x, car.y, 1.0, minf(1.0, float(car.burnT) / 1.5), float(car.c)])
+		elif car.dead and car.get("fireT", 0.0) > 0: out.append([car.x, car.y, 1.0, minf(1.0, car.fireT / (car.fireMax / 3.0)), float(car.c)])
+	for d in S.get("debris", []):
+		if d.fireT > 0 and d.t >= d.fly: out.append([d.x, d.y, 0.45, minf(1.0, d.fireT / 3.0), d.ph])
+	return out
+
+## A fire like the map campfires: a warm pulsing glow round a flickering hot core.
+static func draw_fire(gm, g: Pen, x: float, y: float, sz: float, k: float, ph: float) -> void:
+	var pu := fire_pulse(gm.T, ph)
+	var r1 := 80.0 * sz * pu
+	g.ga = 0.32 * k * pu
+	g.tex(Tx.glow("255,150,60"), x - r1, y - r1, r1 * 2, r1 * 2)
+	var r2 := 46.0 * sz * pu
+	g.ga = 0.55 * k
+	g.tex(Tx.glow("255,110,40"), x - r2, y - r2, r2 * 2, r2 * 2)
+	g.ga = 1.0
+	for q in 3:
+		g.circle(x + (randf() - 0.5) * 8 * sz, y + (randf() - 0.5) * 6 * sz, (5 + randf() * 3) * sz * (0.5 + 0.5 * k), rgba(255, 120 + randf() * 60, 40, 0.8))
+	g.circle(x, y, (2.5 + randf() * 1.5) * sz, rgba(255, 230, 170, 0.85 * k))
 
 static func ground_layer(gm, idx: int, g: Pen) -> void:
 	var S: Dictionary = gm.S
@@ -937,17 +993,26 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 				g.ring(br.x, br.y, 8, rgba(40, 8, 4, 0.6), 1.5)
 				g.circle(br.x + 4, br.y - 3, 2.2, hc("#2a2a28"))
 				g.poly(PackedVector2Array([Vector2(br.x - 3.5, br.y + 4), Vector2(br.x, br.y - 2), Vector2(br.x + 3.5, br.y + 4)]), hc("#e8c74a"))
-			for car in S.cars:
-				# burning car (out of hitpoints, waiting to blow): drawn like the campfires on the
-				# map (draw_smoke), a flickering hot core under a drifting plume, at the car's hot end
-				if car.dead or car.fuse < 0: continue
-				var grow := minf(1.0, float(car.burnT) / 1.5)
-				g.ga = 0.55 * grow
-				g.tex(Tx.glow("255,110,40"), car.x - 46, car.y - 46, 92, 92)
-				g.ga = 1.0
-				for q in 3:
-					g.circle(car.x + (randf() - 0.5) * 8, car.y + (randf() - 0.5) * 6, (5 + randf() * 3) * (0.5 + 0.5 * grow), rgba(255, 120 + randf() * 60, 40, 0.8))
-				g.circle(car.x, car.y, 2.5 + randf() * 1.5, rgba(255, 230, 170, 0.85 * grow))
+			# wreckage thrown out by car blasts: charred chunks, tumbling out in an arc, then lying there
+			for d in S.get("debris", []):
+				var k: float = minf(1.0, d.t / d.fly)
+				var hgt := sin(PI * k) * 26.0
+				var dx: float = lerpf(d.sx, d.x, k)
+				var dy: float = lerpf(d.sy, d.y, k)
+				var an: float = d.ang + d.spin * minf(d.t, d.fly)
+				var sh := PackedVector2Array()
+				var pc := PackedVector2Array()
+				for v in d.pts:
+					var w: Vector2 = v.rotated(an)
+					sh.append(Vector2(dx + w.x + 2 + hgt * 0.3, dy + w.y + 3))
+					pc.append(Vector2(dx + w.x, dy + w.y - hgt))
+				g.poly(sh, Color(0, 0, 0, 0.3))
+				g.poly(pc, hc("#15120f"))
+				g.polyline(pc + PackedVector2Array([pc[0]]), hc("#2c2520"), 1.0)
+			# fires: burning cars (out of hitpoints, waiting to blow), wrecks still burning after
+			# the blast, burning wreckage; drawn like the campfires on the map (draw_smoke)
+			for f in site_fires(S):
+				draw_fire(gm, g, f[0], f[1], f[2], f[3], f[4])
 			# blast-radius rings: burning cars and thrown bombs
 			for car in S.cars:
 				if not car.dead and car.fuse >= 0: blast_ring(gm, g, car.x, car.y, Blasts.CAR_BLAST_R, car.fuse)
@@ -965,6 +1030,7 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 					g.save(); g.translate(v.x, v.y - sj * 0.5); g.scale(1 + sj / 45, 1 + sj / 45); g.translate(-v.x, -v.y)
 				draw_person(g, v.x, v.y, v.ang, {"body": v.shirt, "skin": v.skin, "hair": "#2b2118", "cap": v.cap, "gun": not v.get("unarmed", false), "bare": v.get("unarmed", false), "long": int(v.get("w", 1)) != 0, "vest": float(v.get("armor", 0.0)) > 0, "walk": v.wk, "hit": v.hit > 0, "lower": 1.0 - float(v.get("gup", 0.0))})
 				if sj > 0: g.restore()
+			gm.farm.draw(g)
 			if S.npc:
 				var n: Dictionary = S.npc
 				draw_person(g, n.x, n.y, n.ang, {"body": "#3f7a7a", "skin": "#e0b894", "hair": "#5a3a22", "gun": true, "long": int(n.get("w", 0)) != 0, "walk": n.wk, "hit": n.hit > 0})
@@ -985,7 +1051,7 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 				var dc := Vector2(p.x - cl.x, p.y - cl.y).length()
 				if dc < cl.r: hid = maxf(hid, float(cl.den) * clampf((cl.r - dc) / (cl.r * 0.3), 0.0, 1.0))
 			g.ga = 1.0 - SMOKE_HIDE * minf(1.0, hid)
-			draw_person(g, p.x, p.y, p.ang, {"body": "#9a3a2a" if S.hurt > 0 else "#6b4a2e", "skin": "#d9b48f", "cap": "#34404c", "gun": gm.G.ammo > 0, "long": gm.G.weapon > 0, "walk": p.wk, "swing": S.swing > 0})
+			draw_person(g, p.x, p.y, p.ang, {"body": "#9a3a2a" if S.hurt > 0 else "#6b4a2e", "skin": "#d9b48f", "cap": "#34404c", "gun": gm.G.ammo > 0 and not gm.unarmed_here(), "bare": gm.unarmed_here(), "long": gm.G.weapon > 0, "walk": p.wk, "swing": S.swing > 0})
 			g.restore()
 		1:
 			view.call()
@@ -1074,13 +1140,9 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 						var j := U.hash3(c, r, 3)
 						var sz := 70 + j * 14
 						g.ga = 0.45 if Vector2(p.x - x, p.y - y).length() < 34 else 1.0
-						g.tex(Tx.TREES[int(j * 3)], x - sz / 2, y - sz / 2, sz, sz)
+						g.tex(Tx.TREES[int(j * 3)], x - sz / 2, y - sz / 2, sz, sz, FarmFolk.tree_tint(S, c, r))
 				g.ga = 1.0
-			for f in S.fl:
-				if not f.get("w", false): continue   # the rest are drawn near the bottom of the screen (layer 7)
-				g.ga = clampf(f.life, 0, 1)
-				g.text(f.txt, f.x, f.y, 14, hc(f.c), 0, "700", 3, Color(0, 0, 0, 0.7))
-			g.ga = 1.0
+			gm.farm.draw_top(g)   # family farm windmill sails, above roofs and trees
 			g.set_xf(Transform2D.IDENTITY)
 			var dk: float = gm.dark()
 			vignette(gm, g, 0.8 + dk * 0.15)
@@ -1116,6 +1178,21 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 						g.tex(Tx.glow("255,60,30"), ex - 4.5, ey - 4.5, 9, 9)
 						g.ga = 1.0
 						g.rect(ex - 0.8, ey - 0.8, 1.6, 1.6, rgba(255, 150, 110, dk))
+			for f in S.get("mf", []):   # enemy muzzle flashes: the flash again over the dark, so at night it's SV_FLASH_NIGHT x as bright
+				var fx: float = W / 2 + (f.x - cx) * gs
+				var fy: float = H / 2 + (f.y - cy) * gs
+				var rf: float = 48.0 * gs
+				if fx < -rf or fx > W + rf or fy < -rf or fy > H + rf: continue
+				var fa: float = minf(1.0, dk) * (SV_FLASH_NIGHT - 1.0)
+				g.radial(fx, fy, [[0.0, rgba(255, 220, 150, 0.9 * fa)], [rf * 0.3, rgba(255, 160, 70, 0.4 * fa)], [rf, rgba(255, 120, 40, 0)]], 24)
+			for f in site_fires(S):   # warm glow over the dark round every fire, pulsing
+				var fx: float = W / 2 + (f[0] - cx) * gs
+				var fy: float = H / 2 + (f[1] - cy) * gs
+				var rf: float = FIRE_LIGHT_R * 0.8 * f[2] * fire_pulse(gm.T, f[4]) * gs
+				if fx < -rf or fx > W + rf or fy < -rf or fy > H + rf: continue
+				g.ga = 0.3 * dk * f[3]
+				g.tex(Tx.glow("255,140,60"), fx - rf, fy - rf, rf * 2, rf * 2)
+			g.ga = 1.0
 			for l in S.lights:
 				if not l.on: continue
 				var sx: float = W / 2 + (l.x + 12 - cx) * gs
@@ -1141,6 +1218,14 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 				g.rect(sp.x + sp.r * 0.3, sp.y, 3, sp.r * 0.4 + (1.8 - sp.life) * 25, col)
 			if S.boomFlash > 0: g.rect(0, 0, W, H, rgba(255, 190, 110, minf(1, S.boomFlash * 1.2)))
 		7:
+			# speech over people's heads ("Hey!", names, "Smoke!", ...): drawn here, above the night
+			# darkness, smoke and screen effects, so it's always fully readable
+			view.call()
+			for f in S.fl:
+				if not f.get("w", false): continue   # the rest are stacked near the bottom of the screen, below
+				g.ga = clampf(f.life, 0, 1)
+				g.text(f.txt, f.x, f.y, 14, hc(f.c), 0, "700", 3, Color(0, 0, 0, 0.7))
+			g.ga = 1.0
 			g.set_xf(Transform2D.IDENTITY)
 			# pop-up messages on foot: stacked near the bottom of the screen, newest lowest,
 			# so they don't cover the action around the player
@@ -1195,15 +1280,16 @@ static func draw_roofs(gm, g: Pen) -> void:
 	var rects := PackedVector4Array()
 	var fades := PackedVector2Array()
 	var centres := PackedVector2Array()
+	var rf := 1.0 - pow(0.82, minf(gm.get_process_delta_time(), 0.05) * 60.0)   # roof fade, 0.18 per frame at 60 fps
 	for ri in S.rooms.size():
 		var rm: Dictionary = S.rooms[ri]
 		var inside: bool = p.x > rm.c * TS and p.x < (rm.c + rm.w) * TS and p.y > rm.r * TS and p.y < (rm.r + rm.h) * TS
-		rm.ra = lerpf(rm.ra, 0.05 if inside else 1.0, 0.18)
+		rm.ra = lerpf(rm.ra, 0.05 if inside else 1.0, rf)
 		# aiming in through an opening fades a soft circle around where the sightline crosses
 		# it; peeking in at a door fades one around the player
 		if not inside and sighted.has(ri): rm.apt = sighted[ri]
-		rm.ak = lerpf(rm.get("ak", 0.0), 1.0 if not inside and sighted.has(ri) else 0.0, 0.18)
-		rm.pk = lerpf(rm.get("pk", 0.0), 1.0 if not inside and peeking(S, p, rm) else 0.0, 0.18)
+		rm.ak = lerpf(rm.get("ak", 0.0), 1.0 if not inside and sighted.has(ri) else 0.0, rf)
+		rm.pk = lerpf(rm.get("pk", 0.0), 1.0 if not inside and peeking(S, p, rm) else 0.0, rf)
 		if (rm.ak > 0.01 or rm.pk > 0.01) and rects.size() < 16:
 			rects.append(Vector4(rm.c * TS * gs + ox, rm.r * TS * gs + oy, ((rm.c + rm.w) * TS + 10) * gs + ox, ((rm.r + rm.h) * TS + 10) * gs + oy))
 			fades.append(Vector2(rm.ak, rm.pk))
@@ -1606,6 +1692,16 @@ static func draw_person(g: Pen, x: float, y: float, a: float, o: Dictionary) -> 
 		g.rect(-3.2, -6, 6.4, 12, hc("#5f676f"))
 	g.stroke_ellipse(0, 0, 7.5, 11.5, 0, Color(0, 0, 0, 0.35), 1)
 	g.ellipse(-2, -3.5, 4, 6, 0, Color(1, 1, 1, 0.13))
+	var fem: bool = o.get("fem", false)
+	if fem:
+		# women: a fuller bust out front, and long hair falling down the back
+		for sy in [-3.0, 3.0]:
+			g.circle(6.6, sy + signf(sy) * 0.3, 2.6, U.shade(body, 0.62))
+			g.circle(6.4, sy, 2.4, body)
+			g.circle(6.7, sy - 0.8, 1.0, Color(1, 1, 1, 0.18))
+		var hcol := hc(o.get("hair", "#2a2620"))
+		g.ellipse(-5.0, 0, 5.6, 7.4, 0, hcol)                     # hair over the shoulders
+		g.ellipse(-8.6, 0, 3.4, 4.6, 0, U.shade(hcol, 0.85))      # and down the back
 	g.circle(1, 0, 5.8, skin)
 	if capc != "":
 		g.circle(0, 0, 5.9, hc(capc))

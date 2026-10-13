@@ -30,13 +30,26 @@ const SV_PATROL_SPD := 0.4     # walking speed while patrolling, fraction of the
 # you. Only those with no cover dodge: in cover or heading for it (a wall or smoke) they hold or
 # keep going, peekers ducking back in.
 const SV_SUP_R := 48.0   # 1.5 tiles (Greg)
-const SV_SUP_T := Vector2(0.2, 0.3)   # a dodge is a quick sidestep: never more than 0.3 s on the move (Greg)
+const SV_SUP_T := Vector2(0.5, 1.3)   # how long a dodge keeps them moving (Greg: back up from 0.2-0.3 now only the uncovered dodge)
 const SV_SUP_NODG := 1.5       # driven out of cover (flanked), they don't dodge for this long while they find more
 const SV_SUP_SPD := 1.3
+# Driven back into the same cover SV_DUCK_MAX times by your fire while peeking, a survivor gives
+# it up for different cover (if there's any), and won't pick a spot within SV_DUCK_AVOID_R px of
+# it again for SV_DUCK_AVOID_T s.
+const SV_DUCK_MAX := 3
+const SV_DUCK_AVOID_R := 48.0
+const SV_DUCK_AVOID_T := 10.0
 const SV_SUP_WAIT := Vector2(0.3, 0.6)   # a beat before each dodge: they don't react instantly (Greg)
 const SV_FLEE_MARGIN := 24.0
+# Survivors walking at one another steer round each other (sv_avoid()): anyone within
+# SV_AVOID_R px ahead and SV_AVOID_W px either side of their path.
+const SV_AVOID_R := 56.0
+const SV_AVOID_W := 22.0
+const SV_AVOID_K := 1.5
 const SV_FLEE_REACT := Vector2(0.25, 0.7)
 const SV_FLEE_SPD := 1.25
+const SV_CAR_NOTICE := 0.6    # chance a survivor in reach notices a burning car is about to blow, x their iq (Greg)
+const SV_CAR_NOTICE_T := 1.0  # ...re-rolled this often while they haven't (Greg)
 const SV_REFUGE_MIN := 0.8       # shielded refuge at least this fraction of the blast radius from it
 const SV_REFUGE_OPEN_PEN := 96.0 # a refuge in the open (clear of the radius, no wall) scored as if this many px further
 const SV_REFUGE_SEARCH := 3      # look this many tiles past the blast's reach round the survivor
@@ -186,7 +199,19 @@ const SV_FLANK_REST := 8.0       # after giving up, not picked to flank again fo
 # cheaper guns are always more common (scarcity), but dearer ones show up more where danger is high.
 const SV_GUN_BASE := 300.0
 const SV_GUN_STEP := 250.0
+const SV_AUTO_MULT := 3.0     # automatics (SMG, assault rifle) this many times as common as the price curve gives (Greg)
+const SV_AR_MULT := 3.0       # ...and of those, assault rifles weighted up this much against SMGs (Greg)
+const SV_BURST := Vector2i(6, 9)   # rounds per automatic burst (was 3-5; Greg)
 const SV_DMG_REF := 30.0
+# Settled aim (Greg 2026-10-13): after standing still SV_SETTLE_T s a survivor's aim wobble (and
+# a single-bullet gun's spread) is down to SV_SETTLE_ACC of normal, easing in. Snap shots aren't.
+const SV_SETTLE_T := 0.8
+const SV_SETTLE_ACC := 0.4
+# Leading you (Greg 2026-10-13): shooting at you while you move, they aim where you'll be;
+# the share of the lead they get is SV_LEAD_K x iq (0.6-1.0) +- SV_LEAD_ERR / iq.
+const SV_LEAD_K := 0.8
+const SV_LEAD_ERR := 0.2
+const SV_LEAD_CONE := 0.35   # radians: only when they're facing you about this closely
 const SV_SHOT_NOISE := 0.5   # each survivor gunshot adds this fraction of the gun's noise (as if you'd fired it) to the meter
 
 # Rescue survivor (pickup missions)
@@ -235,12 +260,23 @@ func pick_sv_weapon(danger: int) -> int:
 	var sc := SV_GUN_BASE + SV_GUN_STEP * maxi(1, danger)
 	var ws: Array = []
 	var tot := 0.0
+	var at := 0.0   # the automatics' share
 	for w in D.WEAPONS:
 		var x := exp(-float(w.price) / sc)
 		ws.append(x)
 		tot += x
-	var r := randf() * tot
+		if w.get("auto", false): at += x
+	# automatics: SV_AUTO_MULT x their price-based odds; then a pick among them (assault
+	# rifles weighted up by SV_AR_MULT) or among the rest as before
+	var auto := randf() < minf(0.9, at / tot * SV_AUTO_MULT)
+	var sub := 0.0
 	for i in ws.size():
+		if D.WEAPONS[i].get("auto", false) != auto: ws[i] = 0.0
+		elif D.WEAPONS[i].name == "Assault rifle": ws[i] *= SV_AR_MULT
+		sub += ws[i]
+	var r := randf() * sub
+	for i in ws.size():
+		if ws[i] <= 0.0: continue
 		r -= ws[i]
 		if r <= 0: return i
 	return 0
@@ -430,6 +466,14 @@ func sv_suppress(v: Dictionary, bx: float, by: float, bvx: float, bvy: float) ->
 		if v.cph == 2:   # peeking out: duck straight back in
 			v.cph = 1; v.cpt = 0.0
 			v.hide = randf_range(SV_HIDE_MIN, SV_HIDE_MAX)
+			var cv: Dictionary = v.cv
+			cv.dk = int(cv.get("dk", 0)) + 1
+			if cv.dk >= SV_DUCK_MAX:   # pinned here: somewhere else
+				v.cvBad = {"x": cv.x, "y": cv.y, "t": gm.S.t + SV_DUCK_AVOID_T}
+				var nc = sv_find_cover(v, gm.S.p)
+				if nc is Dictionary:
+					v.cv = nc
+					v.cph = 0; v.cpt = 0.0; v.miss = 0; v.flk = 0.0; v.pks = 0
 		return
 	if gm.S.t < float(v.get("nodg", -1.0)): return   # just driven out of cover: off to find more, not dodging
 	if v.has("sup") or v.has("supW"): return   # mid-dodge (it's short, it isn't stretched) or about to
@@ -470,6 +514,30 @@ func sv_dodge(v: Dictionary, p: Dictionary, see: bool, dt: float) -> Variant:
 		if v.cd <= 0: sv_fire(v, SV_SNAP_SPREAD)
 	elif dir.length() > 0: v.ang = dir.angle()
 	return dir * SV_SUP_SPD
+
+## Survivor v about to move along (vx, vy): if another survivor stands in the way within
+## SV_AVOID_R px ahead, veer off to the side they're not on (the right if dead ahead, so two
+## walking at each other both pass on the right), more sharply the closer they are. Speed kept.
+func sv_avoid(v: Dictionary, vx: float, vy: float) -> Vector2:
+	var vel := Vector2(vx, vy)
+	var spd := vel.length()
+	if spd < 0.05: return vel
+	var dir := vel / spd
+	var side := Vector2(-dir.y, dir.x)   # to their right
+	var steer := Vector2.ZERO
+	for o in gm.S.sv:
+		if o == v or o.dead: continue
+		var rel := Vector2(o.x - v.x, o.y - v.y)
+		var ahead := rel.dot(dir)
+		if ahead <= 0 or ahead > SV_AVOID_R: continue
+		var lat := rel.dot(side)
+		if absf(lat) > SV_AVOID_W: continue
+		var away := -1.0 if lat > 2.0 else 1.0   # they're to the right: go left; else right
+		steer += side * away * (1.0 - ahead / SV_AVOID_R) * (1.0 - absf(lat) / SV_AVOID_W)
+	if steer == Vector2.ZERO: return vel
+	var nd := (dir + steer * SV_AVOID_K).normalized()
+	if not gm.walk_clear(v.x, v.y, v.x + nd.x * 20.0, v.y + nd.y * 20.0): return vel   # wall there: just push past
+	return nd * spd
 
 ## Steer toward (tx, ty): straight if the body fits along the line, otherwise along an A*
 ## path round the walls (cached per survivor, recomputed when the target tile changes).
@@ -787,7 +855,7 @@ func sv_find_cover(v: Dictionary, p: Dictionary, center = null, rad: float = SV_
 			if not gm.solid_b(bx, by): continue
 			# ...that hides the whole body (centre and both shoulders) from where they stand
 			if gm.los(p.x, p.y, x, y) or gm.los(p.x, p.y, x + n.x * 8, y + n.y * 8) or gm.los(p.x, p.y, x - n.x * 8, y - n.y * 8): continue
-			if gm.hit_box(x, y, 10) or cover_hazard(x, y): continue
+			if gm.hit_box(x, y, 10) or cover_hazard(x, y) or sv_cover_given_up(v, x, y): continue
 			var car = gm.blasts.car_at(bx, by)
 			if car_unsafe(car): continue
 			if sv_cover_taken(v, x, y): continue
@@ -806,7 +874,7 @@ func sv_find_cover(v: Dictionary, p: Dictionary, center = null, rad: float = SV_
 			if dv > rad * gm.TS: continue
 			var dp := q.distance_to(Vector2(p.x, p.y))
 			if dp < SV_COVER_MIN_D or dp > rg.y + 60.0 or dp >= closer_than: continue
-			if gm.solid(q.x, q.y) or gm.hit_box(q.x, q.y, 10) or cover_hazard(q.x, q.y) or sv_cover_taken(v, q.x, q.y): continue
+			if gm.solid(q.x, q.y) or gm.hit_box(q.x, q.y, 10) or cover_hazard(q.x, q.y) or sv_cover_taken(v, q.x, q.y) or sv_cover_given_up(v, q.x, q.y): continue
 			var u := (Vector2(p.x, p.y) - cc).normalized()
 			var pk := cc + u * (cr * 0.95)
 			if not gm.walk_clear(q.x, q.y, pk.x, pk.y) or not gm.los(pk.x, pk.y, p.x, p.y): continue
@@ -946,6 +1014,15 @@ func sv_cover_holds(v: Dictionary, p: Dictionary, see: bool, dt: float) -> bool:
 		v.flk = 0.0
 	return true
 
+## Is (x, y) near the cover survivor v was driven out of a moment ago (see SV_DUCK_MAX)?
+func sv_cover_given_up(v: Dictionary, x: float, y: float) -> bool:
+	if not v.has("cvBad"): return false
+	var b: Dictionary = v.cvBad
+	if gm.S.t >= float(b.t):
+		v.erase("cvBad")
+		return false
+	return Vector2(x - b.x, y - b.y).length() < SV_DUCK_AVOID_R
+
 ## Leave cover; look for more no sooner than `wait` seconds from now.
 func sv_drop_cover(v: Dictionary, wait: float) -> void:
 	v.erase("cv")
@@ -1039,27 +1116,57 @@ func sv_cover_fight(v: Dictionary, p: Dictionary, see: bool, dt: float) -> Varia
 # ======================================================================
 # shooting and reinforcements
 # ======================================================================
-## A survivor fires their gun. Automatics fire short bursts; shotguns fire a spread of
+## A survivor fires their gun. Automatics fire SV_BURST-round bursts; shotguns fire a spread of
 ## pellets. Damage per bullet is the normal survivor damage x (gun damage / SV_DMG_REF).
 func sv_fire(v: Dictionary, spread: float = 1.0) -> void:
 	var w: Dictionary = D.WEAPONS[int(v.get("w", 0))]
 	var auto: bool = w.get("auto", false)
 	var dmg: float = (8 + gm.S.danger) * gm.DF().dmg * float(w.dmg) / SV_DMG_REF
-	var aim: float = v.ang + (randf() - 0.5) * 0.22 * spread * (1.6 if auto and v.burst > 0 else 1.0)
+	# settled: standing still a while steadies their aim (wobble, and a rifle's own spread)
+	var st := clampf(float(v.get("still", 0.0)) / SV_SETTLE_T, 0.0, 1.0) if spread <= 1.0 else 0.0
+	var steady := lerpf(1.0, SV_SETTLE_ACC, st)
+	var aim: float = sv_lead(v, float(w.spd)) + (randf() - 0.5) * 0.22 * spread * steady * (1.6 if auto and v.burst > 0 else 1.0)
+	var spr: float = float(w.spr) * (steady if int(w.pel) == 1 else 1.0)
 	for k in int(w.pel):
-		var a: float = aim + (randf() - 0.5) * float(w.spr) * 2.0
-		gm.S.bul.append({"x": v.x + cos(a) * 14, "y": v.y + sin(a) * 14, "vx": cos(a) * w.spd * 0.65, "vy": sin(a) * w.spd * 0.65,
-			"life": w.life * 1.6, "dmg": dmg, "pl": false, "kb": 0.0, "bolt": w.bolt})
+		var a: float = aim + (randf() - 0.5) * spr * 2.0
+		gm.S.bul.append({"x": v.x + cos(a) * 14, "y": v.y + sin(a) * 14, "vx": cos(a) * w.spd, "vy": sin(a) * w.spd,
+			"life": w.life, "dmg": dmg, "pl": false, "kb": 0.0, "bolt": w.bolt})
 	gm.sfx("bow" if w.silent else "enemy")
 	if not w.silent: gm.add_noise(float(w.noise) * SV_SHOT_NOISE)
 	if not w.silent: gm.muzzle_flash(v.x, v.y, aim)
 	if auto:
-		if v.burst <= 0: v.burst = 3 + randi() % 3
+		if v.burst <= 0: v.burst = randi_range(SV_BURST.x, SV_BURST.y)
 		v.burst -= 1
 		if v.burst > 0:
 			v.cd = w.rate * 2.0          # next shot in the burst
 			return
 	v.cd = (0.75 + w.rate) * (1.0 + randf() * 0.6)
+
+## Where survivor v points the gun: v.ang, except that when that's at you and you're moving
+## they aim ahead, at where you'll be when a bullet at speed spd gets there. How much of that
+## lead they get right is SV_LEAD_K x their iq, give or take SV_LEAD_ERR / iq.
+func sv_lead(v: Dictionary, spd: float) -> float:
+	var p: Dictionary = gm.S.p
+	var u: Vector2 = gm.S.get("plv", Vector2.ZERO)
+	if u.length() < 5.0: return v.ang
+	var r := Vector2(p.x - v.x, p.y - v.y)
+	var direct := r.angle()
+	if absf(wrapf(v.ang - direct, -PI, PI)) > SV_LEAD_CONE: return v.ang   # not shooting at you
+	# time for the bullet to meet you: |r + u t| = spd t
+	var qa := u.dot(u) - spd * spd
+	var qb := 2.0 * r.dot(u)
+	var qc := r.dot(r)
+	var t := r.length() / spd
+	var disc := qb * qb - 4.0 * qa * qc
+	if absf(qa) > 0.001 and disc >= 0.0:
+		var t1 := (-qb - sqrt(disc)) / (2.0 * qa)
+		var t2 := (-qb + sqrt(disc)) / (2.0 * qa)
+		t = t1 if t1 > 0.0 and (t1 < t2 or t2 <= 0.0) else t2
+		if t <= 0.0: t = r.length() / spd
+	var iq: float = v.get("iq", 1.0)
+	var k := clampf(SV_LEAD_K * iq + randf_range(-SV_LEAD_ERR, SV_LEAD_ERR) / iq, 0.0, 1.2)
+	var ahead := r + u * t * k
+	return v.ang + wrapf(ahead.angle() - direct, -PI, PI)
 
 ## Reinforcement survivor arriving from the edge of the map (noise waves at held strips).
 func spawn_edge_sv(n: int = 1) -> void:
@@ -1529,10 +1636,25 @@ func blast_dangers() -> Array:
 	for b in gm.S.thrown:
 		if not b.dead: out.append({"x": b.x, "y": b.y, "r": Blasts.BOMB_BLAST_R, "src": b})
 	for car in gm.S.cars:
-		if not car.dead and car.fuse >= 0: out.append({"x": car.x, "y": car.y, "r": Blasts.CAR_BLAST_R, "src": car})
+		if not car.dead and car.fuse >= 0: out.append({"x": car.x, "y": car.y, "r": Blasts.CAR_BLAST_R, "src": car, "car": true})
 	for br in gm.S.barrels:
 		if not br.dead and br.fuse >= 0: out.append({"x": br.x, "y": br.y, "r": Blasts.BOMB_BLAST_R, "src": br})
 	return out
+
+## Has survivor v noticed that this burning car is about to blow? While inside its reach they
+## roll SV_CAR_NOTICE x their iq (45-75%) every SV_CAR_NOTICE_T s until they do; once noticed,
+## it stays noticed. v.cark[car.nid] is true once noticed, else the time of their next roll.
+func sv_notices_car(v: Dictionary, car: Dictionary) -> bool:
+	if not car.has("nid"): car.nid = randi()
+	if not v.has("cark"): v.cark = {}
+	var k = v.cark.get(car.nid, -1.0)
+	if k is bool: return k
+	if gm.S.t < float(k): return false
+	if randf() < SV_CAR_NOTICE * float(v.get("iq", 1.0)):
+		v.cark[car.nid] = true
+		return true
+	v.cark[car.nid] = gm.S.t + SV_CAR_NOTICE_T
+	return false
 
 ## Is survivor v in the open inside one of these blasts? After a moment to react they run
 ## for a refuge (sv_refuge()) and wait there until that blast has gone off, firing at you if
@@ -1544,6 +1666,7 @@ func sv_flee(v: Dictionary, dangers: Array, see: bool, dt: float) -> Variant:
 		var reach: float = dg.r + SV_FLEE_MARGIN
 		var dd := Vector2(v.x - dg.x, v.y - dg.y).length()
 		if dd >= reach or not gm.blasts.blast_clear(dg.src, v.x, v.y): continue
+		if dg.get("car", false) and not sv_notices_car(v, dg.src): continue
 		if not (worst is Dictionary) or reach - dd > depth:
 			worst = dg
 			depth = reach - dd
@@ -1649,6 +1772,13 @@ func upd_survivors(p: Dictionary, dt: float) -> void:
 	sv_bomb_watch(p)
 	upd_smoke(dt)
 	var dangers := blast_dangers()
+	# your velocity, smoothed (survivors lead you with it, see sv_lead)
+	if dt > 0.0:
+		var pl: Vector2 = gm.S.get("plp", Vector2(p.x, p.y))
+		var pv := (Vector2(p.x, p.y) - pl) / dt
+		if pv.length() > 600.0: pv = Vector2.ZERO   # teleported (landing, building swap)
+		gm.S.plv = (gm.S.get("plv", Vector2.ZERO) as Vector2).lerp(pv, minf(1.0, dt * 8.0))
+		gm.S.plp = Vector2(p.x, p.y)
 	for v in gm.S.sv:
 		gm.blasts.blast_dmg_tick(v, dt)
 		if v.dead: continue
@@ -1661,11 +1791,12 @@ func upd_survivors(p: Dictionary, dt: float) -> void:
 		var dy: float = p.y - v.y
 		var d := Vector2(dx, dy).length()
 		if d == 0: d = 1
-		var see := d < 520 and gm.los(v.x, v.y, p.x, p.y) and not smoke_blocks(v.x, v.y, p.x, p.y) and window_sight_ok(v.x, v.y, p.x, p.y)
+		var lit: float = gm.seen_k()   # a flashlight at night carries farther
+		var see := d < 520 * lit and gm.los(v.x, v.y, p.x, p.y) and not smoke_blocks(v.x, v.y, p.x, p.y) and window_sight_ok(v.x, v.y, p.x, p.y)
 		var fa := absf(U.ang_diff(atan2(dy, dx), float(v.ang)))   # how far off their facing you are
 		if v.alert: see = see and (d < SV_SENSE or fa < deg_to_rad(SV_VIEW_HALF_ALERT))
 		var iq: float = v.get("iq", 1.0)
-		var spot: bool = see and (v.alert or (d < SV_SPOT_R * iq and (d < SV_SENSE * iq or fa < deg_to_rad(SV_VIEW_HALF * iq))))
+		var spot: bool = see and (v.alert or (d < SV_SPOT_R * iq * lit and (d < SV_SENSE * iq or fa < deg_to_rad(SV_VIEW_HALF * iq))))
 		if spot:   # seen: alerted, knows exactly where you are
 			sv_hear(v, p.x, p.y)
 			gm.S.svSeenT = gm.S.t   # (for the squad: someone has eyes on you)
@@ -1789,6 +1920,8 @@ func upd_survivors(p: Dictionary, dt: float) -> void:
 		else:
 			var pv := sv_patrol(v, dt)
 			vx = pv.x; vy = pv.y
+		var av := sv_avoid(v, vx, vy)   # someone in the way ahead: step round them
+		vx = av.x; vy = av.y
 		# keep clear of other survivors and of zombies: the same soft push zombies use
 		# on each other (bodies within 20 px steer apart)
 		for others in [gm.S.sv, gm.S.zs]:
@@ -1811,4 +1944,6 @@ func upd_survivors(p: Dictionary, dt: float) -> void:
 		var spm: float = v.get("spm", 1.0)   # this survivor's own pace
 		gm.move_c(v, vx * 85 * spm * dt * own, vy * 85 * spm * dt * own, 10)
 		gm.body_block(v, p, vx0, vy0, vx, vy)
+		# how long they've stood still (settled aim, see sv_fire)
+		v.still = float(v.get("still", 0.0)) + dt if Vector2(v.x - vx0, v.y - vy0).length() < 20.0 * dt else 0.0
 		v.wk += Vector2(v.x - vx0, v.y - vy0).length() * 0.22

@@ -162,7 +162,9 @@ func build(gm, s: Dictionary) -> Dictionary:
 		for c in range(2, COLS - 2): set_(c, r, 3)
 	var dock_end = null
 	var town_info = null
-	if A == "lakeside":
+	if A == "family":
+		FarmFolk.build_site(self, s)
+	elif A == "lakeside":
 		var lx := ri(26, 34); var ly := ri(8, 11); var rx := ri(8, 11); var rY := ri(5, 7)
 		for r in range(1, ry - 3):
 			for c in range(1, AC - 1):
@@ -278,8 +280,8 @@ func build(gm, s: Dictionary) -> Dictionary:
 			set_(gcc, pp.r + ph - 1, 0); set_(gcc + 1, pp.r + ph - 1, 0)
 		cars_rand(2); barrels_rand(ri(2, 4)); trees(ri(18, 26))
 
-	# ================= small town =================
-	if true:
+	# ================= small town (not at family farms) =================
+	if A != "family":
 		var T0 := AC + 1
 		var T1 := COLS - 2
 		var only := [0, 5]
@@ -396,6 +398,7 @@ func build(gm, s: Dictionary) -> Dictionary:
 				if at(c, r) == 2:
 					add_crate.call(c, r, pair[0])
 					break
+	if A == "family": crates.clear()   # nothing to loot at a family farm
 	# windows (tile 15): every third outer-wall tile with floor behind it, but none within
 	# 2 tiles of a doorway. A low wall under the window: can't walk through it, but sight
 	# and bullets pass over it.
@@ -424,7 +427,9 @@ func build(gm, s: Dictionary) -> Dictionary:
 			var gj := (U.vnoise(c / 5.0, r / 5.0, s.id + 3) - 0.5) * 12
 			var j := (U.hash3(c, r, s.id + 11) - 0.5) * 5
 			var b: Array
-			if v == 2: b = [104 + j, 86 + j, 64 + j]
+			var fb = FarmFolk.tile_col(v, c, r, gj, j, s.id) if A == "family" else null
+			if fb != null: b = fb
+			elif v == 2: b = [104 + j, 86 + j, 64 + j]
 			elif v == 1 or v == 15: b = [40, 36, 31]
 			elif v == 3: b = [122 + j, 104 + j, 72 + j] if s.type == "dirt" else [58 + j * .4, 57 + j * .4, 55 + j * .4]
 			elif v == 6: b = [76 + gj, 90 + gj, 52 + gj * .6]
@@ -447,7 +452,7 @@ func build(gm, s: Dictionary) -> Dictionary:
 	var plane := Vector2(8 * TS, (ry + 2) * TS)
 	var tanker = null
 	var visits: int = int(gm.G.visits.get(str(s.id), 0))
-	if not (s.get("home", false) and visits <= 1) and (not s.fuel or R() < 0.3) and R() < 0.7:
+	if A != "family" and not (s.get("home", false) and visits <= 1) and (not s.fuel or R() < 0.3) and R() < 0.7:
 		for q in 60:
 			var c := ri(4, COLS - 8); var r := ri(3, ry - 3)
 			var ok := true
@@ -479,6 +484,7 @@ static func bake_draw(g: Pen, st: Dictionary) -> void:
 		return G1[r * cols + cc]
 	var H1 := func(a: int, b: int, k: int) -> float: return U.hash3(a, b, sid * 7 + k)
 	var dirt: bool = st.s.type == "dirt"
+	var fam: bool = st.arch == "family"   # family farm: grass strip, no grim litter
 	# Walls (1) and windows (15) are half a tile thick (same shape as Game.wall_part): a
 	# band down the middle with arms to the neighbouring wall tiles; a wall end also
 	# reaches its far edge. The rest of the tile shows what is next to it.
@@ -557,7 +563,9 @@ static func bake_draw(g: Pen, st: Dictionary) -> void:
 				for k in 4: g.rect(x + fmod(off + k * 13, TS), y + k * 8, 1, 8, Color(0, 0, 0, .14))
 				g.rect(x, y, TS, TS, U.rgb(255, 230, 190, H1.call(cc, r, 8) * .07))
 			elif v == 3:
-				if dirt:
+				if fam:
+					if H1.call(cc, r, 19) < .25: g.rect(x + H1.call(cc, r, 20) * 24, y + H1.call(cc, r, 21) * 24, 4, 3, U.rgb(250, 250, 230, .35))
+				elif dirt:
 					if r == ry + 1 or r == ry + 2: g.rect(x, y + (20 if r == ry + 1 else 6), TS, 5, U.rgb(60, 45, 25, .2))
 					if H1.call(cc, r, 19) < .3: g.rect(x + H1.call(cc, r, 20) * 24, y + H1.call(cc, r, 21) * 24, 6, 4, U.rgb(90, 110, 50, .25))
 				else:
@@ -598,7 +606,7 @@ static func bake_draw(g: Pen, st: Dictionary) -> void:
 	for r in rows:
 		for cc in cols:
 			var v := G1[r * cols + cc]
-			if v == 10: g.rect(cc * TS + 5, r * TS + 7, TS, TS, Color(0, 0, 0, .3))
+			if v == 10 and not fam: g.rect(cc * TS + 5, r * TS + 7, TS, TS, Color(0, 0, 0, .3))
 			elif v == 1 or v == 15:
 				for b in band.call(cc * TS + 5, r * TS + 7, arms.call(cc, r)): g.rect(b[0], b[1], b[2], b[3], Color(0, 0, 0, .3))
 	for r in rows:
@@ -648,11 +656,14 @@ static func bake_draw(g: Pen, st: Dictionary) -> void:
 				g.lines(ln, U.rgb(160, 150, 130, .55), 1)
 				g.rect(x + 16, y + 18, 6, 4, Color(0, 0, 0, .3))
 				g.rect(x + 13, y + 13, 6, 6, U.hx("#4d4135"))
-			elif v == 10:
+			elif v == 10 and not fam:   # (family farm solar panels use 10 too: FarmFolk.bake_extra)
 				for k in 3: g.rr(x + 1 + k * 10, y + 7, 10, 17, 4, U.hx("#8f8058"))
 				for k in 3: g.rect(x + 3 + k * 10, y + 9, 6, 3, Color(1, 1, 1, .13))
 				for k in 3: g.stroke_rr(x + 1 + k * 10, y + 7, 10, 17, 4, Color(0, 0, 0, .25), 1)
 	for k in st.cars:
+		if k.has("kind"):   # family farm pickups and tractors
+			FarmFolk.draw_vehicle(g, k)
+			continue
 		var x: float = k.c * TS + 3
 		var y: float = k.r * TS + 3
 		var w: float = k.w * TS - 6
@@ -702,7 +713,10 @@ static func bake_draw(g: Pen, st: Dictionary) -> void:
 		g.circle(l.x, l.y, 3.5, U.hx("#2e2e2c"))
 		g.rect(l.x, l.y - 1.5, 12, 3, U.hx("#2e2e2c"))
 		g.rect(l.x + 10, l.y - 3, 5, 6, U.hx("#e8dca0") if l.on else U.hx("#555555"))
-	for k in 110:
+	if fam:
+		FarmFolk.bake_flowers(g, st)
+		FarmFolk.bake_extra(g, st)
+	for k in (0 if fam else 110):
 		var cc := 1 + int(H1.call(k, 1, 61) * (cols - 2))
 		var r := 1 + int(H1.call(k, 2, 62) * (rows - 2))
 		var v := G1[r * cols + cc]
@@ -773,7 +787,7 @@ static func bake_draw(g: Pen, st: Dictionary) -> void:
 			else:
 				g.rect(-10, -5, 26, 18, sh); g.rect(-12, -7, 26, 16, U.hx("#b8ae98")); g.ellipse(2, 1, 6, 4, .3, U.rgb(110, 70, 40, .4))
 			g.restore()
-	for k in 7:
+	for k in (0 if fam else 7):
 		var cc := 1 + int(H1.call(k, 3, 91) * (cols - 2))
 		var r := 1 + int(H1.call(k, 4, 92) * (rows - 2))
 		var v := G1[r * cols + cc]
@@ -782,7 +796,7 @@ static func bake_draw(g: Pen, st: Dictionary) -> void:
 		g.text_base(String(D.TAGS[k % D.TAGS.size()]).replace("{DIR}", World.HAVEN_DIR), 0, 0, 18, U.rgb(160, 28, 20, .5) if H1.call(k, 6, 94) < .5 else U.rgb(15, 15, 15, .5), 0, "impact")
 		g.restore()
 	for rm in st.rooms:
-		if rm.kind != "house" or H1.call(rm.c, rm.r, 95) > .6: continue
+		if fam or rm.kind != "house" or H1.call(rm.c, rm.r, 95) > .6: continue
 		var dc: int = rm.door[0]
 		var dr: int = rm.door[1]
 		var top: bool = rm.door[2]
@@ -792,7 +806,7 @@ static func bake_draw(g: Pen, st: Dictionary) -> void:
 		g.lines(PackedVector2Array([Vector2(-8, -8), Vector2(8, 8), Vector2(8, -8), Vector2(-8, 8)]), U.rgb(210, 90, 30, .7), 2.5)
 		g.text_base(str(int(H1.call(rm.c, 1, 96) * 4)), 0, -10, 7, U.rgb(210, 90, 30, .75), 0, "700")
 		g.restore()
-	for k in 5:
+	for k in (0 if fam else 5):
 		var x: float = H1.call(k, 7, 97) * cols * TS
 		var y: float = H1.call(k, 8, 98) * (rows - 6) * TS
 		var a: float = H1.call(k, 9, 99) * TAU

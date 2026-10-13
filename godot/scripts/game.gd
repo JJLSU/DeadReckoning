@@ -26,6 +26,9 @@ const REGEN_RATE := 3.0   # health per second
 # aim down sights — on foot, hold right mouse
 const ADS_MOVE := 0.5     # walk speed multiplier while aiming
 const ADS_SENS := 0.45     # mouse sensitivity multiplier while aiming
+# Flashlight (F toggles it, off by default). Lit at night it gives you away: zombies and
+# hostile survivors spot you from TORCH_SEEN times as far (scaled by how dark it is).
+const TORCH_SEEN := 1.8
 const ADS_ZOOM := 0.25    # extra zoom at full aim (0.25 = 25% closer)
 const ADS_PAN_FRAC := 0.3     # on top of zooming toward the cursor, the view pans this fraction of the way to it...
 const ADS_PAN_MAX := 5 * 32.0 # ...but never more than this (world px, 5 tiles)
@@ -69,6 +72,7 @@ var synth: Synth
 var ui: UI
 # Systems split out of this script; each keeps a reference back to the game (gm).
 var survivors := Survivors.new(self)
+var farm := FarmFolk.new(self)   # family farm folk and pets
 var blasts := Blasts.new(self)
 var flight := Flight.new(self)
 var menu := Menu.new(self)
@@ -83,6 +87,7 @@ var G = null            # run state (Dictionary) or null
 var F = null            # flight state or null
 var S = null            # ground site or null
 var mode := "title"
+var torch := false      # flashlight on? (F)
 var invuln := false     # testing: the Invulnerable toggle (debug buttons); you take no damage
 var uist := "title"     # current overlay: "" (none), title, menu, pause, map, dead, win
 var menu_tab := "contracts"
@@ -248,6 +253,21 @@ func toast_later(t: float, msg: String, cls: String = "") -> void:
 func sfx(k: String, v: float = -1.0, pitch: float = 1.0) -> void: synth.sfx(k, v, pitch)
 func cap(s: String) -> String: return s.substr(0, 1).to_upper() + s.substr(1)
 
+## At a family farm you keep your weapons put away: no firing, no machete, no aiming
+## down sights and no bombs.
+func unarmed_here() -> bool:
+	return S != null and S.get("arch", "") == "family"
+
+func toggle_torch() -> void:
+	torch = not torch
+	sfx("click")
+	toast("Flashlight on. At night it gives you away." if torch else "Flashlight off.")
+
+## How much farther away you can be spotted: TORCH_SEEN with the flashlight on in full
+## dark, easing in at dusk and dawn, 1 otherwise.
+func seen_k() -> float:
+	return lerpf(1.0, TORCH_SEEN, dark()) if torch else 1.0
+
 func dark() -> float:
 	if G == null: return 0.0
 	var h := fmod(G.time / 60.0, 24.0)
@@ -297,6 +317,7 @@ func _unhandled_input(e: InputEvent) -> void:
 			if weapon_slot >= 0: select_weapon(weapon_slot)
 			if c == KEY_H: heal()
 			if c == KEY_G: throw_bomb()
+			if c == KEY_F: toggle_torch()
 	elif e is InputEventMouseButton:
 		var x: float = e.position.x
 		var y: float = e.position.y
@@ -446,12 +467,16 @@ func _process(delta: float) -> void:
 	if mode == "flight" and F:
 		if uist == "":
 			var n := 3 if (F.cruise and flight.cruise_ok()) else 1
+			# slow frames catch up in 50 ms substeps instead of slowing the game
+			var ft := minf(delta, 0.2)
+			var sub := maxi(1, ceili(ft / 0.05 - 0.001))
+			n *= sub
 			var k := 0
 			while k < n and F and uist == "" and mode == "flight":
-				flight.upd_flight(dt)
+				flight.upd_flight(ft / sub)
 				k += 1
 	elif mode == "ground" and S:
-		set_ads(uist == "" and Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT))
+		set_ads(uist == "" and Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) and not unarmed_here())
 		if uist == "": upd_ground(dt)
 		if ads_virtual and S: ads_follow()
 	else:
@@ -531,10 +556,11 @@ func gen_site(s: Dictionary) -> Dictionary:
 	site.hostile = hostile
 	site.svh = []        # garrison members still inside buildings
 	site.alarm = false   # set once the garrison is alerted
+	var fam: bool = site.arch == "family"   # family farm: friendly folk only, no dead
 	var nz := int(round(DF().count * (3 if first else 2 + s.danger * 3 + (3 if site.arch == "town" else 0) + (4 if site.arch == "road" else 0) + 4) + round(dark() * 3)))
-	if hostile: nz = 0
+	if hostile or fam: nz = 0
 	for i in nz: spawn_z(true)
-	if not first and not hostile:
+	if not first and not hostile and not fam:
 		var nd2 := int(round((1 + s.danger * 0.8) * DF().count))
 		for i in nd2:
 			var n0: int = S.zs.size()
@@ -543,11 +569,11 @@ func gen_site(s: Dictionary) -> Dictionary:
 				var z: Dictionary = S.zs[S.zs.size() - 1]
 				if z.kind == "scream": S.scrN -= 1
 				z.dormant = true; z.kind = ""; z.arm = false; z.da = randf() * TAU; z.hp = 45.0 + s.danger * 8
-	site.cap = 0 if hostile else int(round((8 if first else 10 + s.danger * 4) * DF().count))
+	site.cap = 0 if (hostile or fam) else int(round((8 if first else 10 + s.danger * 4) * DF().count))
 	# First visit to any site starts silent; return visits start with some noise.
 	var first_visit: bool = int(G.visits.get(str(s.id), 0)) <= 1
 	site.noise = 0.0 if first_visit else (6 + s.danger * 2) * DF().noise
-	for i in 4 + int(randf() * 5):
+	for i in (0 if fam else 4 + int(randf() * 5)):
 		for q in 30:
 			var c := 1 + int(randf() * (cols - 2))
 			var r := 1 + int(randf() * (ry - 2))
@@ -560,6 +586,8 @@ func gen_site(s: Dictionary) -> Dictionary:
 			break
 	if hostile:
 		survivors.spawn_garrison(site)
+	elif fam:
+		farm.spawn(site)
 	elif not first and randf() < 0.2 + 0.08 * s.danger + (0.25 if site.arch == "military" else 0.0) and site.rooms.size():
 		var n := 1 + int(randf() * mini(3, s.danger))
 		for i in n:
@@ -580,6 +608,8 @@ func enter_ground(s: Dictionary) -> void:
 	F = null
 	if s.get("hostile", false):
 		toast("Armed survivors hold this strip. No fuel, no trade, no jobs. Keep your head down.", "bad")
+	elif s.get("arch", "") == "family":
+		toast("Friendly folks live here. You put your weapons away. Fuel and medicine for sale.", "good")
 	elif dark() > 0.5: toast("It is dark. The dead move faster at night.", "bad")
 
 # ======================================================================
@@ -802,12 +832,14 @@ func blood(x: float, y: float, n: int) -> void:
 	S.bg.stamp(["blood", recs])
 
 ## Blood spray off a person hit at (x, y), flying along dir (away from what hit them).
-func blood_spray(x: float, y: float, dir: Vector2) -> void:
+func blood_spray(x: float, y: float, dir: Vector2, k: float = 1.0) -> void:
 	if S == null: return
 	dir = dir.normalized() if dir.length() > 0.01 else Vector2.from_angle(randf() * TAU)
-	for n in int(HIT_SPRAY_N) + (1 if randf() < fmod(HIT_SPRAY_N, 1.0) else 0):
-		var a := dir.angle() + (randf() - 0.5) * 2.0 * HIT_SPRAY_SPREAD
-		var v := randf_range(HIT_SPRAY_MIN, HIT_SPRAY_MAX)
+	var sn := HIT_SPRAY_N * k   # k > 1 (blasts): more drops, flung faster and wider
+	var ks := sqrt(k)
+	for n in int(sn) + (1 if randf() < fmod(sn, 1.0) else 0):
+		var a := dir.angle() + (randf() - 0.5) * 2.0 * HIT_SPRAY_SPREAD * ks
+		var v := randf_range(HIT_SPRAY_MIN, HIT_SPRAY_MAX) * ks
 		S.fx.append({"x": x + dir.x * 6, "y": y + dir.y * 6, "vx": cos(a) * v, "vy": sin(a) * v, "life": 0.22 + randf() * 0.12,
 			"c": "#5a0c08" if randf() < 0.75 else "#6e120c", "sz": HIT_SPRAY_SZ, "drag": false})
 
@@ -826,7 +858,7 @@ func stamp_scorch(x: float, y: float) -> void:
 ## flash is S.flash.
 func muzzle_flash(x: float, y: float, ang: float) -> void:
 	if not S.has("mf"): S.mf = []
-	S.mf.append({"x": x + cos(ang) * 22, "y": y + sin(ang) * 22, "life": 0.06})
+	S.mf.append({"x": x + cos(ang) * 26, "y": y + sin(ang) * 26, "life": 0.06})   # same spot and length as yours
 
 ## A blood splat on the screen when you're hurt, never over the player: tries random spots
 ## until one (with its drips) stays clear of you on screen, else none this time.
@@ -1289,7 +1321,7 @@ func jump() -> void:
 	sfx("jump")
 
 func throw_bomb() -> void:
-	if mode != "ground" or S == null or uist != "" or G.bombs <= 0: return
+	if mode != "ground" or S == null or uist != "" or G.bombs <= 0 or unarmed_here(): return
 	G.bombs -= 1
 	var p: Dictionary = S.p
 	var a: float = p.ang
@@ -1332,6 +1364,7 @@ func upd_ground(dt: float) -> void:
 	S.sv = S.sv.filter(func(v): return not v.dead)
 	if upd_zombies(p, nk, dt): return
 	survivors.upd_survivors(p, dt)
+	farm.update(p, dt)
 	upd_drops(p)
 	upd_spawns(dt)
 	for br in S.barrels:
@@ -1429,7 +1462,10 @@ func upd_player(p: Dictionary, dt: float) -> float:
 	if aim != null: p.ang = aim
 	elif Vector2(mx, my).length() > 0.1: p.ang = atan2(my, mx)
 	p.cd -= dt
-	if fire and p.cd <= 0: shoot()
+	if fire and p.cd <= 0 and not unarmed_here():
+		var carry: float = p.cd if p.cd > -dt else 0.0   # held trigger: the bit of this frame past the cooldown
+		shoot()
+		p.cd += carry   # (so fire rate doesn't round up to whole frames)
 	return ml
 
 ## Bullets in flight: walls, cars, red barrels, zombies, survivors and you.
@@ -1439,10 +1475,12 @@ func upd_bullets(p: Dictionary, dt: float) -> bool:
 	while i >= 0:
 		var b: Dictionary = S.bul[i]
 		var dead := false
-		for k in 3:
+		# substeps of at most 8 px, so fast rounds can't skip a wall at low frame rates (3 at 60 fps)
+		var ns := maxi(3, ceili(Vector2(b.vx, b.vy).length() * dt / 8.0))
+		for k in ns:
 			if dead: break
-			b.x += b.vx * dt / 3
-			b.y += b.vy * dt / 3
+			b.x += b.vx * dt / ns
+			b.y += b.vy * dt / ns
 			if b.pl: survivors.sv_near_miss(b.x, b.y, b.vx, b.vy)   # too close for comfort
 			if solid_b(b.x, b.y):
 				for n in 3: S.fx.append({"x": b.x, "y": b.y, "vx": (randf() - 0.5) * 120, "vy": (randf() - 0.5) * 120, "life": 0.25, "c": "#e8c77a", "sz": 3.0, "drag": false})
@@ -1537,7 +1575,7 @@ func upd_zombies(p: Dictionary, nk: float, dt: float) -> bool:
 			z.rise -= dt
 			continue
 		if z.alert and d < S.nd: S.nd = d
-		if d < 250 and not z.alert and los(z.x, z.y, p.x, p.y): z.alert = true   # sight only; sound alerts are separate
+		if d < 250 * seen_k() and not z.alert and los(z.x, z.y, p.x, p.y): z.alert = true   # sight only; sound alerts are separate
 		var vx: float
 		var vy: float
 		var sp: float
@@ -1678,6 +1716,7 @@ func upd_drops(p: Dictionary) -> void:
 ## steady trickle of new arrivals.
 func upd_spawns(dt: float) -> void:
 	# (no background noise: the meter only rises from what the player does)
+	if S.arch == "family": return   # nothing comes for you at a family farm
 	var held: bool = S.get("hostile", false)
 	# At survivor-held strips the noise waves are armed reinforcements, not the dead.
 	var waves := [[35, 0, "Doors bang open. Everyone inside is coming out to look for you."], [65, 3, "Engines on the road. They are bringing friends."], [100, 4, "Everyone they have is coming. Get to the plane."]] if held \
@@ -1861,6 +1900,10 @@ func upd_mood(dt: float) -> void:
 	for k in range(mf.size() - 1, -1, -1):
 		mf[k].life -= dt
 		if mf[k].life <= 0: mf.remove_at(k)
+	var bl: Array = S.get("blit", [])
+	for k in range(bl.size() - 1, -1, -1):
+		bl[k].life -= dt
+		if bl[k].life <= 0: bl.remove_at(k)
 	var i: int = S.splat.size() - 1
 	while i >= 0:
 		S.splat[i].life -= dt
@@ -1881,7 +1924,7 @@ func upd_mood(dt: float) -> void:
 		elif band == 1:
 			sat = 0.7; con = 1.1
 		else:
-			sat = 0.84; con = 1.07
+			sat = 0.92 if S.arch == "family" else 0.84; con = 1.07   # family farms look a little brighter
 
 # ======================================================================
 # death / win
