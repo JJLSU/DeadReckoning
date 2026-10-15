@@ -10,6 +10,23 @@ const CLOUD_DENSITY := 1
 const SEA := "#1f3543"   # open-ocean colour, matches the terrain shader's deep water
 static var CC := {}
 
+# --- height parallax and sun shadows (flight view) ---
+# Things with height (trees, buildings, tanks) are drawn as if seen by a camera PAR_K * screen-size
+# above the ground, so their tops lean away from the screen centre as you fly over them.
+const PAR_K := 0.6
+const TREE_H := 0.6       # average tree height as a share of its canopy width (each tree varies)
+const HOUSE_H := 14.0     # house wall height, world units
+const HANGAR_H := 22.0
+const TANK_H := 14.0
+const CLOUD_SHADOW := 800.0   # cloud shadow offset per unit of sun shadow length
+static var PV := Vector3(0, 0, 1000)   # camera x, y and eye height for lift()
+static var SUN := Vector2(0.3, 0.5)    # ground shadow offset per unit of height
+static var SUN_ANG := 1.0              # shadow direction
+static var SUN_A := 1.0                # shadow strength (fades out at night)
+static var MEMO := {}                  # per-frame results shared by the layers (see memo())
+static var MEMO_F := -1
+static var HOUSES := {}                # (strip id, world seed) -> its town's houses (draw_strip)
+
 static func hc(s: String) -> Color:
 	if CC.has(s): return CC[s]
 	var c := Color.html(s)
@@ -20,21 +37,494 @@ static func rgba(r: float, g: float, b: float, a: float) -> Color:
 	return Color(r / 255.0, g / 255.0, b / 255.0, a)
 
 static func flight_scale(gm, alt: float) -> float:
-	return sqrt(gm.Wv * gm.Hv) / (700.0 + maxf(0.0, alt) * 6.0) * gm.zoom
+	return sqrt(gm.Wv * gm.Hv) / (700.0 + maxf(0.0, alt) * 6.0) * FLIGHT_ZOOM
+
+## The flight camera zoom is fixed (Greg, 2026-10-14); the player's zoom setting applies on foot only.
+const FLIGHT_ZOOM := 0.69
+
+## Sets the camera for lift() and the sun for shadows, from the view and the clock.
+## Sun rises in the east (shadows point west), passes north of the map at noon (shadows point
+## down, a little right, like the old fixed shadows) and sets in the west.
+static func set_view3d(gm, cx: float, cy: float, sc: float) -> void:
+	PV = Vector3(cx, cy, PAR_K * sqrt(gm.Wv * gm.Hv) / sc)
+	var h := fmod(gm.G.time / 60.0, 24.0) if gm.G else 10.0
+	var u := clampf((h - 6.0) / 12.0, 0.0, 1.0)
+	SUN_ANG = lerpf(2.9, -0.2, u)
+	var elev := maxf(0.16, sin(PI * u) * 1.08)
+	SUN = Vector2.from_angle(SUN_ANG) * clampf(1.0 / tan(elev), 0.4, 2.6)
+	SUN_A = 1.0 - (gm.dark() if gm.G else 0.0)
+	TROT = Vector2.from_angle(SUN_ANG + PI * 1.75)
+	SUN_DIR = Vector2.from_angle(SUN_ANG)
+	SUN_LEN = SUN.length()
+
+## Flight helpers that are costly (touchdown prediction runs a 450-step simulation) and are
+## asked for by more than one layer each frame: worked out once per frame.
+static func memo(gm, key: String):
+	var f := Engine.get_process_frames()
+	if f != MEMO_F:
+		MEMO.clear()
+		MEMO_F = f
+	if MEMO.has(key): return MEMO[key]
+	var v
+	match key:
+		"approach": v = gm.flight.approach_info()
+		"touchdown": v = gm.flight.predict_touchdown()
+		"range": v = gm.range_now()
+	MEMO[key] = v
+	return v
+
+## How far a point at height hgt above (x, y) shifts on screen, in world units.
+static func lift(x: float, y: float, hgt: float) -> Vector2:
+	var k := hgt / maxf(PV.z - hgt, PV.z * 0.25)
+	return Vector2((x - PV.x) * k, (y - PV.y) * k)
+
+## Ground scatter (trees, bushes, rocks, cars, water glints) is worked out once per terrain
+## chunk and kept in gm.TCACHE under a Vector2i key. Trees and bushes go into fixed MultiMeshes
+## (shaders/trees.gdshader leans them and places their shadows each frame from uniforms), so a
+## frame costs a few draw calls per chunk instead of several per tree.
+## MultiMesh order per chunk: 0 = shadows (Tx.SPUFF), 1..3 = lower canopy per tree sprite,
+## 4..6 = canopy tops per tree sprite.
+const SG := 70.0                 # scatter cell size, world units
+# Building a chunk's scatter is slow (terrain lookups per cell), so it is spread over frames
+# with a time budget: chunks in view get up to SC_VIEW_US per frame, and chunks the plane is
+# heading into are built ahead of time with SC_AHEAD_US, so crossing into them costs nothing.
+const SC_VIEW_US := 4000
+const SC_AHEAD_US := 1500
+const SC_AHEAD := 1.2            # look-ahead distance, in chunks, along the heading
+const CANOPY_A := 0.6      # flight: tree crowns are this opaque, so overlapping crowns blend softly
+## In flight the trees' see-through look follows altitude, not zoom (Greg, 2026-10-13): on the
+## ground they look as they did at 79% zoom at the top altitude, at the top altitude as they did
+## at 69%, blending smoothly in between. The values assume a 16:9 window.
+const TREE_FADE_GROUND := 0.16   # twice the top-altitude value (Greg, 2026-10-14; was 0.42, then 0.24)
+## Small trees at a forest's edge are this much more opaque than deep ones (Greg, 2026-10-14).
+## Canopy instance colours carry opacity / 2 in alpha; trees.gdshader doubles it back.
+const EDGE_OPACITY := 1.4
+## Deep forest trees are this much bigger again (Greg, 2026-10-14); the edges keep their size.
+const DEEP_GROW := 1.3
+const TREE_FADE_TOP := 0.08
+const TREE_FADE_ALT := 120.0   # the highest a plane climbs (flight.gd caps the target at 120)
+static func tree_fade(alt: float) -> float:
+	return lerpf(TREE_FADE_GROUND, TREE_FADE_TOP, clampf(alt / TREE_FADE_ALT, 0, 1))
+const FLIGHT_LOWER_TINT := Color(0.2, 0.22, 0.19)   # flight: the lower canopy layer, in the crowns' shade
+const LOWER_TINT := Color(0.62, 0.66, 0.6)
+const CAR_COLS := ["#6b3a2a", "#4a5560", "#7a6a3a", "#2a2826", "#8a8272"]
+static var TQUAD: ArrayMesh
+static var TREE_MAT: ShaderMaterial
+static var TROT := Vector2(1, 0)           # cos/sin of the sprite turn that faces the sun
+static var SUN_DIR := Vector2(1, 0)        # unit vector along the shadows
+static var SUN_LEN := 1.0                  # SUN.length()
+
+static func _tb_init() -> void:
+	if TQUAD: return
+	TQUAD = ArrayMesh.new()
+	var a := []
+	a.resize(Mesh.ARRAY_MAX)
+	a[Mesh.ARRAY_VERTEX] = PackedVector2Array([Vector2(-0.5, -0.5), Vector2(0.5, -0.5), Vector2(0.5, 0.5), Vector2(-0.5, 0.5)])
+	a[Mesh.ARRAY_TEX_UV] = PackedVector2Array([Vector2(0, 0), Vector2(1, 0), Vector2(1, 1), Vector2(0, 1)])
+	a[Mesh.ARRAY_INDEX] = PackedInt32Array([0, 1, 2, 0, 2, 3])
+	TQUAD.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, a)
+	TREE_MAT = ShaderMaterial.new()
+	TREE_MAT.shader = load("res://shaders/trees.gdshader")
+
+## One quad instance: 2D transform (no turn; the shader turns it), colour, custom data.
+static func _q(buf: PackedFloat32Array, x: float, y: float, sz: float, col: Color, h: float, r: float) -> void:
+	buf.append_array([sz, 0.0, 0.0, x, 0.0, sz, 0.0, y, col.r, col.g, col.b, col.a, x, y, h, r])
+
+## Works out the scatter of chunk (kx, ky) until the clock passes `deadline` (usec); returns
+## the finished chunk, or null while it is still being built (partial state stays cached).
+## Tree colours come in stands, like a real forest: the slow noise that paints the autumn
+## ground patches (terrain.gdshader) decides where fall stands are, a second one picks each
+## stand's colour so neighbours match, and the odd tree is a random standout.
+static var STAND_G := []   # green sprite indices, sorted by hue
+static var STAND_F := []   # fall sprite indices, sorted by hue
+static func _tree_at(x: float, y: float, h: float, seed_v: int) -> int:
+	if STAND_G.is_empty():
+		var g := []
+		var fl := []
+		for v in Tx.TREE_GREEN: g.append([Tx.tree_hue(v), v])
+		for v in Tx.TREE_FALL: fl.append([Tx.tree_hue(Tx.TREE_GREEN + Tx.TREE_WIDE + v), Tx.TREE_GREEN + Tx.TREE_WIDE + v])
+		g.sort(); fl.sort()
+		STAND_G = g.map(func(e): return e[1])
+		STAND_F = fl.map(func(e): return e[1])
+	if fmod(h * 13.7, 1.0) < 0.05: return Tx.tree_pick(h)   # standout
+	var au := U.vnoise(x / 650.0, y / 650.0, seed_v + 131)
+	var k := clampf((U.vnoise(x / 260.0 + 7.0, y / 260.0 + 7.0, seed_v + 141) - 0.15) / 0.7, 0.0, 0.999)
+	k = clampf(k + (fmod(h * 3.71, 1.0) - 0.5) * 0.3, 0.0, 0.999)   # neighbours vary a little
+	var f := fmod(h * 7.13, 1.0)
+	if f < clampf((au - 0.56) / 0.12, 0.0, 1.0) * 0.9: return STAND_F[int(k * STAND_F.size())]
+	if f > 0.85: return Tx.TREE_GREEN + int(h * 613) % Tx.TREE_WIDE
+	return STAND_G[int(k * STAND_G.size())]
+
+## In flight a tree's lower layer uses another sprite from its colour family: for a fall tree,
+## the other shapes of its colour; for a green or wide tree, the two greens nearest its hue.
+static var LOWER_OPTS := []
+static func _lower_opts(ti: int) -> Array:
+	if LOWER_OPTS.is_empty():
+		var ng := Tx.TREE_GREEN + Tx.TREE_WIDE
+		var nf: int = Tx.FALL_HSV.size()
+		for v in ng + Tx.TREE_FALL:
+			var o := []
+			if v >= ng:
+				for u in range(ng, ng + Tx.TREE_FALL):
+					if u != v and (u - ng) % nf == (v - ng) % nf: o.append(u)
+			else:
+				var by := []
+				for u in Tx.TREE_GREEN:
+					if u != v: by.append([absf(Tx.tree_hue(u) - Tx.tree_hue(v)), u])
+				by.sort()
+				o = [by[0][1], by[1][1]]
+			LOWER_OPTS.append(o if not o.is_empty() else [v])
+	return LOWER_OPTS[ti]
+
+static func _scatter_chunk(gm, kx: int, ky: int, deadline: int):
+	var key := Vector2i(kx, ky)
+	var ch = gm.TCACHE.get(key)
+	if ch != null and ch.done: return ch
+	if Time.get_ticks_usec() >= deadline: return null
+	var wd: World = gm.wd
+	var seed_v: int = wd.SEED
+	var gx0 := int(ceil(kx * CH / SG))
+	var gx1 := int(ceil((kx + 1) * CH / SG))
+	var gy0 := int(ceil(ky * CH / SG))
+	var gy1 := int(ceil((ky + 1) * CH / SG))
+	if ch == null:
+		ch = {"done": false, "i": 0, "glint": PackedFloat32Array(), "car": [], "rock": [], "b": []}
+		for b in 2 + 2 * Tx.TREES.size(): ch.b.append(PackedFloat32Array())   # + the forest mist puffs
+		gm.TCACHE[key] = ch
+		if gm.TCACHE.size() > 60000: gm.TCACHE.clear()
+	var nx := gx1 - gx0
+	var total := nx * (gy1 - gy0)
+	var bufs: Array = ch.b
+	var NT: int = Tx.TREES.size()
+	var tree := func(ti: int, x: float, y: float, w: float, op: float) -> void:
+		var hf := 0.6 + U.hash3(int(x), int(y), seed_v + 215) * 0.9   # 0.6 to 1.5 times the average height
+		var hgt := w * TREE_H * hf
+		_q(bufs[0], x, y, w * 0.84, Color(1, 1, 1, 0.6), hgt, -hgt / (w * 0.84))
+		var lo: Array = _lower_opts(ti)   # the lower layer is a different sprite of the same colour
+		_q(bufs[1 + lo[int(U.hash3(int(y), int(x), seed_v + 216) * lo.size()) % lo.size()]], x, y, w * 0.84,
+			Color(FLIGHT_LOWER_TINT, op * 0.5), hgt * 0.5, hgt * 0.5 / (w * 0.84))
+		_q(bufs[1 + NT + ti], x, y, w, Color(1, 1, 1, op * 0.5), hgt, hgt / w)
+	while ch.i < total and Time.get_ticks_usec() < deadline:
+		var gx: int = gx0 + ch.i % nx
+		var gy: int = gy0 + ch.i / nx
+		ch.i += 1
+		var h := U.hash3(gx, gy, seed_v + 201)
+		var wx := (gx + U.hash3(gx, gy, seed_v + 202)) * SG
+		var wy := (gy + U.hash3(gx, gy, seed_v + 203)) * SG
+		var tt := wd.terr(wx, wy)
+		if h > 0.85 and tt != 5 and tt != 6: continue   # forests fill every cell
+		if tt <= 1:
+			if h < 0.25: ch.glint.append_array([wx, wy, h])
+			continue
+		if wd.strip_at(wx, wy, 6): continue
+		if tt >= 11 and tt <= 13:
+			if h < 0.22:
+				var rd = wd.road_at(wx, wy)
+				if rd: ch.car.append([wx, wy, rd.r.ang + (h - 0.11) * 3, hc(CAR_COLS[int(h * 50) % 5])])
+			continue
+		if tt == 7 or tt == 8:
+			if h < 0.35: ch.rock.append([wx, wy, 5 + h * 22, h * 5, hc("#c8c8c4") if tt == 8 else hc("#8a857a")])
+			continue
+		if tt == 3 and h >= 0.05 and h < 0.16:
+			var bs := 10 + h * 40
+			var bh := bs * 0.18
+			_q(bufs[0], wx, wy, bs * 0.8, Color(1, 1, 1, 0.4), bh, -bh / (bs * 0.8))
+			_q(bufs[1 + NT + int(h * 70) % Tx.TREE_GREEN], wx, wy, bs * 0.9, Color(1, 1, 1, 0.5), bh, bh / (bs * 0.9))
+			continue
+		if tt == 5 or tt == 6:
+			# closed canopy: 5 trees per cell. Deep in the forest each tree is 1.0-1.5x its base
+			# size, shrinking gradually to 0.5-0.8x at the forest edge (wd.TM is the forest noise
+			# terr() just read: 0.53 at the edge, deeper inside as it rises). The small edge trees
+			# grow more thickly (up to 11 per cell) so the edge stays filled in.
+			var dp := smoothstep(0.53, 0.66, wd.TM)
+			var nq := 5 + int((1.0 - dp) * 6.99)
+			var op := lerpf(EDGE_OPACITY, 1.0, dp)
+			for q in nq:
+				var so := 0 if q < 5 else 300   # extra edge trees get their own hashes
+				var hq := U.hash3(gx * 3 + q, gy, seed_v + 211 + so)
+				var tx := (gx + U.hash3(gx, gy * 3 + q, seed_v + 212 + so)) * SG
+				var ty := (gy + U.hash3(gx + q, gy - q, seed_v + 213 + so)) * SG
+				var sz := lerpf(lerpf(0.5, 1.0, dp), lerpf(0.8, 1.5, dp), U.hash3(gx * 5 + q, gy * 7 - q, seed_v + 214 + so)) * lerpf(1.0, DEEP_GROW, dp)
+				tree.call(_tree_at(tx, ty, hq, seed_v), tx, ty, ((56 if tt == 6 else 50) + hq * 40) * sz, op)
+			continue
+		if (tt == 3 and h < 0.05) or (tt == 4 and h < 0.012):
+			tree.call(_tree_at(wx, wy, fmod(h * 20.0, 1.0), seed_v), wx, wy, 24 + h * 38, 1.0)
+	if ch.i < total: return null
+	var mms := []
+	for b in bufs.size():
+		var buf: PackedFloat32Array = bufs[b]
+		if buf.is_empty():
+			mms.append(null)
+			continue
+		var mm := MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_2D
+		mm.use_colors = true
+		mm.use_custom_data = true
+		mm.mesh = TQUAD
+		mm.instance_count = buf.size() / 16
+		mm.buffer = buf
+		mms.append(mm)
+	ch.mm = mms
+	ch.erase("b")
+	ch.done = true
+	return ch
+
+## Builds the scatter of the chunks the view will reach next: the view rectangle moved
+## SC_AHEAD chunks along the heading (and the view itself, when descending into scatter range).
+static func prefetch_scatter(gm, cx: float, cy: float, sc: float, hdg: float) -> void:
+	if sc < 0.4: return
+	_tb_init()
+	var deadline := Time.get_ticks_usec() + SC_AHEAD_US
+	var hw: float = gm.Wv / 2 / sc + SG * 1.5
+	var hh: float = gm.Hv / 2 / sc + SG * 1.5
+	for f in [0.0, 0.5, 1.0]:
+		var ax: float = cx + cos(hdg) * CH * SC_AHEAD * f
+		var ay: float = cy + sin(hdg) * CH * SC_AHEAD * f
+		for ky in range(int(floor((ay - hh) / CH)), int(floor((ay + hh) / CH)) + 1):
+			for kx in range(int(floor((ax - hw) / CH)), int(floor((ax + hw) / CH)) + 1):
+				if Time.get_ticks_usec() >= deadline: return
+				_scatter_chunk(gm, kx, ky, deadline)
+
+## Draws the scatter in view: water glints, rocks and cars directly, then every chunk's tree
+## shadows, lower canopies and tops (each as one MultiMesh draw per chunk).
+## al fades the glints, rocks, cars and mist in with the view scale; tf is the trees' own alpha.
+static func draw_scatter(gm, g: Pen, x0: float, y0: float, x1: float, y1: float, al: float, t: float, tf: float) -> void:
+	if g.ci.material != TREE_MAT: g.ci.material = TREE_MAT
+	TREE_MAT.set_shader_parameter("cam", Vector2(PV.x, PV.y))
+	TREE_MAT.set_shader_parameter("eye", PV.z)
+	TREE_MAT.set_shader_parameter("trot", TROT)
+	TREE_MAT.set_shader_parameter("sun", SUN)
+	TREE_MAT.set_shader_parameter("sun_dir", SUN_DIR)
+	TREE_MAT.set_shader_parameter("sun_len", SUN_LEN)
+	TREE_MAT.set_shader_parameter("fade", tf)
+	TREE_MAT.set_shader_parameter("mist_fade", al)
+	TREE_MAT.set_shader_parameter("sun_a", SUN_A)
+	TREE_MAT.set_shader_parameter("canopy_a", CANOPY_A)
+	var pad := SG * 1.5
+	var deadline := Time.get_ticks_usec() + SC_VIEW_US
+	var chs := []
+	for ky in range(int(floor((y0 - pad) / CH)), int(floor((y1 + pad) / CH)) + 1):
+		for kx in range(int(floor((x0 - pad) / CH)), int(floor((x1 + pad) / CH)) + 1):
+			var ch = _scatter_chunk(gm, kx, ky, deadline)
+			if ch: chs.append(ch)
+	g.ga = al
+	for ch in (chs if al > 0.01 else []):
+		var gl: PackedFloat32Array = ch.glint
+		for i in range(0, gl.size(), 3):
+			var gxp := gl[i]
+			var gyp := gl[i + 1]
+			if gxp < x0 - pad or gxp > x1 + pad or gyp < y0 - pad or gyp > y1 + pad: continue
+			var kk := 0.5 + 0.5 * sin(t * 2 + gl[i + 2] * 40)
+			g.rect(gxp - 9, gyp, 18, 1.6, rgba(220, 235, 240, 0.18 * kk))
+		for r in ch.rock:
+			if r[0] < x0 - pad or r[0] > x1 + pad or r[1] < y0 - pad or r[1] > y1 + pad: continue
+			var rs: float = r[2]
+			g.ellipse(r[0] + 3, r[1] + 4, rs, rs * 0.7, r[3], Color(0, 0, 0, 0.28))
+			g.ellipse(r[0], r[1], rs, rs * 0.7, r[3], r[4])
+			g.ellipse(r[0] - rs * 0.3, r[1] - rs * 0.25, rs * 0.45, rs * 0.3, r[3], Color(1, 1, 1, 0.15))
+		for c in ch.car:
+			if c[0] < x0 - pad or c[0] > x1 + pad or c[1] < y0 - pad or c[1] > y1 + pad: continue
+			g.save(); g.translate(c[0], c[1]); g.rotate(c[2])
+			g.rect(-7, -2, 18, 10, Color(0, 0, 0, 0.35))
+			g.rect(-9, -4.5, 18, 9, c[3])
+			g.rect(-3, -3.5, 4, 7, rgba(15, 18, 20, 0.85)); g.rect(3, -3, 2.5, 6, rgba(15, 18, 20, 0.85))
+			g.restore()
+	g.ga = 1.0
+	if Tx.TREES.size() < 3: return
+	var NT: int = Tx.TREES.size()
+	g.ci.draw_set_transform_matrix(g.xf)
+	for b in 1 + 2 * NT:
+		if b == NT + 1:   # forest mist lies over the lower crowns, under the tops
+			var fm := 0.0   # forest mist removed (Greg, 2026-10-14); its puffs are no longer built
+			TREE_MAT.set_shader_parameter("fmist", fm)
+			if fm > 0.01 and al > 0.01:
+				for ch in chs:
+					if 1 + 2 * NT < ch.mm.size() and ch.mm[1 + 2 * NT]: g.ci.draw_multimesh(ch.mm[1 + 2 * NT], Tx.PUFF)
+		var tex: Texture2D = Tx.SPUFF if b == 0 else Tx.TREES[(b - 1) % NT]
+		for ch in chs:
+			if b >= ch.mm.size(): continue
+			var mm = ch.mm[b]
+			if mm: g.ci.draw_multimesh(mm, tex)
+
+## A terrain chunk drawn as a one-instance MultiMesh, so trees.gdshader knows it is ground and
+## adds the close-up detail. The MultiMeshes are kept per chunk.
+static var CHUNK_MM := {}
+static func _detail_chunk(g: Pen, tex: Texture2D, gx: int, gy: int) -> void:
+	var k := Vector2i(gx, gy)
+	var mm: MultiMesh = CHUNK_MM.get(k)
+	if mm == null:
+		if CHUNK_MM.size() > 400: CHUNK_MM.clear()
+		mm = MultiMesh.new()
+		mm.transform_format = MultiMesh.TRANSFORM_2D
+		mm.use_colors = true
+		mm.use_custom_data = true
+		mm.mesh = TQUAD
+		mm.instance_count = 1
+		var c := Vector2(gx * CH + (CH + 1) / 2, gy * CH + (CH + 1) / 2)
+		mm.set_instance_transform_2d(0, Transform2D(Vector2(CH + 1, 0), Vector2(0, CH + 1), c))
+		mm.set_instance_color(0, Color.WHITE)
+		mm.set_instance_custom_data(0, Color(c.x, c.y, -2.0, 0.0))
+		CHUNK_MM[k] = mm
+	g.ci.draw_multimesh(mm, tex)
+
+## Mist and haze (shaders/trees.gdshader works out each pixel). Mist lies in the low ground
+## around dawn, lifts by mid-morning and comes back late at night; how thick it gets changes
+## from day to day. Haze thickens as you climb, more towards the edges of the view.
+static var FOG_MM: MultiMesh
+static func mist_amount(gm) -> float:
+	if gm.G == null: return 0.0
+	var t: float = gm.G.time
+	var h := fmod(t / 60.0, 24.0)
+	var m := 0.0
+	if h < 5.0: m = 0.6
+	elif h < 6.5: m = lerpf(0.6, 1.0, (h - 5.0) / 1.5)
+	elif h < 10.5: m = 1.0 - smoothstep(7.0, 10.5, h)
+	elif h >= 19.0: m = 0.6 * smoothstep(19.0, 23.0, h)
+	var day := int(floor((t + 6 * 60) / 1440.0))   # a "day" for the mist runs 6 pm to 6 pm
+	return m * (0.6 + 0.4 * U.hash3(day, 3, gm.wd.SEED + 77))
+
+## Forest mist: at dawn (and a little at dusk) mist lies among the trees, over the forest floor
+## and the lower crowns but under the treetops, which poke out of it: one soft puff per forest
+## cell (_scatter_chunk), drawn by draw_scatter between the lower canopies and the tops.
+static func forest_mist_amount(gm) -> float:
+	if gm.G == null: return 0.0
+	var h := fmod(gm.G.time / 60.0, 24.0)
+	var dusk := 0.45 * clampf(1.0 - absf(h - 18.4) / 1.4, 0.0, 1.0)
+	return maxf(mist_amount(gm), dusk)
+
+static func draw_fog(gm, g: Pen, cx: float, cy: float, sc: float, alt: float) -> void:
+	_tb_init()
+	var W: float = gm.Wv
+	var H: float = gm.Hv
+	var mist := 0.0   # the low-ground mist over water and valleys is off (Greg, 2026-10-13); forest mist is drawn under the treetops instead
+	var haze := clampf(alt / 110.0, 0, 1) * 0.26
+	if FOG_MM == null:
+		FOG_MM = MultiMesh.new()
+		FOG_MM.transform_format = MultiMesh.TRANSFORM_2D
+		FOG_MM.use_colors = true
+		FOG_MM.use_custom_data = true
+		FOG_MM.mesh = TQUAD
+		FOG_MM.instance_count = 1
+	var sz := Vector2(W / sc + 4, H / sc + 4)
+	FOG_MM.set_instance_transform_2d(0, Transform2D(Vector2(sz.x, 0), Vector2(0, sz.y), Vector2(cx, cy)))
+	FOG_MM.set_instance_color(0, Color.WHITE)
+	FOG_MM.set_instance_custom_data(0, Color(cx, cy, -1.0, 0.0))
+	if g.ci.material != TREE_MAT: g.ci.material = TREE_MAT
+	set_view3d(gm, cx, cy, sc)
+	var h := fmod(gm.G.time / 60.0, 24.0) if gm.G else 12.0
+	var warm := clampf(1.0 - absf(h - 6.6) / 1.9, 0, 1) + clampf(1.0 - absf(h - 18.1) / 1.8, 0, 1)
+	var wind: Vector2 = gm.F.wind if gm.F else Vector2(8, 3)
+	TREE_MAT.set_shader_parameter("cam", Vector2(PV.x, PV.y))
+	TREE_MAT.set_shader_parameter("eye", PV.z)
+	TREE_MAT.set_shader_parameter("seed", gm.wd.SEED)
+	TREE_MAT.set_shader_parameter("world_size", D.WORLD)
+	TREE_MAT.set_shader_parameter("fog_size", sz)
+	TREE_MAT.set_shader_parameter("tsec", gm.T)
+	TREE_MAT.set_shader_parameter("drift", wind * 0.35)
+	TREE_MAT.set_shader_parameter("mist", mist)
+	TREE_MAT.set_shader_parameter("mist_col", Color(0.9, 0.92, 0.94).lerp(Color(1.0, 0.86, 0.76), warm * 0.6))
+	TREE_MAT.set_shader_parameter("haze", haze)
+	TREE_MAT.set_shader_parameter("haze_col", Color(0.68, 0.75, 0.85).lerp(Color(0.93, 0.78, 0.7), warm * 0.7))
+	if haze < 0.01: return   # the uniforms above are still set: the forest mist uses them
+	g.set_view(sc, W / 2 - cx * sc, H / 2 - cy * sc)
+	g.ci.draw_multimesh(FOG_MM, Tx.SPUFF)
+
+## A box building in the current (possibly rotated) frame. Pass 0 draws its sun shadow, pass 1
+## its walls; both return the offset at which to draw its roof. Draw every shadow of a group
+## first so a long shadow never lands on top of a neighbour's roof.
+## cl = camera in this frame, sl = sun shadow vector in this frame.
+static func draw_box3d(g: Pen, ps: int, x: float, y: float, w: float, h: float, hgt: float, cl: Vector2, sl: Vector2, wall: Color) -> Vector2:
+	var k := hgt / maxf(PV.z - hgt, PV.z * 0.25)
+	var off := (Vector2(x + w / 2, y + h / 2) - cl) * k
+	var v := sl * hgt if ps == 0 else off
+	if ps == 0 and SUN_A < 0.01: return off
+	if ps == 1 and v.length_squared() < 0.25: return off
+	# hull of the footprint and its copy moved by v: three corners, then three moved corners
+	var c := [Vector2(x, y), Vector2(x + w, y), Vector2(x + w, y + h), Vector2(x, y + h)]
+	var s := (3 if v.y >= 0 else 2) if v.x >= 0 else (0 if v.y >= 0 else 1)
+	var c0: Vector2 = c[s]
+	var c1: Vector2 = c[(s + 1) % 4]
+	var c2: Vector2 = c[(s + 2) % 4]
+	var c3: Vector2 = c[(s + 3) % 4]
+	g.poly(PackedVector2Array([c0, c1, c2, c2 + v, c3 + v, c0 + v]), Color(0, 0, 0, 0.36 * SUN_A) if ps == 0 else wall)
+	return off
+
+## A cylinder (fuel tank) seen from above: pass 0 shadow, pass 1 side wall; returns the top offset.
+static func draw_cyl3d(g: Pen, ps: int, x: float, y: float, r: float, hgt: float, cl: Vector2, sl: Vector2, wall: Color) -> Vector2:
+	var off := (Vector2(x, y) - cl) * (hgt / maxf(PV.z - hgt, PV.z * 0.25))
+	var v := sl * hgt if ps == 0 else off
+	if ps == 0 and SUN_A < 0.01: return off
+	var pts := PackedVector2Array()
+	for i in 16:
+		var q := Vector2(x, y) + Vector2.from_angle(i * TAU / 16) * r
+		pts.append(q); pts.append(q + v)
+	g.poly(_hull(pts), Color(0, 0, 0, 0.36 * SUN_A) if ps == 0 else wall)
+	return off
+
+static func _hull(pts: PackedVector2Array) -> PackedVector2Array:
+	var h := Geometry2D.convex_hull(pts)
+	if h.size() > 3: h.resize(h.size() - 1)   # convex_hull repeats the first point at the end
+	return h
 
 # =====================================================================
 # shared
 # =====================================================================
-static func draw_plane(g: Pen, P: Dictionary, size: float, prop: float, shadow: bool, bank: float = 0.0) -> void:
+## Position of a named point ("prop", "prop0", "prop1", "tipL", "tipR", "tail") on a pre-rendered plane
+## at this bank (-1..1) and pitch (0..1), in sprite units, blended between frames like the sprite is;
+## null if the plane has no data for that point. Twins have one hub per engine, "prop0" (port) and "prop1".
+static func plane_pt(P: Dictionary, nm: String, bank: float, pitch: float):
+	var d = Tx.PPTS.get(P.name)
+	if d == null or not d.pts.has(nm): return null
+	var nb: int = int(d.banks)
+	var np: int = d.pitches.size()
+	var arr: Array = d.pts[nm]
+	var fi := (clampf(bank, -1, 1) + 1) * 0.5 * (nb - 1)
+	var pr := clampf(pitch, 0, 1) * (np - 1)
+	var i0 := clampi(int(floor(fi)), 0, nb - 1)
+	var i1 := mini(i0 + 1, nb - 1)
+	var r0 := clampi(int(floor(pr)), 0, np - 1)
+	var r1 := mini(r0 + 1, np - 1)
+	var at := func(r: int, i: int) -> Vector2: return Vector2(arr[r * nb + i][0], arr[r * nb + i][1])
+	var a: Vector2 = at.call(r0, i0).lerp(at.call(r0, i1), fi - i0)
+	var b: Vector2 = at.call(r1, i0).lerp(at.call(r1, i1), fi - i0)
+	return a.lerp(b, pr - r0)
+
+## How much bigger the plane draws at this altitude: 1 + alt/130, times the plane's "top_k"
+## (D.PLANES) phased in linearly up to the top altitude, so the size on the runway is unchanged.
+static func plane_grow(P: Dictionary, alt: float) -> float:
+	var k: float = lerpf(1.0, P.get("top_k", 1.0), clampf(alt / TREE_FADE_ALT, 0, 1))
+	return (1 + alt / 130.0) * k
+
+static func draw_plane(g: Pen, P: Dictionary, size: float, prop: float, shadow: bool, bank: float = 0.0, pitch: float = 0.0) -> void:
 	g.save()
 	g.scale(size, size)
-	if bank != 0.0: g.scale(1, 1 - absf(bank) * 0.18)
 	if shadow: g.ga *= 0.3
-	g.tex(Tx.PSPR.get(P.name + ("_s" if shadow else "")), -0.64, -0.64, 1.28, 1.28)
+	var rows: Array = Tx.PBANK.get(P.name, [])
+	if rows.size() > 0:
+		var n: int = rows[0].size() - 1
+		var fi := (clampf(bank, -1, 1) + 1) * 0.5 * n
+		var pr := clampf(pitch, 0, 1) * (rows.size() - 1)
+		var r0 := clampi(int(floor(pr)), 0, rows.size() - 1)
+		if shadow:
+			g.tex(rows[roundi(pr)][clampi(roundi(fi), 0, n)], -0.64, -0.64, 1.28, 1.28, Color.BLACK)
+		else:   # blend the two nearest bank frames, then fade in the next pitch row, so nothing steps
+			var i0 := clampi(int(floor(fi)), 0, n)
+			var i1 := mini(i0 + 1, n)
+			g.tex(rows[r0][i0], -0.64, -0.64, 1.28, 1.28)
+			if i1 != i0 and fi - i0 > 0.02: g.tex(rows[r0][i1], -0.64, -0.64, 1.28, 1.28, Color(1, 1, 1, fi - i0))
+			if r0 + 1 < rows.size() and pr - r0 > 0.02:
+				g.tex(rows[r0 + 1][clampi(roundi(fi), 0, n)], -0.64, -0.64, 1.28, 1.28, Color(1, 1, 1, pr - r0))
+	else:
+		if bank != 0.0: g.scale(1, 1 - absf(bank) * 0.18)
+		g.tex(Tx.PSPR.get(P.name + ("_s" if shadow else "")), -0.64, -0.64, 1.28, 1.28)
 	if not shadow:
-		for b in P.props:   # [x, y, radius] per propeller, set per airframe in D.PLANES
-			var bx: float = b[0]
-			var by: float = b[1]
+		for k in P.props.size():   # [x, y, radius] per propeller, set per airframe in D.PLANES
+			var b: Array = P.props[k]
+			# the prop hub moves with the frame as the plane banks and pitches
+			var hub = plane_pt(P, "prop%d" % k, bank, pitch)
+			if hub == null: hub = plane_pt(P, "prop", bank, pitch)
+			var bx: float = b[0] if hub == null else hub.x
+			var by: float = b[1] if hub == null else hub.y
 			var br: float = b[2]
 			g.ellipse(bx, by, 0.025, br, 0, Color(225 / 255.0, 225 / 255.0, 215 / 255.0, 0.13))
 			g.line(bx, by + sin(prop) * (br - 0.01), bx, by - sin(prop) * (br - 0.01), Color(30 / 255.0, 30 / 255.0, 30 / 255.0, 0.7), 0.016)
@@ -61,12 +551,51 @@ static func grade(gm, g: Pen) -> void:
 	g.ga = 0.1
 	g.ci.draw_texture_rect(Tx.GRAIN, Rect2(-ox, -oy, gm.Wv + 160, gm.Hv + 160), true, Color(1, 1, 1, 0.1))
 	g.ga = 1.0
+	update_grade(gm)
+
+## The time-of-day colour grade (shaders/grade.gdshader), a screen-wide pass after layer 2 and
+## its sub-layers, so it covers the world but not the HUD. Looks by hour: [hour, shadow tint,
+## highlight tint, saturation, contrast, exposure]; the hours in between blend.
+const GRADES := [
+	[0.0, Color(0.92, 0.96, 1.1), Color(0.9, 0.95, 1.08), 0.72, 1.0, 1.0],     # night
+	[4.5, Color(0.92, 0.96, 1.1), Color(0.9, 0.95, 1.08), 0.72, 1.0, 1.0],
+	[6.3, Color(0.93, 0.95, 1.08), Color(1.12, 0.97, 0.84), 0.9, 1.04, 1.03],   # sunrise: cool shade, warm light
+	[8.5, Color(0.98, 0.99, 1.03), Color(1.05, 1.0, 0.93), 1.0, 1.04, 1.02],    # morning
+	[12.0, Color(0.99, 1.0, 1.02), Color(1.02, 1.01, 0.98), 1.04, 1.06, 1.03],  # noon: bright and clear
+	[15.5, Color(0.99, 0.99, 1.02), Color(1.05, 1.0, 0.92), 1.04, 1.05, 1.02],
+	[17.6, Color(0.95, 0.94, 1.05), Color(1.16, 0.98, 0.78), 1.1, 1.06, 1.03],  # golden hour
+	[19.0, Color(0.9, 0.92, 1.1), Color(1.05, 0.9, 0.92), 0.82, 1.02, 0.98],    # dusk: cold, pink light
+	[20.5, Color(0.92, 0.96, 1.1), Color(0.9, 0.95, 1.08), 0.72, 1.0, 1.0],
+	[24.0, Color(0.92, 0.96, 1.1), Color(0.9, 0.95, 1.08), 0.72, 1.0, 1.0],
+]
+static var GRADE_MAT: ShaderMaterial
+static func update_grade(gm) -> void:
+	var l2 = gm.layers[2]
+	var rc: ColorRect = l2.get_node_or_null("Grade")
+	if rc == null:
+		GRADE_MAT = ShaderMaterial.new()
+		GRADE_MAT.shader = load("res://shaders/grade.gdshader")
+		rc = ColorRect.new()
+		rc.name = "Grade"
+		rc.material = GRADE_MAT
+		rc.mouse_filter = Control.MOUSE_FILTER_IGNORE
+		l2.add_child.call_deferred(rc)   # after the roof layers (20, 21), so it is drawn over them
+	rc.visible = true
+	rc.size = Vector2(gm.Wv, gm.Hv)
 	var h := fmod(gm.G.time / 60.0, 24.0)
-	var k := 0.0
-	if h >= 5 and h < 8.5: k = 1 - absf(h - 6.6) / 1.9
-	elif h >= 16.3 and h < 19.8: k = 1 - absf(h - 18.1) / 1.8
-	k = clampf(k, 0, 1)
-	if k > 0.01: g.rect(0, 0, gm.Wv, gm.Hv, rgba(255, 150, 70, 0.13 * k))
+	var i := 0
+	while i < GRADES.size() - 2 and h >= GRADES[i + 1][0]: i += 1
+	var a: Array = GRADES[i]
+	var b: Array = GRADES[i + 1]
+	var t := smoothstep(0.0, 1.0, (h - a[0]) / (b[0] - a[0]))
+	var wet := 0.0
+	if gm.mode == "flight" and gm.F: wet = gm.F.storm
+	elif gm.mode == "ground" and gm.S: wet = gm.S.rain
+	GRADE_MAT.set_shader_parameter("shadow_tint", (a[1] as Color).lerp(b[1], t))
+	GRADE_MAT.set_shader_parameter("high_tint", (a[2] as Color).lerp(b[2], t).lerp(Color(0.97, 0.99, 1.02), wet * 0.6))
+	GRADE_MAT.set_shader_parameter("sat", lerpf(a[3], b[3], t) * (1.0 - wet * 0.3))
+	GRADE_MAT.set_shader_parameter("con", lerpf(a[4], b[4], t))
+	GRADE_MAT.set_shader_parameter("expo", lerpf(a[5], b[5], t))
 
 static func draw_objective(gm, g: Pen, y: float) -> void:
 	var txt: String = gm.menu.objective()
@@ -77,7 +606,7 @@ static func draw_objective(gm, g: Pen, y: float) -> void:
 			var F: Dictionary = gm.F
 			var d := Vector2(nt.x - F.x, nt.y - F.y).length()
 			var q := rad_to_deg(U.ang_diff(atan2(nt.y - F.y, nt.x - F.x), F.hdg))
-			txt += " %d km, %s%s." % [U.km(d), "straight ahead" if absf(q) < 12 else ("turn right" if q > 0 else "turn left"), ", not enough fuel" if d > gm.range_now() else ""]
+			txt += " %d km, %s%s." % [U.km(d), "straight ahead" if absf(q) < 12 else ("turn right" if q > 0 else "turn left"), ", not enough fuel" if d > memo(gm, "range") else ""]
 	var lines: Array = [txt]
 	if Pen.measure(txt, 12) + 40 > BW:
 		var ws := txt.split(" ")
@@ -103,7 +632,7 @@ static func draw_objective(gm, g: Pen, y: float) -> void:
 		var md := Vector2(mt.x - F.x, mt.y - F.y).length()
 		var mq := rad_to_deg(U.ang_diff(atan2(mt.y - F.y, mt.x - F.x), F.hdg))
 		var mtxt := "MAYDAY at %s, %d min left. %d km, %s%s." % [mt.name, maxi(0, int(round(gm.G.mayday.until - gm.G.time))), U.km(md),
-			"straight ahead" if absf(mq) < 12 else ("turn right" if mq > 0 else "turn left"), ", not enough fuel" if md > gm.range_now() else ""]
+			"straight ahead" if absf(mq) < 12 else ("turn right" if mq > 0 else "turn left"), ", not enough fuel" if md > memo(gm, "range") else ""]
 		var my2 := y + hh + 6
 		var mw2 := minf(BW, Pen.measure(mtxt, 12) + 40)
 		var flash := 0.5 + 0.5 * sin(gm.T * 6)
@@ -118,6 +647,9 @@ static func draw_world(gm, g: Pen, cx: float, cy: float, sc: float, t: float) ->
 	var W: float = gm.Wv
 	var H: float = gm.Hv
 	var wd: World = gm.wd
+	if gm.mode != "flight":   # the title screen's drifting map: no time-of-day grade
+		var gr = gm.layers[2].get_node_or_null("Grade")
+		if gr: gr.visible = false
 	g.set_xf(Transform2D.IDENTITY)
 	g.rect(0, 0, W, H, hc(SEA))
 	var x0 := cx - W / 2 / sc
@@ -125,6 +657,17 @@ static func draw_world(gm, g: Pen, cx: float, cy: float, sc: float, t: float) ->
 	var y0 := cy - H / 2 / sc
 	var y1 := cy + H / 2 / sc
 	g.set_view(sc, W / 2 - cx * sc, H / 2 - cy * sc)
+	set_view3d(gm, cx, cy, sc)
+	_tb_init()
+	# terrain detail fades in near the ground (flight view only)
+	var dt := clampf((sc - 0.85) / 0.5, 0, 1) if gm.mode == "flight" else 0.0
+	if dt > 0.0:
+		if g.ci.material != TREE_MAT: g.ci.material = TREE_MAT
+		TREE_MAT.set_shader_parameter("detail", dt)
+		TREE_MAT.set_shader_parameter("seed", wd.SEED)
+		TREE_MAT.set_shader_parameter("sun_dir", SUN_DIR)
+		TREE_MAT.set_shader_parameter("sun_a", SUN_A)
+		TREE_MAT.set_shader_parameter("chunk_w", CH + 1)
 	var ov: Texture2D = gm.baker.overview
 	if ov:
 		var opx := float(ov.get_width())
@@ -141,73 +684,14 @@ static func draw_world(gm, g: Pen, cx: float, cy: float, sc: float, t: float) ->
 		for gx in range(int(floor(x0 / CH)), int(floor(x1 / CH)) + 1):
 			if gx < cmin or gy < cmin or gx > cmax or gy > cmax: continue
 			var c: Texture2D = gm.baker.get_chunk(gx, gy)
-			if c: g.tex(c, gx * CH, gy * CH, CH + 1, CH + 1)
-	if sc > 0.512:
-		var G2 := 70.0
-		var al := clampf((sc - 0.5) / 0.22, 0, 1)
-		g.ga = al
-		var seed_v: int = wd.SEED
-		var fills := 0
-		for gy in range(int(floor(y0 / G2)) - 1, int(floor(y1 / G2)) + 2):
-			for gx in range(int(floor(x0 / G2)) - 1, int(floor(x1 / G2)) + 2):
-				var h := U.hash3(gx, gy, seed_v + 201)
-				if h > 0.85: continue
-				var ck := gx * 100003 + gy
-				var cc = gm.TCACHE.get(ck)
-				if cc == null:
-					# spread new cells over frames so entering low altitude doesn't hitch
-					fills += 1
-					if fills > 40: continue
-					var wx0 := (gx + U.hash3(gx, gy, seed_v + 202)) * G2
-					var wy0 := (gy + U.hash3(gx, gy, seed_v + 203)) * G2
-					var t0 := wd.terr(wx0, wy0)
-					var rd0 = wd.road_at(wx0, wy0) if (t0 >= 11 and t0 <= 13) else null
-					cc = [wx0, wy0, t0, 1 if wd.strip_at(wx0, wy0, 6) else 0, rd0.r.ang if rd0 else null]
-					gm.TCACHE[ck] = cc
-					if gm.TCACHE.size() > 60000: gm.TCACHE.clear()
-				var wx: float = cc[0]
-				var wy: float = cc[1]
-				var tt: int = cc[2]
-				if tt <= 1:
-					if h < 0.25:
-						var kk := 0.5 + 0.5 * sin(t * 2 + h * 40)
-						g.rect(wx - 9, wy, 18, 1.6, rgba(220, 235, 240, 0.18 * kk))
-					continue
-				if cc[3]: continue
-				if tt >= 11 and tt <= 13:
-					if h < 0.22 and cc[4] != null:
-						g.save(); g.translate(wx, wy); g.rotate(cc[4] + (h - 0.11) * 3)
-						g.rect(-7, -2, 18, 10, Color(0, 0, 0, 0.35))
-						var cl: String = ["#6b3a2a", "#4a5560", "#7a6a3a", "#2a2826", "#8a8272"][int(h * 50) % 5]
-						g.rect(-9, -4.5, 18, 9, hc(cl))
-						g.rect(-3, -3.5, 4, 7, rgba(15, 18, 20, 0.85)); g.rect(3, -3, 2.5, 6, rgba(15, 18, 20, 0.85))
-						g.restore()
-					continue
-				if tt == 7 or tt == 8:
-					if h < 0.35:
-						var rs := 5 + h * 22
-						g.ellipse(wx + 3, wy + 4, rs, rs * 0.7, h * 5, Color(0, 0, 0, 0.28))
-						g.ellipse(wx, wy, rs, rs * 0.7, h * 5, hc("#c8c8c4") if tt == 8 else hc("#8a857a"))
-						g.ellipse(wx - rs * 0.3, wy - rs * 0.25, rs * 0.45, rs * 0.3, h * 5, Color(1, 1, 1, 0.15))
-					continue
-				if tt == 3 and h >= 0.05 and h < 0.16:
-					var bs := 10 + h * 40
-					g.tex(Tx.TREES[int(h * 70) % 3] if Tx.TREES.size() else null, wx - bs / 2, wy - bs / 2, bs, bs * 0.8)
-					continue
-				if tt == 5 or tt == 6:
-					for q in 3:
-						var hq := U.hash3(gx * 3 + q, gy, seed_v + 211)
-						var ox := (U.hash3(gx, gy * 3 + q, seed_v + 212) - 0.5) * 60
-						var oy := (U.hash3(gx + q, gy - q, seed_v + 213) - 0.5) * 60
-						var sz2 := 30 + hq * 34
-						g.tex(Tx.SPUFF, wx + ox - sz2 * 0.45 + 8, wy + oy - sz2 * 0.45 + 11, sz2 * 0.9, sz2 * 0.9)
-						if Tx.TREES.size(): g.tex(Tx.TREES[int(hq * 30) % 3], wx + ox - sz2 / 2, wy + oy - sz2 / 2, sz2, sz2)
-					continue
-				if not ((tt == 3 and h < 0.05) or (tt == 4 and h < 0.012)): continue
-				var sz := 24 + h * 38
-				g.tex(Tx.SPUFF, wx - sz * 0.45 + 8, wy - sz * 0.45 + 11, sz * 0.9, sz * 0.9)
-				if Tx.TREES.size(): g.tex(Tx.TREES[int(h * 30) % 3], wx - sz / 2, wy - sz / 2, sz, sz)
-		g.ga = 1.0
+			if c == null: continue
+			if dt > 0.0: _detail_chunk(g, c, gx, gy)
+			else: g.tex(c, gx * CH, gy * CH, CH + 1, CH + 1)
+	var sf := clampf((sc - 0.5) / 0.22, 0, 1)
+	if gm.mode == "flight" and gm.F:   # trees at every zoom, their alpha set by altitude
+		draw_scatter(gm, g, x0, y0, x1, y1, sf, t, tree_fade(gm.F.alt))
+	elif sc > 0.512:
+		draw_scatter(gm, g, x0, y0, x1, y1, sf, t, sf)
 	var tgt = gm.flight.nav_target() if (gm.mode == "flight" and gm.G and gm.F) else null
 	var mdt = gm.flight.mayday_target() if (gm.mode == "flight" and gm.G and gm.F) else null
 	for s in wd.strips:
@@ -233,6 +717,8 @@ static func draw_strip(gm, g: Pen, s: Dictionary) -> void:
 	var Wd: float = s.wid
 	var sid: int = s.id
 	var h0 := U.hash3(sid, 1, wd.SEED + 5)
+	var cl := (Vector2(PV.x, PV.y) - Vector2(s.x, s.y)).rotated(-s.ang)
+	var sl := SUN.rotated(-s.ang)
 	g.rr(-L / 2 - 90, -Wd / 2 - 60, L + 180, Wd + 210, 40, rgba(150, 170, 100, 0.13))
 	if F and F.alt < 70 and gm.known.has(sid):
 		var pc := rgba(212, 90, 157, 0.45)
@@ -266,13 +752,17 @@ static func draw_strip(gm, g: Pen, s: Dictionary) -> void:
 		for i in 8:
 			g.rect(-L / 2 + 60 + U.hash3(sid, i, 3) * (L - 120), -Wd / 4 + U.hash3(i, sid, 4) * Wd / 2, 30, 4, Color(0, 0, 0, 0.25))
 	var nh := 4 if hav else (3 if s.type == "airport" else (2 if s.type == "regional" else 1))
-	for i in nh:
+	for j in nh * 2:   # all shadows, then all hangars
+		var ps := 0 if j < nh else 1
+		var i := j % nh
 		var hx := -L / 4 - 30 + i * 72
 		var hy := Wd / 2 + (22.0 if dirt else 26.0)
 		var hw := 60.0
 		var hh := 38.0 if dirt else 46.0
-		g.rect(hx + 8, hy + 10, hw, hh, Color(0, 0, 0, 0.35))
 		var rc: Array = ["#8a9a86", "#5d6b5a"] if hav else (["#8a8378", "#5a544b"] if U.hash3(sid, i, 9) < 0.5 else ["#8a5a44", "#5a3a2c"])
+		var ho := draw_box3d(g, ps, hx, hy, hw, hh, HANGAR_H, cl, sl, U.shade(hc(rc[1]), 0.62))
+		if ps == 0: continue
+		hx += ho.x; hy += ho.y
 		g.rect(hx, hy, hw, hh / 2, hc(rc[0])); g.rect(hx, hy + hh / 2, hw, hh / 2, hc(rc[1]))
 		g.rect(hx, hy + hh / 2 - 1, hw, 2, Color(1, 1, 1, 0.15))
 		if U.hash3(sid, i, 11) < 0.3 and not hav: g.circle(hx + hw * 0.6, hy + hh * 0.4, 10, rgba(20, 16, 12, 0.7))
@@ -280,7 +770,12 @@ static func draw_strip(gm, g: Pen, s: Dictionary) -> void:
 		for i in 2:
 			var fx := L / 4 + 10 + i * 26
 			var fy := Wd / 2 + 40
-			g.circle(fx + 5, fy + 6, 11, Color(0, 0, 0, 0.35)); g.circle(fx, fy, 11, hc("#b4aea2")); g.circle(fx - 3, fy - 3, 5, hc("#e2dccf"))
+			draw_cyl3d(g, 0, fx, fy, 11, TANK_H, cl, sl, Color.BLACK)
+		for i in 2:
+			var fx := L / 4 + 10 + i * 26
+			var fy := Wd / 2 + 40
+			var to := draw_cyl3d(g, 1, fx, fy, 11, TANK_H, cl, sl, hc("#7c776d"))
+			g.circle(fx + to.x, fy + to.y, 11, hc("#b4aea2")); g.circle(fx + to.x - 3, fy + to.y - 3, 5, hc("#e2dccf"))
 		g.rect(L / 4 + 60, Wd / 2 + 30, 10, 14, hc("#a3301f"))
 	if hav:
 		var x := -L / 2
@@ -294,28 +789,40 @@ static func draw_strip(gm, g: Pen, s: Dictionary) -> void:
 		var ty := Wd / 2 + 160
 		var rdc := hc("#46443f")
 		g.rect(tx - 190, ty - 7, 380, 14, rdc); g.rect(tx - 7, ty - 130, 14, 260, rdc); g.rect(-L / 4 + 20, Wd / 2 + 62, tx - (-L / 4 + 20), 8, rdc)
-		var hi := [0]
-		var house := func(hx: float, hy: float, hw: float, hh: float) -> void:
-			hi[0] += 1
-			var i: int = hi[0]
-			if U.hash3(sid, i, 46) < 0.18: return
-			g.rect(hx - hw / 2 + 5, hy - hh / 2 + 6, hw, hh, Color(0, 0, 0, 0.35))
-			var rc := hc(D.HOUSEROOF[int(U.hash3(i, sid, 45) * D.HOUSEROOF.size())])
-			var cA := U.shade(rc, 1.15)
-			var cB := U.shade(rc, 0.68)
+		var hkey := Vector2i(sid, wd.SEED)
+		var hl: Array = HOUSES.get(hkey, [])
+		if hl.is_empty():
+			# town houses, worked out once per airfield: [x, y, w, h, roof lit, roof shade]
+			var hi := [0]
+			var add := func(hx: float, hy: float, hw: float, hh: float) -> void:
+				hi[0] += 1
+				var i: int = hi[0]
+				if U.hash3(sid, i, 46) < 0.18: return
+				var rc := hc(D.HOUSEROOF[int(U.hash3(i, sid, 45) * D.HOUSEROOF.size())])
+				hl.append([hx - hw / 2, hy - hh / 2, hw, hh, U.shade(rc, 1.15), U.shade(rc, 0.68)])
+			for k in range(-5, 6):
+				if k == 0: continue
+				var hx := tx + k * 34
+				var w1 := 24 + U.hash3(sid, k, 47) * 8
+				add.call(hx, ty - 26, w1, 22.0); add.call(hx, ty + 26, w1, 22.0)
+			for k in range(-3, 4):
+				if k == 0: continue
+				var hy := ty + k * 34
+				add.call(tx - 26, hy, 22.0, 24.0); add.call(tx + 26, hy, 22.0, 24.0)
+			HOUSES[hkey] = hl
+		var wallc := hc("#6e6458")
+		for hs in hl:   # all shadows first, then all houses
+			draw_box3d(g, 0, hs[0], hs[1], hs[2], hs[3], HOUSE_H, cl, sl, wallc)
+		for hs in hl:
+			var o := draw_box3d(g, 1, hs[0], hs[1], hs[2], hs[3], HOUSE_H, cl, sl, wallc)
+			var hx: float = hs[0] + o.x
+			var hy: float = hs[1] + o.y
+			var hw: float = hs[2]
+			var hh: float = hs[3]
 			if hw >= hh:
-				g.rect(hx - hw / 2, hy - hh / 2, hw, hh / 2, cA); g.rect(hx - hw / 2, hy, hw, hh / 2, cB)
+				g.rect(hx, hy, hw, hh / 2, hs[4]); g.rect(hx, hy + hh / 2, hw, hh / 2, hs[5])
 			else:
-				g.rect(hx - hw / 2, hy - hh / 2, hw / 2, hh, cA); g.rect(hx, hy - hh / 2, hw / 2, hh, cB)
-		for k in range(-5, 6):
-			if k == 0: continue
-			var hx := tx + k * 34
-			var w1 := 24 + U.hash3(sid, k, 47) * 8
-			house.call(hx, ty - 26, w1, 22.0); house.call(hx, ty + 26, w1, 22.0)
-		for k in range(-3, 4):
-			if k == 0: continue
-			var hy := ty + k * 34
-			house.call(tx - 26, hy, 22.0, 24.0); house.call(tx + 26, hy, 22.0, 24.0)
+				g.rect(hx, hy, hw / 2, hh, hs[4]); g.rect(hx + hw / 2, hy, hw / 2, hh, hs[5])
 	if h0 < 0.35 and not hav:
 		g.save(); g.translate(L / 2 + 50, -Wd / 2 - 40); g.rotate(h0 * 9)
 		g.ga = 0.85
@@ -371,8 +878,9 @@ static func draw_clouds(gm, g: Pen, cx: float, cy: float, sc: float, alpha: floa
 					var r := U.hash3(gx, gy * 7 + i, seed_v + 95)
 					fn.call(bx + cos(a) * r * 150, by + sin(a) * r * 85, 90 + r * 110)
 	g.set_view(sc, W / 2 - cx * sc, H / 2 - cy * sc)
-	g.ga = 0.13
-	clouds_in.call(sc, 800.0, func(x, y, rad): g.tex(Tx.SPUFF, x + 260 - rad, y + 380 - rad, rad * 2, rad * 2))
+	g.ga = 0.13 * SUN_A
+	var cs := SUN * CLOUD_SHADOW
+	if g.ga > 0.005: clouds_in.call(sc, 800.0 + cs.length(), func(x, y, rad): g.tex(Tx.SPUFF, x + cs.x - rad, y + cs.y - rad, rad * 2, rad * 2))
 	if alpha > 0.01:
 		var s2 := sc * 1.3
 		g.set_view(s2, W / 2 - cx * s2, H / 2 - cy * s2)
@@ -431,6 +939,7 @@ static func prep_flight(gm) -> void:
 		if not gm.baker.has_chunk(gx, gy):
 			gm.baker.get_chunk(gx, gy)
 			break
+	prefetch_scatter(gm, gm.camX, gm.camY, flight_scale(gm, F.alt), F.hdg)
 
 static func flight_layer(gm, idx: int, g: Pen) -> void:
 	var F: Dictionary = gm.F
@@ -443,14 +952,13 @@ static func flight_layer(gm, idx: int, g: Pen) -> void:
 		0:
 			var vb := draw_world(gm, g, gm.camX, gm.camY, sc, gm.T)
 			gm.set_meta("vb", vb)
-			var hz2 := clampf(F.alt / 100.0, 0, 1)
-			if hz2 > 0.02:
-				g.save(); g.set_xf(Transform2D.IDENTITY); g.rect(0, 0, W, H, rgba(172, 186, 200, hz2 * 0.07)); g.restore()
-			var grow := 1 + alt / 260.0
-			g.save(); g.translate(F.x + alt * 0.7, F.y + alt * 1.1); g.rotate(F.hdg); draw_plane(g, P, P.size * 1.7, 0, true, F.bank); g.restore()
-			g.save(); g.translate(F.x, F.y); g.rotate(F.hdg); draw_plane(g, P, P.size * 1.7 * grow, F.prop, false, F.bank); g.restore()
+			draw_fog(gm, g, gm.camX, gm.camY, sc, alt)
+			var grow := plane_grow(P, alt)
+			var psd := Vector2.from_angle(SUN_ANG) * alt * 1.31
+			g.save(); g.translate(F.x + psd.x, F.y + psd.y); g.rotate(F.hdg); draw_plane(g, P, P.size * 1.7, 0, true, F.bank, F.get("pitch", 0.0)); g.restore()
+			g.save(); g.translate(F.x, F.y); g.rotate(F.hdg); draw_plane(g, P, P.size * 1.7 * grow, F.prop, false, F.bank, F.get("pitch", 0.0)); g.restore()
 			if not F.onGround and not F.crashed and (F.vs < -0.5 or F.alt < 30):
-				var pt = gm.flight.predict_touchdown()
+				var pt = memo(gm, "touchdown")
 				if pt and pt.t < 45:
 					var s = gm.wd.strip_at(pt.x, pt.y, 1)
 					var c := hc("#d9a441")
@@ -464,7 +972,7 @@ static func flight_layer(gm, idx: int, g: Pen) -> void:
 					var q := 11 / sc
 					var cl := c
 					cl.a = 0.55
-					g.dashed(F.x + alt * 0.7, F.y + alt * 1.1, pt.x, pt.y, cl, 2 / sc, 6 / sc, 7 / sc)
+					g.dashed(F.x + psd.x, F.y + psd.y, pt.x, pt.y, cl, 2 / sc, 6 / sc, 7 / sc)
 					for k in 2:
 						var lw := (2.5 if k else 3.5) / sc
 						var col: Color = c if k else Color(0, 0, 0, 0.6)
@@ -479,7 +987,7 @@ static func flight_layer(gm, idx: int, g: Pen) -> void:
 			for tr in F.tracers:
 				var a: float = tr.life / 0.35
 				g.line(tr.x + (tr.tx - tr.x) * (1 - a), tr.y + (tr.ty - tr.y) * (1 - a), tr.x + (tr.tx - tr.x) * minf(1, 1.3 - a), tr.y + (tr.ty - tr.y) * minf(1, 1.3 - a), rgba(255, 190, 90, a), tlw)
-			var ai = gm.flight.approach_info()
+			var ai = memo(gm, "approach")
 			if ai and ai.phase != "high" and ai.slack > -200:
 				var pl := 0.5 + 0.5 * sin(gm.T * 5)
 				var nx: float = -ai.cy
@@ -555,13 +1063,22 @@ static func night_glows(gm, g: Pen, sc: float, alt: float, P: Dictionary) -> voi
 	g.save()
 	g.translate(F.x, F.y)
 	g.rotate(F.hdg)
-	var sz: float = P.size * 1.7 * (1 + alt / 260.0)
+	var sz: float = P.size * 1.7 * plane_grow(P, alt)   # same size as the plane sprite (grow in flight_layer)
 	if alt < 75:
 		g.radial(0, 0, [[0.0, rgba(255, 240, 200, 0.28 * dk)], [520.0, Color(0, 0, 0, 0)]], 24)
 	var blink := fmod(gm.T, 1.2) < 0.12
-	glow.call(sz * 0.1, -sz * 0.6, 10, "255,60,50", dk)
-	glow.call(sz * 0.1, sz * 0.6, 10, "60,255,120", dk)
-	if blink: glow.call(-sz * 0.45, 0, 16, "255,255,255", dk)
+	# wingtip and tail lights sit on the rendered frame's tips, so they follow the bank and pitch
+	var pb: float = F.bank
+	var pp: float = F.get("pitch", 0.0)
+	var tl = plane_pt(P, "tipL", pb, pp)
+	var tr = plane_pt(P, "tipR", pb, pp)
+	var ta = plane_pt(P, "tail", pb, pp)
+	if tl == null: tl = Vector2(0.1, -0.6)
+	if tr == null: tr = Vector2(0.1, 0.6)
+	if ta == null: ta = Vector2(-0.45, 0)
+	glow.call(sz * tl.x, sz * tl.y, 10, "255,60,50", dk)
+	glow.call(sz * tr.x, sz * tr.y, 10, "60,255,120", dk)
+	if blink: glow.call(sz * ta.x, sz * ta.y, 16, "255,255,255", dk)
 	g.restore()
 
 static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
@@ -581,7 +1098,7 @@ static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 	g.rect(px + 44, py + 11, pw - 56, 12, Color(1, 1, 1, 0.12))
 	g.rect(px + 44, py + 11, (pw - 56) * fr, 12, (hc("#e3644c") if fmod(T, 1.0) < 0.5 else hc("#8a2a1c")) if fr < 0.2 else hc("#d9a441"))
 	var ink := hc("#efe6cf")
-	g.text("%.1f of %d gal, %d km left, hull %d%%" % [G.fuel, int(P.fuelCap), U.km(gm.range_now()), int(ceil(G.hull))], px + 10, py + 38, 13, ink)
+	g.text("%.1f of %d gal, %d km left, hull %d%%" % [G.fuel, int(P.fuelCap), U.km(memo(gm, "range")), int(ceil(G.hull))], px + 10, py + 38, 13, ink)
 	var hdg := int(round(fmod(rad_to_deg(F.hdg) + 90 + 360 * 4, 360)))
 	g.text("%d kt   %d ft   %s%d fpm   %s°" % [int(round(F.spd * 0.75)), int(round(maxf(0, F.alt) * 45)), "▲" if F.vs >= 0 else "▼", absi(int(round(F.vs * 27))) * 100, ("00" + str(hdg)).right(3)], px + 10, py + 57, 13, ink)
 	# minimap
@@ -632,7 +1149,7 @@ static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 		var sr: float = s.r * k
 		if Vector2(sxp - mx, syp - my).length() - sr > mr: continue
 		_clipped_disc(g, sxp, syp, sr, mx, my, mr, rgba(120, 140, 190, 0.35))
-	var rn: float = gm.range_now() * k
+	var rn: float = memo(gm, "range") * k
 	if rn < mr: g.dashed_arc(mx, my, rn, 0, TAU, rgba(212, 90, 157, 0.9), 1, 3, 3)
 	var nt = gm.flight.nav_target()
 	var mdt2 = gm.flight.mayday_target()
@@ -685,7 +1202,7 @@ static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 			var pl := 0.5 + 0.5 * sin(T * 4)
 			var ax := psx + cos(a) * rd
 			var ay := psy + sin(a) * rd
-			var short: bool = d > gm.range_now()
+			var short: bool = d > memo(gm, "range")
 			var lbl := "%s %d km" % ["Haven" if nt.type == "haven" else String(nt.name).split(" ")[0], U.km(d)]
 			var lw := Pen.measure(lbl, 14, "700") + 16
 			var lh := 22.0
@@ -778,7 +1295,7 @@ static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 	elif rdh and gm.flight.align_to(rdh.r.ang, F.trk):
 		msg = "Over a straight stretch of road. You could put it down here."; c = hc("#f0c4dd")
 	else:
-		gm.AP = gm.flight.approach_info()
+		gm.AP = memo(gm, "approach")
 		var AP = gm.AP
 		if AP and (AP.phase != "early" or F.alt < 75):
 			var nm: String = "Haven" if AP.s.type == "haven" else AP.s.name
@@ -808,6 +1325,9 @@ static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 			g.circle(clampf(p.x, p.sx - 70, p.sx + 70), p.sy, 14, rgba(239, 230, 207, 0.5))
 
 static func _clipped_disc(g: Pen, x: float, y: float, r: float, cx: float, cy: float, cr: float, col: Color) -> void:
+	if Vector2(x - cx, y - cy).length() + r <= cr:
+		g.circle(x, y, r, col)   # wholly inside: nothing to clip
+		return
 	var a := PackedVector2Array()
 	var b := PackedVector2Array()
 	for i in 32:
@@ -887,6 +1407,28 @@ const FIRE_LIGHT_R := 190.0    # at night a car fire lights up this far around i
 const FIRE_PULSE := 0.12       # how much fire glows and fire light swell and shrink as they pulse
 
 ## Slow warm pulse (with a faster flicker on top) for a fire's glow and light, 1 - FIRE_PULSE..1 + FIRE_PULSE.
+## On foot: tree shadows from the sun (they used to be baked into the site at a fixed angle).
+static func foot_tree_shadows(gm, g: Pen, vx0: float, vy0: float, vx1: float, vy1: float) -> void:
+	if SUN_A < 0.01: return
+	var S: Dictionary = gm.S
+	var L := SUN.length() * FOOT_TREE_H * 0.5
+	var pad := 40.0 + L * 3
+	var c0 := maxi(0, int(floor((vx0 - pad) / TS)))
+	var c1 := mini(S.cols - 1, int(floor((vx1 + pad) / TS)))
+	var r0 := maxi(0, int(floor((vy0 - pad) / TS)))
+	var r1 := mini(S.rows - 1, int(floor((vy1 + pad) / TS)))
+	var col := Color(10 / 255.0, 18 / 255.0, 8 / 255.0, 0.36 * SUN_A)
+	for r in range(r0, r1 + 1):
+		for c in range(c0, c1 + 1):
+			if S.g[r * S.cols + c] != 5: continue
+			var hf := foot_tree_hf(c, r)
+			var o := SUN * FOOT_TREE_H * hf * 0.55
+			g.ellipse((c + 0.5) * TS + o.x, (r + 0.5) * TS + o.y, 28 + L * hf, 25, SUN_ANG, col)
+
+## On foot: this tree's height as a share of FOOT_TREE_H (0.65 to 1.45).
+static func foot_tree_hf(c: int, r: int) -> float:
+	return 0.65 + U.hash3(c, r, 29) * 0.8
+
 static func fire_pulse(T: float, ph: float) -> float:
 	return 1.0 + FIRE_PULSE * (0.75 * sin(T * 4.0 + ph) + 0.25 * sin(T * 11.0 + ph * 1.7))
 
@@ -936,6 +1478,8 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 			var BK := SiteGen.BK
 			if vx1 > vx0 and vy1 > vy0 and S.bg.baked:
 				g.tex_region(S.bg.get_texture(), Rect2(vx0, vy0, vx1 - vx0, vy1 - vy0), Rect2(vx0 * BK, vy0 * BK, (vx1 - vx0) * BK, (vy1 - vy0) * BK))
+			set_view3d(gm, cx, cy, gs)
+			foot_tree_shadows(gm, g, vx0, vy0, vx1, vy1)
 			if S.tanker:
 				var tk: Dictionary = S.tanker
 				g.save(); g.translate(tk.x, tk.y)
@@ -1019,8 +1563,9 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 			for b in S.thrown:
 				if not b.dead: blast_ring(gm, g, b.x, b.y, Blasts.BOMB_BLAST_R, b.fuse)
 			var P: Dictionary = gm.PS()
-			g.save(); g.translate(S.plane.x + 10, S.plane.y + 14); draw_plane(g, P, 190, 0, true); g.restore()
-			g.save(); g.translate(S.plane.x, S.plane.y); draw_plane(g, P, 190, 0, false); g.restore()
+			var pk: float = P.get("foot_k", 1.0)   # per-plane size when parked, seen on foot
+			g.save(); g.translate(S.plane.x + 10 * pk, S.plane.y + 14 * pk); draw_plane(g, P, 190 * pk, 0, true); g.restore()
+			g.save(); g.translate(S.plane.x, S.plane.y); draw_plane(g, P, 190 * pk, 0, false); g.restore()
 			if S.nearPlane: g.dashed_arc(S.plane.x, S.plane.y, 130, 0, TAU, rgba(212, 90, 157, 0.8), 2, 8, 6)
 			for z in S.zs: draw_zombie(gm, g, z)
 			for v in S.sv:
@@ -1132,6 +1677,9 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 			var r0 := maxi(0, int(floor((cy - H / 2 / gs - 40) / TS)))
 			var r1 := mini(S.rows - 1, int(floor((cy + H / 2 / gs + 40) / TS)))
 			if Tx.TREES.size():
+				# a darker lower canopy and the top, each leaning out with its height and turned so
+				# the lit side faces the sun (like the trees in flight)
+				var ta := SUN_ANG + PI * 1.75
 				for r in range(r0, r1 + 1):
 					for c in range(c0, c1 + 1):
 						if S.g[r * S.cols + c] != 5: continue
@@ -1139,8 +1687,16 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 						var y := (r + 0.5) * TS
 						var j := U.hash3(c, r, 3)
 						var sz := 70 + j * 14
+						var tex: Texture2D = Tx.TREES[Tx.tree_pick(j)]
+						var th := FOOT_TREE_H * foot_tree_hf(c, r)
+						var tint := FarmFolk.tree_tint(S, c, r)
 						g.ga = 0.45 if Vector2(p.x - x, p.y - y).length() < 34 else 1.0
-						g.tex(Tx.TREES[int(j * 3)], x - sz / 2, y - sz / 2, sz, sz, FarmFolk.tree_tint(S, c, r))
+						for lv in 2:
+							var q := lift(x, y, th * (0.5 if lv == 0 else 1.0))
+							var s2: float = sz * (0.84 if lv == 0 else 1.0)
+							g.save(); g.translate(x + q.x, y + q.y); g.rotate(ta)
+							g.tex(tex, -s2 / 2, -s2 / 2, s2, s2, tint * LOWER_TINT if lv == 0 else tint)
+							g.restore()
 				g.ga = 1.0
 			gm.farm.draw_top(g)   # family farm windmill sails, above roofs and trees
 			g.set_xf(Transform2D.IDENTITY)
@@ -1269,6 +1825,9 @@ static func draw_ads_reticle(gm, g: Pen) -> void:
 # =====================================================================
 # ground sprites
 # =====================================================================
+const ROOF_H := 16.0     # on foot: roof height for the wall slivers and sun shadows, world units
+const FOOT_TREE_H := 46.0   # on foot: average canopy top height (each tree varies)
+const WALL_FOOT := Color(0.5, 0.46, 0.4)
 static func draw_roofs(gm, g: Pen) -> void:
 	var S: Dictionary = gm.S
 	var p: Dictionary = S.p
@@ -1281,6 +1840,8 @@ static func draw_roofs(gm, g: Pen) -> void:
 	var fades := PackedVector2Array()
 	var centres := PackedVector2Array()
 	var rf := 1.0 - pow(0.82, minf(gm.get_process_delta_time(), 0.05) * 60.0)   # roof fade, 0.18 per frame at 60 fps
+	var cam := Vector2(PV.x, PV.y)
+	var shown := []
 	for ri in S.rooms.size():
 		var rm: Dictionary = S.rooms[ri]
 		var inside: bool = p.x > rm.c * TS and p.x < (rm.c + rm.w) * TS and p.y > rm.r * TS and p.y < (rm.r + rm.h) * TS
@@ -1296,12 +1857,21 @@ static func draw_roofs(gm, g: Pen) -> void:
 			var apt: Vector2 = rm.get("apt", Vector2.ZERO)
 			centres.append(Vector2(apt.x * gs + ox, apt.y * gs + oy))
 		if rm.ra < 0.02: continue
+		g.ga = rm.ra
+		draw_box3d(g, 0, rm.c * TS + 10, rm.r * TS + 10, rm.w * TS - 20, rm.h * TS - 20, ROOF_H, cam, SUN, Color.BLACK)
+		shown.append(rm)
+	g.ga = 1.0
+	# then the walls you can see between the ground and each roof (on the sides facing the
+	# middle of the screen), then the roof itself, which stays where it always was
+	for rm in shown:
 		var x: float = rm.c * TS + 10
 		var y: float = rm.r * TS + 10
 		var w: float = rm.w * TS - 20
 		var h: float = rm.h * TS - 20
-		g.rect(x + 8, y + 10, w, h, Color(0, 0, 0, rm.ra * 0.35))
 		g.ga = rm.ra
+		var k := ROOF_H / maxf(PV.z - ROOF_H, PV.z * 0.25)
+		var b := (cam - Vector2(x + w / 2, y + h / 2)) * (k / (1.0 + k))
+		draw_box3d(g, 1, x + b.x, y + b.y, w, h, ROOF_H, cam, SUN, U.shade(hc(rm.roof if rm.roof else "#6b5a4a"), 0.5).lerp(WALL_FOOT, 0.5))
 		g.save(); g.translate(x, y)
 		draw_roof(g, rm, sid, w, h)
 		g.restore()

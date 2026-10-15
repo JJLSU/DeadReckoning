@@ -73,6 +73,7 @@ var ui: UI
 # Systems split out of this script; each keeps a reference back to the game (gm).
 var survivors := Survivors.new(self)
 var farm := FarmFolk.new(self)   # family farm folk and pets
+var pad = preload("res://scripts/pad.gd").new(self)   # game controller input
 var blasts := Blasts.new(self)
 var flight := Flight.new(self)
 var menu := Menu.new(self)
@@ -88,6 +89,7 @@ var F = null            # flight state or null
 var S = null            # ground site or null
 var mode := "title"
 var torch := false      # flashlight on? (F)
+var unl_fuel := false   # testing: the Unlimited Fuel toggle (debug buttons); the plane burns and leaks nothing
 var invuln := false     # testing: the Invulnerable toggle (debug buttons); you take no damage
 var uist := "title"     # current overlay: "" (none), title, menu, pause, map, dead, win
 var menu_tab := "contracts"
@@ -179,13 +181,14 @@ func _ready() -> void:
 	ui = UI.new()
 	ui.game = self
 	add_child(ui)
+	add_child(FpsCounter.new())
 	get_viewport().size_changed.connect(_resize)
 	menu.load_settings()
 	_resize()
 	# world + textures
 	var sv = menu.load_save()
 	wd.PAD = OCEAN_PAD
-	wd.gen_world(int(sv.seed) if sv else randi() % 1000000000)
+	wd.gen_world(int(sv.seed) if sv else randi() % 1000000000, int(sv.get("wgen", 1)) if sv else World.WORLD_GEN)
 	baker.set_world(wd)
 	await baker.build_overview(OCEAN_PAD)
 	await Tx.bake_all(baker)
@@ -211,7 +214,7 @@ func _resize() -> void:
 # state helpers
 # ======================================================================
 func new_state(seed_v: int) -> Dictionary:
-	return {"v": 1, "world": WORLD, "seed": seed_v, "cash": 150, "plane": 0, "tanks": 0, "engine": 0, "fuel": 18.0, "time": 420.0, "hull": 100.0, "leak": 0.0, "roadStrips": [],
+	return {"v": 1, "world": WORLD, "seed": seed_v, "wgen": World.WORLD_GEN, "cash": 150, "plane": 0, "tanks": 0, "engine": 0, "fuel": 18.0, "time": 420.0, "hull": 100.0, "leak": 0.0, "roadStrips": [],
 		"band": 3, "parts": 1, "bombs": 1, "diff": 1, "armor": 0.0, "goods": {}, "rings": [], "trinkets": [], "carried": 0.0, "ammo": 70, "med": 2, "hp": 100.0,
 		"weapons": [0], "weapon": 0, "contracts": [], "known": [], "strip": wd.START, "looted": {}, "offers": [], "nav": -1, "visits": {}, "mayday": null,
 		"stats": {"flights": 0, "deliv": 0, "kills": 0, "dist": 0.0}}
@@ -297,6 +300,7 @@ func _input(e: InputEvent) -> void:
 
 func _unhandled_input(e: InputEvent) -> void:
 	if not ready_done: return
+	if pad.event(e): return
 	if menu.display_input(e): return
 	if e is InputEventKey and e.pressed and not e.echo:
 		var c: int = e.physical_keycode
@@ -405,12 +409,13 @@ func ads_moving() -> bool:
 ## Hand control back to the real (hidden) pointer, placed where the circle is.
 func end_virtual_cursor() -> void:
 	ads_virtual = false
-	get_viewport().warp_mouse(ads_cur)
+	if not pad.active: get_viewport().warp_mouse(ads_cur)   # (a warp would hand aiming back to the mouse)
 	mouse.x = ads_cur.x; mouse.y = ads_cur.y
 
 ## Where the exploration-mode circle cursor is drawn.
 func reticle_pos() -> Vector2:
-	return ads_cur if ads_virtual else get_viewport().get_mouse_position()
+	if ads_virtual: return ads_cur
+	return Vector2(mouse.x, mouse.y) if pad.active else get_viewport().get_mouse_position()
 
 ## Exploration mode hides the Windows pointer (the circle is drawn instead) while
 ## playing; menus, flight mode and hovering an on-screen button get the normal
@@ -463,6 +468,7 @@ func _process(delta: float) -> void:
 	if not ready_done: return
 	var dt := minf(0.05, delta)
 	T += dt
+	pad.update(dt)
 	if ads and not (mode == "ground" and S): set_ads(false)
 	if mode == "flight" and F:
 		if uist == "":
@@ -476,7 +482,7 @@ func _process(delta: float) -> void:
 				flight.upd_flight(ft / sub)
 				k += 1
 	elif mode == "ground" and S:
-		set_ads(uist == "" and Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) and not unarmed_here())
+		set_ads(uist == "" and (Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) or pad.ads()) and not unarmed_here())
 		if uist == "": upd_ground(dt)
 		if ads_virtual and S: ads_follow()
 	else:
@@ -1415,12 +1421,14 @@ func upd_player(p: Dictionary, dt: float) -> float:
 	if key(KEY_S) or key(KEY_DOWN): my += 1
 	if key(KEY_A) or key(KEY_LEFT): mx -= 1
 	if key(KEY_D) or key(KEY_RIGHT): mx += 1
+	var pm: Vector2 = pad.move()   # controller left stick (analog)
+	mx += pm.x; my += pm.y
 	var aim = null
 	var fire := false
 	var ml := Vector2(mx, my).length()
 	if ml > 1:
 		mx /= ml; my /= ml
-	var sprint: bool = (key(KEY_SHIFT)) and not ads and p.stam > 4 and ml > 0.1
+	var sprint: bool = (key(KEY_SHIFT) or pad.sprint()) and not ads and p.stam > 4 and ml > 0.1
 	p.sprint = sprint
 	var ox: float = p.x
 	var oy: float = p.y
@@ -1458,7 +1466,7 @@ func upd_player(p: Dictionary, dt: float) -> float:
 	if mouse.active:
 		var w := s2w_g(mouse.x, mouse.y)
 		aim = atan2(w.y - p.y, w.x - p.x)
-		fire = mouse.down
+		fire = mouse.down or pad.fire()
 	if aim != null: p.ang = aim
 	elif Vector2(mx, my).length() > 0.1: p.ang = atan2(my, mx)
 	p.cd -= dt
@@ -1953,4 +1961,6 @@ class DrawLayer extends Node2D:
 	var idx := 0
 	var game
 	func _draw() -> void:
+		var t0 := Time.get_ticks_usec()
 		game.draw_layer(idx, Pen.new(self))
+		FpsCounter.draw_us += Time.get_ticks_usec() - t0   # for the frame-time readout

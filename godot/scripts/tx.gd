@@ -11,6 +11,15 @@ static var GRAIN: Texture2D
 static var glows := {}
 static var TREES: Array = []
 static var PSPR := {}   # "Kestrel" / "Kestrel_s" -> texture
+## Pre-rendered frames from a 3D model, per plane name: res://sprites/planes/<name>/pR_bNN.png.
+## R is the pitch row (0 = level, then nose up to PITCH_DEG), NN runs from full left bank (00)
+## through level to full right bank. PBANK[name] = [row][bank] textures. Planes without them use PSPR.
+static var PBANK := {}
+const BANK_DEG := 40.0    # bank angle of the outermost frame, reached at full stick (F.bank = +-1)
+const PITCH_DEG := 24.0   # nose-up angle of the last pitch row, reached at F.pitch = 1
+## Where the prop hub, wingtip lights and tail light sit in each frame (sprite units, same order
+## as the frames): points.json next to the frames, written by the render script. PPTS[name] = its data.
+static var PPTS := {}
 
 static func _grad_tex(stops: Array, size: int = 128) -> GradientTexture2D:
 	var g := Gradient.new()
@@ -57,22 +66,96 @@ static func glow(key: String) -> Texture2D:
 	return t
 
 static func bake_all(baker: Baker) -> void:
-	for v in 3:
+	for v in TREE_GREEN + TREE_WIDE + TREE_FALL:
 		TREES.append(await baker.bake(Vector2i(128, 128), func(p: Pen): _draw_tree(p, v)))
 	for P in D.PLANES:
 		PSPR[P.name] = await baker.bake(Vector2i(512, 512), func(p: Pen): _draw_plane_sprite(p, P, false))
 		PSPR[P.name + "_s"] = await baker.bake(Vector2i(512, 512), func(p: Pen): _draw_plane_sprite(p, P, true))
+		var dir: String = "res://sprites/planes/%s/" % P.name.to_lower()
+		var rows: Array = []
+		while ResourceLoader.exists(dir + "p%d_b00.png" % rows.size()):
+			var frames: Array = []
+			while ResourceLoader.exists(dir + "p%d_b%02d.png" % [rows.size(), frames.size()]):
+				frames.append(load(dir + "p%d_b%02d.png" % [rows.size(), frames.size()]))
+			rows.append(frames)
+		if rows.size() > 0 and rows[0].size() > 1: PBANK[P.name] = rows
+		if ResourceLoader.exists(dir + "points.json"):
+			var j = load(dir + "points.json")
+			if j is JSON: PPTS[P.name] = j.data
 
-static func _draw_tree(g: Pen, v: int) -> void:
-	var Rn := U.Mulberry.new(v * 99 + 5)
-	var b: Array = [[46, 70, 34], [56, 80, 38], [40, 60, 32]][v]
-	for k in 9:
+static var TREE_SHADER: Shader
+const TREE_GREEN := 10   # green tree sprites (TREES[0 .. 9])
+const TREE_WIDE := 4     # then wide-canopy greens: smaller blobs spread farther out
+const KEEP_WIDE := TREE_GREEN + TREE_WIDE - 1   # the wide canopy Greg liked: left as first drawn
+const TREE_FALL := 18    # then fall colours (red, orange, amber, yellow, deep orange, brown), three shapes each
+const FALL_HSV := [[0.01, 0.76, 0.6], [0.06, 0.66, 0.46], [0.1, 0.72, 0.62], [0.14, 0.7, 0.7], [0.075, 0.56, 0.42], [0.09, 0.42, 0.38]]
+## Picks a tree sprite from a 0..1 hash: mostly greens, about one in six wide canopies and
+## one in nine in fall colours.
+static func tree_pick(h: float) -> int:
+	var f := fmod(h * 7.13, 1.0)
+	if f < 0.11: return TREE_GREEN + TREE_WIDE + int(h * 977) % TREE_FALL
+	if f < 0.27: return TREE_GREEN + int(h * 613) % TREE_WIDE
+	return int(h * 1531) % TREE_GREEN
+
+## The base hue a tree sprite is drawn with (the first number _draw_tree takes from its seed).
+static func tree_hue(v: int) -> float:
+	if v >= TREE_GREEN + TREE_WIDE: return FALL_HSV[(v - TREE_GREEN - TREE_WIDE) % FALL_HSV.size()][0]
+	return 0.2 + U.Mulberry.new(v * 131 + 17).next() * 0.13
+
+## Tree sprites: like the original trees, overlapping soft blobs (radial gradients lit from
+## the upper left), now with a random number of blobs, many seeds and colours, wide canopies,
+## fall trees, and fine leaf grain. Each blob is painted per pixel by shaders/tree_sprite.gdshader.
+static func _draw_tree(g: Pen, v: int, shade: float = -1.0) -> void:
+	if TREE_SHADER == null: TREE_SHADER = load("res://shaders/tree_sprite.gdshader")
+	var Rn := U.Mulberry.new(v * 131 + 17)
+	var wide := v >= TREE_GREEN and v < TREE_GREEN + TREE_WIDE
+	var fall := v >= TREE_GREEN + TREE_WIDE
+	if shade < 0.0: shade = 2.2 if fall else 1.0   # how far the blobs' shades spread (fall trees most)
+	var hue := 0.2 + Rn.next() * 0.13
+	var sat := 0.42 + Rn.next() * 0.22
+	var val := 0.2 + Rn.next() * 0.12
+	if fall:
+		var fc: Array = FALL_HSV[(v - TREE_GREEN - TREE_WIDE) % FALL_HSV.size()]
+		hue = fc[0]
+		sat = fc[1] + (Rn.next() - 0.5) * 0.08
+		val = fc[2] + (Rn.next() - 0.5) * 0.06
+	var n := 10 + int(Rn.next() * 15)   # 10 to 24 blobs
+	var spread := 18.0 + Rn.next() * 12.0
+	var r0 := 15.0
+	var r1 := 17.0
+	if wide:   # many small blobs reaching out to the edge
+		n = 22 + int(Rn.next() * 7)   # 22 to 28
+		spread = 44.0 + Rn.next() * 6.0
+		if v != KEEP_WIDE: spread -= 7.0   # keep the outer blobs touching the bigger middle
+		r0 = 9.0
+		r1 = 9.0
+	var bl := PackedVector4Array()
+	var cl := PackedVector4Array()
+	for k in n:
 		var a := Rn.next() * TAU
-		var dd := Rn.next() * 24
-		var x := 64 + cos(a) * dd
-		var y := 64 + sin(a) * dd
-		var r := 22 + Rn.next() * 16
-		g.radial(x, y, [[2.0, U.rgb(b[0] + 40, b[1] + 46, b[2] + 20)], [r * 0.72, U.rgb(b[0], b[1], b[2])], [r, U.rgb(b[0] - 15, b[1] - 20, b[2] - 12, 0)]], 28, Vector2(-r * 0.35, -r * 0.35))
+		var dd := sqrt(Rn.next()) * spread
+		var r := r0 + Rn.next() * r1
+		# two big middle blobs tie the canopy together: halfway up the stack on the first wide
+		# tree (Greg liked it as it is), higher up and bigger on the others
+		var mid := n / 2 if v == KEEP_WIDE else (n * 3) / 4
+		if wide and (k == mid or k == mid + 1):
+			r = (26.0 if v == KEEP_WIDE else 31.0) + Rn.next() * 6.0
+			dd = Rn.next() * 10.0
+		dd = minf(dd, 62.0 - r)
+		bl.append(Vector4(64 + cos(a) * dd, 64 + sin(a) * dd, r, 0))
+		# shade spreads the blobs' shades around the tree's colour
+		var hk := hue + (Rn.next() - 0.5) * 0.03 * (1.0 + shade * (1.4 if fall else 0.3))   # fall trees mix neighbouring colours
+		if fall: hk = clampf(hk, maxf(hue - 0.05, -0.02), minf(hue + 0.05, 0.15))   # but never into green or pink
+		var c := Color.from_hsv(fposmod(hk, 1.0), clampf(sat + (Rn.next() - 0.5) * 0.12 * (1.0 + shade * 0.6), 0, 1), clampf(val + (Rn.next() - 0.5) * 0.06 * (1.0 + shade * 1.8), 0, 1))
+		cl.append(Vector4(c.r, c.g, c.b, 1))
+	var m := ShaderMaterial.new()
+	m.shader = TREE_SHADER
+	m.set_shader_parameter("blobs", bl)
+	m.set_shader_parameter("cols", cl)
+	m.set_shader_parameter("count", n)
+	m.set_shader_parameter("seed", v * 7 + 1)
+	g.ci.material = m
+	g.ci.draw_rect(Rect2(0, 0, 128, 128), Color.WHITE)
 
 ## Linear gradient colour lookup: stops [[t, Color]].
 static func lg(stops: Array, t: float) -> Color:

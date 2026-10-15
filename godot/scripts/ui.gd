@@ -19,11 +19,15 @@ var pal := {}
 const LIGHT := {"paper": "#ebe3cb", "panel": "#f4eedd", "panel2": "#e3d9bd", "ink": "#1f2a2e", "dim": "#5f665f", "line": "#c8bb95", "magenta": "#9b2a68", "chart": "#2f5d7c", "good": "#4d6b2a", "bad": "#a3301f", "btn": "#1f2a2e", "btnink": "#f4eedd"}
 const DARK := {"paper": "#141a1c", "panel": "#1b2326", "panel2": "#243034", "ink": "#e8e1cc", "dim": "#9aa39a", "line": "#34443f", "magenta": "#d45a9d", "chart": "#79a9c9", "good": "#9cc063", "bad": "#e3644c", "btn": "#e8e1cc", "btnink": "#141a1c"}
 
-## Testing buttons (All weapons / 1,000 rounds / All trinkets / $1,000 / 1,000 gallons / Best plane / Reveal map /
+## Testing buttons (All weapons / 1,000 rounds / All trinkets / $1,000 / Unlimited fuel toggle / 1st, 2nd, 3rd plane / Reveal map /
 ## Invulnerable toggle / 100 bombs) in exploration mode.
 ## Set to false to hide them for a release build.
 const DEBUG_BUTTONS := true
-const DBG_KEYS := ["dbg_weapons", "dbg_ammo", "dbg_trinkets", "dbg_cash", "dbg_fuel", "dbg_plane", "dbg_map", "dbg_invuln", "dbg_bombs"]
+## Test buttons are drawn at half the normal button size (Greg, 2026-10-15).
+const DBG_PAD := Vector2(6.5, 4.5)
+const DBG_FS := 7
+const DBG_R := 3
+const DBG_KEYS := ["dbg_weapons", "dbg_ammo", "dbg_trinkets", "dbg_cash", "dbg_fuel", "dbg_plane1", "dbg_plane2", "dbg_plane3", "dbg_map", "dbg_invuln", "dbg_bombs"]
 
 func P(k: String) -> Color: return Color.html(pal[k])
 
@@ -40,7 +44,7 @@ func _ready() -> void:
 	root.theme = th
 	# HUD buttons
 	for spec in [["map", "Map"], ["pause", "Pause"], ["heal", "Heal"], ["throw", "Throw bomb"], ["cruise", "Cruise ×3"], ["board", "Board plane"], ["taxi", "Taxi back to hangar"],
-			["dbg_weapons", "All Weapons"], ["dbg_ammo", "1,000 Rounds"], ["dbg_trinkets", "All Trinkets"], ["dbg_cash", "$1,000"], ["dbg_fuel", "1,000 Gallons"], ["dbg_plane", "Best Plane"], ["dbg_map", "Reveal Map"],
+			["dbg_weapons", "All Weapons"], ["dbg_ammo", "1,000 Rounds"], ["dbg_trinkets", "All Trinkets"], ["dbg_cash", "$1,000"], ["dbg_fuel", "Unlimited Fuel"], ["dbg_plane1", "1st Plane"], ["dbg_plane2", "2nd Plane"], ["dbg_plane3", "3rd Plane"], ["dbg_map", "Reveal Map"],
 			["dbg_invuln", "Invulnerable"], ["dbg_bombs", "100 Bombs"]]:
 		var b := Button.new()
 		b.text = spec[1]
@@ -49,13 +53,17 @@ func _ready() -> void:
 		var bg := Color(14 / 255.0, 18 / 255.0, 16 / 255.0, 0.72)
 		var fs := 14
 		if spec[0] == "throw": bg = Color(120 / 255.0, 40 / 255.0, 20 / 255.0, 0.8)
+		var pad := Vector2(13, 9)
+		var rad := 6
 		if spec[0].begins_with("dbg_"):
 			bg = Color(38 / 255.0, 52 / 255.0, 78 / 255.0, 0.8)   # blue-grey marks them as test-only
-			fs = 13
+			fs = DBG_FS
+			pad = DBG_PAD
+			rad = DBG_R
 		if spec[0] == "board":
 			bg = Color.html("#9b2a68")
 			fs = 16
-		_style_btn(b, bg, Color.html("#efe6cf"), Color(239 / 255.0, 230 / 255.0, 207 / 255.0, 0.25), 6, Vector2(13, 9) if spec[0] != "board" else Vector2(22, 12), fs, "600")
+		_style_btn(b, bg, Color.html("#efe6cf"), Color(239 / 255.0, 230 / 255.0, 207 / 255.0, 0.25), rad, pad if spec[0] != "board" else Vector2(22, 12), fs, "600")
 		var key: String = spec[0]
 		b.pressed.connect(func(): _hud_press(key))
 		root.add_child(b)
@@ -412,7 +420,7 @@ const HELP := [
 	["Noise", "Your landing, gunfire, running, explosions, and siphoning fuel all fill the noise meter. At each mark a new wave of the dead arrives from the edges of the map. When it fills, the horde comes and does not stop. The crossbow and machete make no noise. Loot what you can and leave in time."],
 	["On foot", "WASD to move, aim with the mouse and click to fire. Hold Shift to run, hold right mouse to aim down sights for steadier, slower aim, Space to jump, 1–5 to select Revolver, Pump shotgun, Lever rifle, Submachine gun, or Assault rifle; 6 for Double-barrel, 7 for Crossbow, Q to cycle owned weapons, H to heal, G to throw a pipe bomb, F to switch your flashlight on or off (lit at night, you are seen from much farther), E to board the plane. Jumping clears sandbags and low fences inside the site, but not cars or the outer fence, and nothing can bite you in the air. Running is loud, and some of the bodies on the ground are not dead. Walk over containers to burst them open, then collect what spills out. Rarer finds glow green, blue, or gold. Locked safes take a spare part or a bomb and hold the best loot, including trinkets with permanent perks. Houses sometimes hide stashes under loose floorboards that only show up close. Footlockers hold ammo, bombs, and armor. Registers hold cash and jewelry. Toolboxes hold spare parts for field repairs. Medicine cabinets hold bandages and antibiotics. Every airfield has a small town beside it with shops and houses to search. Roofs lift away when you step inside. Each shop stocks by its trade: the pharmacy has medicine, the hardware store has parts, the gun shop has ammo. Traders pay different prices for goods at each field. Old charts reveal fields and narrow down Haven. The dead sometimes drop rounds. When you run dry you fight with a machete. Red barrels explode when shot. Gunfire draws more of the dead the longer you stay. Night falls at 18:00, and the dead move faster in the dark. You can sleep in the cockpit from the hangar tab. Return to the plane to refuel, take jobs, and upgrade."],
 	["The goal", "Haven lies in one of the far corners of the map, across empty country no starter plane can cross. Old charts narrow down which. Earn a bigger airframe or bigger tanks first."],
-	["Keys", "M opens the chart. Esc or P pauses. Mouse wheel or + and − zoom the view, 0 resets it. Ctrl with + and − changes the interface size. F11 toggles fullscreen; Esc leaves fullscreen."]]
+	["Keys", "M opens the chart. Esc or P pauses. On foot, the mouse wheel or + and − zoom the view, 0 resets it. Ctrl with + and − changes the interface size. F11 toggles fullscreen; Esc leaves fullscreen."]]
 
 func help_content() -> void:
 	for it in HELP:
@@ -462,7 +470,7 @@ func show_settings(_from = null) -> void:
 	_clear()
 	h2("Display")
 	var gm := game
-	row("🔍", "Zoom: %d%%" % roundi(gm.zoom * 100), "How close the camera sits, in the air and on foot. Mouse wheel, or + and −.",
+	row("🔍", "Zoom: %d%%" % roundi(gm.zoom * 100), "How close the camera sits on foot. In the air it is fixed at 69%. Mouse wheel, or + and −.",
 		[["−", "alt", "zoom", -1], ["Reset", "alt", "zoom", 0], ["+", "alt", "zoom", 1]])
 	row("Aa", "Interface size: %d%%" % roundi(gm.ui_scale * 100), "Text, buttons and gauges. Ctrl with + and −.",
 		[["−", "alt", "uiscale", -1], ["Reset", "alt", "uiscale", 0], ["+", "alt", "uiscale", 1]])
@@ -681,7 +689,9 @@ func _hud_press(k: String) -> void:
 		"dbg_trinkets": gm.menu.dbg_all_trinkets()
 		"dbg_cash": gm.menu.dbg_cash()
 		"dbg_fuel": gm.menu.dbg_fuel()
-		"dbg_plane": gm.menu.dbg_best_plane()
+		"dbg_plane1": gm.menu.dbg_plane(0)
+		"dbg_plane2": gm.menu.dbg_plane(1)
+		"dbg_plane3": gm.menu.dbg_plane(2)
 		"dbg_map": gm.menu.dbg_reveal_map()
 		"dbg_invuln": gm.menu.dbg_invuln()
 		"dbg_bombs": gm.menu.dbg_bombs()
@@ -698,7 +708,7 @@ func update_buttons() -> void:
 	btns.map.visible = play
 	btns.pause.visible = play
 	btns.heal.visible = gr and (G.med > 0 or G.band > 0) and G.hp < 100
-	btns.throw.visible = gr and G.bombs > 0 and not gm.unarmed_here()
+	btns.throw.visible = false   # Greg 2026-10-13: no on-screen bomb button; throw with G
 	var ok: bool = fl and gm.flight.cruise_ok()
 	btns.cruise.visible = ok
 	if not ok and F: F.cruise = false
@@ -709,8 +719,11 @@ func update_buttons() -> void:
 	btns.board.visible = gr and S != null and S.nearPlane
 	btns.taxi.visible = fl and F.onGround and F.departing and F.spd < 3
 	var inv: bool = gm.invuln
+	var uf: bool = gm.unl_fuel
+	btns.dbg_fuel.text = "Unlimited Fuel: ON" if uf else "Unlimited Fuel"
+	btns.dbg_fuel.add_theme_stylebox_override("normal", _sb(Color(155 / 255.0, 42 / 255.0, 104 / 255.0, 0.85) if uf else Color(38 / 255.0, 52 / 255.0, 78 / 255.0, 0.8), Color.html("#d45a9d") if uf else Color(239 / 255.0, 230 / 255.0, 207 / 255.0, 0.25), 1, DBG_R, DBG_PAD))
 	btns.dbg_invuln.text = "Invulnerable: ON" if inv else "Invulnerable"
-	btns.dbg_invuln.add_theme_stylebox_override("normal", _sb(Color(155 / 255.0, 42 / 255.0, 104 / 255.0, 0.85) if inv else Color(38 / 255.0, 52 / 255.0, 78 / 255.0, 0.8), Color.html("#d45a9d") if inv else Color(239 / 255.0, 230 / 255.0, 207 / 255.0, 0.25), 1, 6, Vector2(13, 9)))
+	btns.dbg_invuln.add_theme_stylebox_override("normal", _sb(Color(155 / 255.0, 42 / 255.0, 104 / 255.0, 0.85) if inv else Color(38 / 255.0, 52 / 255.0, 78 / 255.0, 0.8), Color.html("#d45a9d") if inv else Color(239 / 255.0, 230 / 255.0, 207 / 255.0, 0.25), 1, DBG_R, DBG_PAD))
 	for k in btns: btns[k].reset_size()
 	btns.map.position = Vector2(10, vs.y - 12 - btns.map.size.y)
 	btns.pause.position = Vector2(78, vs.y - 12 - btns.pause.size.y)
@@ -721,11 +734,14 @@ func update_buttons() -> void:
 	btns.taxi.position = Vector2((vs.x - btns.taxi.size.x) / 2, vs.y - 22 - btns.taxi.size.y)
 	# testing buttons: right side, stacked under the place name
 	var dy := 54.0   # below the place name and its danger dots
+	var dw := 0.0   # one width for the whole column, so it stacks neatly
+	for k in DBG_KEYS: dw = maxf(dw, btns[k].size.x)
 	for k in DBG_KEYS:
 		var b: Button = btns[k]
 		b.visible = DEBUG_BUTTONS and gr
+		b.size.x = dw
 		b.position = Vector2(vs.x - 12 - b.size.x, dy)
-		dy += b.size.y + 6
+		dy += b.size.y + 3
 
 # ---------------------------------------------------------------- map
 func toggle_map() -> void:

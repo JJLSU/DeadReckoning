@@ -6,6 +6,8 @@ const WORLD := D.WORLD   # land size: set in data.gd
 const AIRFIELDS := 180     # airfields generated, not counting Haven (one name each in D.NAMES)
 const ROAD_COUNT := 64     # roads generated (must not exceed baker.ROAD_SLOTS / road_p[] in the shader)
 const DEADZONE := 13500.0
+const WORLD_GEN := 2          # map layout version; 2 keeps airfields out of forests
+const FOREST_MAX := 0.25      # most of an airfield's surroundings that may be forest
 # Survivor-held strips: no dead, an armed garrison, no fuel/trade/jobs.
 # Chance per strip by danger level (index = danger; 0 is Haven, 1 is the lowest tier).
 const HOSTILE_CHANCE := [0.0, 0.0, 0.1, 0.2, 0.3, 0.4]
@@ -34,6 +36,7 @@ var ROADS: Array = []
 var STORMS: Array = []
 var strips: Array = []
 var START := 0
+var GEN := WORLD_GEN   # layout version of the current world
 var TE := 0.5
 var TM := 0.5
 var game  # Game node, for G.time
@@ -228,8 +231,28 @@ func ring_center(i: int, r: float) -> Vector2:
 static func haven_dir_name() -> String:
 	return {"NE": "northeast", "NW": "northwest", "SE": "southeast", "SW": "southwest"}[HAVEN_DIR]
 
-func gen_world(seed_v: int) -> void:
+## True when an airfield here would sit in forest: forest anywhere on the runway, or
+## more than FOREST_MAX of the ground around it out to 600 units. Forest edges are fine.
+## edges false checks only the runway (a crowded map that ran short of open ground).
+func in_forest(x: float, y: float, ang: float, ln: float, edges: bool = true) -> bool:
+	var k := -1.0
+	while k <= 1.0:
+		# terr()'s forest noise alone: above 0.53 it is forest or ground no runway can use
+		if U.fbm((x + cos(ang) * ln / 2 * k) / 4500.0 + 40, (y + sin(ang) * ln / 2 * k) / 4500.0 + 40, SEED + 7, 4) > 0.53: return true
+		k += 0.125
+	if not edges: return false
+	var nf := 0
+	for r in [300.0, 600.0]:
+		for i in 12:
+			var a := i / 12.0 * TAU
+			var t := terr(x + cos(a) * r, y + sin(a) * r)
+			if t == 5 or t == 6: nf += 1
+	return nf > int(24 * FOREST_MAX)
+
+## gen 1 is the original layout, kept for runs saved before airfields avoided forest.
+func gen_world(seed_v: int, gen: int = WORLD_GEN) -> void:
 	SEED = seed_v
+	GEN = gen
 	var rng := U.Mulberry.new(SEED * 7 + 3)
 	var R := rng.next
 	# Haven sits near one of the four corners, picked at random. The same inset is used
@@ -260,7 +283,8 @@ func gen_world(seed_v: int) -> void:
 	strips = [{"id": 0, "name": "Haven", "type": "haven", "x": HAVEN.x, "y": HAVEN.y, "ang": R.call() * PI, "len": 720.0, "wid": 80.0, "fuel": true, "shop": false, "dealer": false, "danger": 0, "fuelPrice": 0, "seed": 1, "arch": "farm", "home": false}]
 	var names := U.shuffle(D.NAMES.duplicate(), R)
 	var tries := 0
-	while strips.size() < AIRFIELDS + 1 and tries < 30000:
+	var near := {}   # 2300-unit grid of placed airfields, for the spacing check
+	while strips.size() < AIRFIELDS + 1 and tries < (30000 if GEN < 2 else 120000):
 		tries += 1
 		var x: float = 1200 + R.call() * (WORLD - 2400)
 		var y: float = 1200 + R.call() * (WORLD - 2400)
@@ -268,11 +292,15 @@ func gen_world(seed_v: int) -> void:
 		for c in CORNERS:
 			if Vector2(x - c.x, y - c.y).length() < DEADZONE: ok = false
 		if not ok: continue
-		for s in strips:
-			if Vector2(s.x - x, s.y - y).length() < 2300:
-				ok = false
-				break
+		var gc := Vector2i(int(floor(x / 2300)), int(floor(y / 2300)))
+		for nx in range(gc.x - 1, gc.x + 2):
+			for ny in range(gc.y - 1, gc.y + 2):
+				for s in near.get(Vector2i(nx, ny), []):
+					if Vector2(s.x - x, s.y - y).length() < 2300: ok = false
 		if not ok: continue
+		# quick reject: where terr()'s forest noise is above 0.53 the centre is forest or
+		# some other ground an airfield can't use, so skip the full check
+		if GEN >= 2 and U.fbm(x / 4500.0 + 40, y / 4500.0 + 40, SEED + 7, 4) > 0.53: continue
 		var r: float = R.call()
 		var type := "dirt" if r < 0.52 else ("regional" if r < 0.86 else "airport")
 		var ln := 320.0 if type == "dirt" else (440.0 if type == "regional" else 600.0)
@@ -286,6 +314,7 @@ func gen_world(seed_v: int) -> void:
 				break
 			k += 0.5
 		if not ok: continue
+		if GEN >= 2 and in_forest(x, y, ang, ln, tries < 40000): continue
 		var nm: String = names[strips.size() - 1] if strips.size() - 1 < names.size() else ("Field " + str(strips.size()))
 		var sf: Array = D.SUF[type]
 		var nm2: String = nm + " " + sf[int(R.call() * sf.size())]
@@ -293,6 +322,8 @@ func gen_world(seed_v: int) -> void:
 		strips.append({"id": strips.size(), "name": nm2, "type": type, "x": x, "y": y, "ang": ang, "len": ln, "wid": wd,
 			"fuel": fuel, "shop": type != "dirt", "dealer": type == "airport",
 			"fuelPrice": 3 if type == "airport" else (4 if type == "regional" else 5), "seed": int(R.call() * 1e9), "danger": 1, "arch": "farm", "home": false})
+		if not near.has(gc): near[gc] = []
+		near[gc].append(strips[-1])
 	var best := 1e18
 	for s in strips:
 		if s.type == "haven": continue

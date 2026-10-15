@@ -609,9 +609,7 @@ static func bake_draw(g: Pen, st: Dictionary) -> void:
 			if v == 10 and not fam: g.rect(cc * TS + 5, r * TS + 7, TS, TS, Color(0, 0, 0, .3))
 			elif v == 1 or v == 15:
 				for b in band.call(cc * TS + 5, r * TS + 7, arms.call(cc, r)): g.rect(b[0], b[1], b[2], b[3], Color(0, 0, 0, .3))
-	for r in rows:
-		for cc in cols:
-			if G1[r * cols + cc] == 5: g.ellipse((cc + .5) * TS + 9, (r + .5) * TS + 12, 30, 24, 0, U.rgb(10, 18, 8, .33))
+	# (tree shadows are drawn live from the sun: render.gd foot_tree_shadows)
 	for r in rows:
 		for cc in cols:
 			var v := G1[r * cols + cc]

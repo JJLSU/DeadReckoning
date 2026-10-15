@@ -1129,7 +1129,7 @@ func sv_fire(v: Dictionary, spread: float = 1.0) -> void:
 	var spr: float = float(w.spr) * (steady if int(w.pel) == 1 else 1.0)
 	for k in int(w.pel):
 		var a: float = aim + (randf() - 0.5) * spr * 2.0
-		gm.S.bul.append({"x": v.x + cos(a) * 14, "y": v.y + sin(a) * 14, "vx": cos(a) * w.spd, "vy": sin(a) * w.spd,
+		gm.S.bul.append({"x": v.x + cos(a) * 14, "y": v.y + sin(a) * 14, "vx": cos(a) * w.spd * 0.65, "vy": sin(a) * w.spd * 0.65,
 			"life": w.life, "dmg": dmg, "pl": false, "kb": 0.0, "bolt": w.bolt})
 	gm.sfx("bow" if w.silent else "enemy")
 	if not w.silent: gm.add_noise(float(w.noise) * SV_SHOT_NOISE)

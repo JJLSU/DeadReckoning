@@ -141,15 +141,16 @@ vec3 colr(int t, float x, float y, float e, float sh) {
 			float f2 = (vnoise(x / 18.0, y / 18.0, seed + 37) - 0.5) * 14.0;
 			c = vec3(78.0 + tn * 20.0 + f2, 98.0 + tn * 14.0 + f2, 52.0 + tn * 6.0 + f2 * 0.4);
 		} else {
-			vec3 base = t == 5 ? vec3(62.0, 84.0, 46.0) : vec3(44.0, 62.0, 36.0);
+			// forest floor in deep shade under a closed canopy, so gaps between crowns read dark
+			vec3 base = t == 5 ? vec3(10.0, 14.0, 8.0) : vec3(6.0, 9.0, 5.0);
 			float k = (vnoise(x / 46.0, y / 46.0, seed + 23) - 0.5) * 0.75 + (vnoise(x / 15.0, y / 15.0, seed + 29) - 0.5) * 0.32 + (tn - 0.5) * 0.15;
-			c = base * (1.0 + k);
+			c = base * (1.0 + k) * (0.75 + vnoise(x / 7.0, y / 7.0, seed + 27) * 0.5);
 			float au = vnoise(x / 650.0, y / 650.0, seed + 131);
 			if (au > 0.58) {
 				float a = clamp((au - 0.58) / 0.12, 0.0, 1.0) * 0.72;
-				float pk = hsh(int(floor(x / 56.0)), int(floor(y / 56.0)), seed + 133);
+				float pk = vnoise(x / 70.0, y / 70.0, seed + 133);   // fallen leaves, smooth under the canopy
 				vec3 cc = pk < 0.33 ? vec3(128.0, 78.0, 36.0) : (pk < 0.66 ? vec3(146.0, 118.0, 46.0) : vec3(112.0, 52.0, 34.0));
-				c = mix(c, cc * (1.0 + k), a);
+				c = mix(c, cc * (t == 5 ? 0.13 : 0.1) * (1.0 + k), a);
 			}
 		}
 	} else if (t == 4) {
@@ -223,5 +224,9 @@ void fragment() {
 		sh = clamp((pe - te) * 95.0, -0.36, 0.36);
 	}
 	vec3 c = colr(t, w.x, w.y, te, sh);
+	if (t == 5) {   // the dark forest floor shades in from the grass instead of a hard edge
+		float ed = clamp((tm - 0.53) / 0.03, 0.0, 1.0);
+		if (ed < 1.0) c = mix(colr(3, w.x, w.y, te, sh), c, ed * ed * (3.0 - 2.0 * ed));
+	}
 	COLOR = vec4(clamp(c / 255.0, 0.0, 1.0), 1.0);
 }

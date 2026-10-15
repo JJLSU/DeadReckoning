@@ -22,7 +22,7 @@ func takeoff() -> void:
 	var wa := randf() * TAU
 	var ws := randf() * 22
 	gm.F = {"x": s.x - cos(a) * (s.len / 2 - 30), "y": s.y - sin(a) * (s.len / 2 - 30), "hdg": a, "spd": 0.0, "alt": 0.0, "vs": 0.0, "thr": 0.0, "onGround": true, "departing": true,
-		"rollStrip": s, "bank": 0.0, "prop": 0.0, "storm": 0.0, "tb": 0.0, "tracers": [], "underFire": 0.0, "flash": 0.0, "gx": 0.0, "gy": 0.0, "gfT": 0.0,
+		"rollStrip": s, "bank": 0.0, "bankV": 0.0, "pitch": 0.0, "prop": 0.0, "storm": 0.0, "tb": 0.0, "tracers": [], "underFire": 0.0, "flash": 0.0, "gx": 0.0, "gy": 0.0, "gfT": 0.0,
 		"wind": Vector2(cos(wa) * ws, sin(wa) * ws), "trk": a, "cruise": false, "crashed": false, "assist": false, "inStorm": false, "warnedFire": false, "evT": 60 + randf() * 50, "autothr": false}
 	gm.mode = "flight"
 	gm._free_site()
@@ -33,7 +33,7 @@ func takeoff() -> void:
 	gm.toast("Throttle up to take off. Keep it on the runway.")
 
 func _thr_touch() -> bool:
-	return gm.key(KEY_W) or gm.key(KEY_S) or gm.key(KEY_UP) or gm.key(KEY_DOWN) or (gm.ptrs.has(0) and gm.ptrs[0].role == "thr")
+	return gm.key(KEY_W) or gm.key(KEY_S) or gm.key(KEY_UP) or gm.key(KEY_DOWN) or (gm.ptrs.has(0) and gm.ptrs[0].role == "thr") or gm.pad.thr_input() != 0.0
 
 func upd_flight(dt: float) -> void:
 	gm.G.time += dt
@@ -43,6 +43,7 @@ func upd_flight(dt: float) -> void:
 	if gm.key(KEY_D) or gm.key(KEY_RIGHT): steer += 1
 	for p in gm.ptrs.values():
 		if p.role == "steer": steer += clampf((p.x - p.sx) / 70.0, -1, 1)
+	steer += gm.pad.steer()
 	steer = clampf(steer, -1, 1)
 	gm.F.assist = false
 	if LANDING_ASSIST and gm.F.onGround and gm.F.rollStrip and absf(steer) < 0.05 and gm.F.spd > 3:
@@ -85,8 +86,9 @@ func upd_flight(dt: float) -> void:
 						gm.F.autothr = true
 	if gm.key(KEY_W) or gm.key(KEY_UP): gm.F.thr = minf(1, gm.F.thr + 0.55 * dt)
 	if gm.key(KEY_S) or gm.key(KEY_DOWN): gm.F.thr = maxf(0, gm.F.thr - 0.55 * dt)
+	gm.F.thr = clampf(gm.F.thr + gm.pad.thr_input() * 0.55 * dt, 0, 1)   # controller triggers
 	var eff: float = gm.F.thr if gm.G.fuel > 0 else 0.0
-	if gm.G.fuel > 0: gm.G.fuel = maxf(0, gm.G.fuel - P.burn * (0.15 + 0.85 * gm.F.thr) * dt)
+	if gm.G.fuel > 0 and not gm.unl_fuel: gm.G.fuel = maxf(0, gm.G.fuel - P.burn * (0.15 + 0.85 * gm.F.thr) * dt)
 	var target: float = eff * P.max
 	if gm.F.onGround:
 		if target > gm.F.spd: gm.F.spd += (target - gm.F.spd) * 0.25 * dt
@@ -94,8 +96,16 @@ func upd_flight(dt: float) -> void:
 	else:
 		gm.F.spd += (target - gm.F.spd) * (0.28 if target > gm.F.spd else 0.3) * dt
 	var turnK: float = clampf(gm.F.spd / 30.0, 0, 1) * 0.7 if gm.F.onGround else 1.0
-	gm.F.bank = lerpf(gm.F.bank, 0.0 if gm.F.onGround else steer, minf(1, dt * 4))
-	gm.F.hdg += steer * P.turn * turnK * dt
+	# Bank follows the stick on a critically damped spring, so it eases in and out instead of snapping.
+	# Rolling back toward level is a little slower than rolling into a turn.
+	var bt: float = 0.0 if gm.F.onGround else steer
+	var w: float = 3.5 if absf(bt) > absf(gm.F.bank) and bt * gm.F.bank >= 0 else 2.6
+	var bv: float = gm.F.get("bankV", 0.0)
+	bv += (w * w * (bt - gm.F.bank) - 2 * w * bv) * dt
+	gm.F["bankV"] = bv
+	gm.F.bank = clampf(gm.F.bank + bv * dt, -1, 1)
+	# In the air the turn rate follows the bank (full bank = full rate), so turns build up as the plane rolls in.
+	gm.F.hdg += (steer if gm.F.onGround else gm.F.bank) * P.turn * turnK * dt
 	gm.F.prop += dt * (eff * 40 + 2)
 	var altT := clampf((gm.F.spd - P.stall) / (P.cruise - P.stall) * 100, -80, 120)
 	if gm.F.onGround:
@@ -105,12 +115,16 @@ func upd_flight(dt: float) -> void:
 			gm.G.stats.flights += 1
 			gm.toast("Airborne.")
 	else:
-		gm.F.vs = maxf(clampf((altT - gm.F.alt) * 1.3, -48, 22), -(5 + gm.F.alt * 0.55))
+		gm.F.vs = climb_vs(P, altT, gm.F.alt)
 		gm.F.alt += gm.F.vs * dt
+	# Nose comes up while climbing (full pitch at a climb rate of 18 and above) and eases back down.
+	var pitch_t: float = 0.0 if gm.F.onGround else clampf(gm.F.vs / 18.0, 0, 1)
+	gm.F["pitch"] = lerpf(gm.F.get("pitch", 0.0), pitch_t, minf(1, dt * 1.5))
+	if not gm.F.onGround:
 		if gm.F.alt <= 0:
 			touchdown(P)
 			if gm.uist != "" or gm.F == null or gm.mode != "flight": return
-	if gm.G.leak > 0 and gm.G.fuel > 0: gm.G.fuel = maxf(0, gm.G.fuel - gm.G.leak * dt)
+	if gm.G.leak > 0 and gm.G.fuel > 0 and not gm.unl_fuel: gm.G.fuel = maxf(0, gm.G.fuel - gm.G.leak * dt)
 	var st := gm.wd.storm_at(gm.F.x, gm.F.y)
 	gm.F.storm = 0.0 if gm.F.onGround else st.k
 	gm.F.gx = 0.0; gm.F.gy = 0.0
@@ -271,6 +285,14 @@ func approach_info():
 	best.phase = "early" if slack > 220 else ("now" if slack >= -220 else ("late" if best.canMake else "high"))
 	return best
 
+## Vertical speed toward the altitude the airspeed supports, scaled by the plane's "climb_k" when
+## climbing and "descend_k" when descending (D.PLANES; Greg 2026-10-14: the Albatross takes about
+## twice as long to climb out and 1.5x as long to come down).
+static func climb_vs(P: Dictionary, altT: float, alt: float) -> float:
+	var v := clampf((altT - alt) * 1.3, -48, 22)
+	if v > 0: return v * P.get("climb_k", 1.0)
+	return maxf(v, -(5 + alt * 0.55)) * P.get("descend_k", 1.0)
+
 func predict_touchdown(thrO: float = -1.0):
 	var P := gm.PS()
 	var x: float = gm.F.x
@@ -289,7 +311,7 @@ func predict_touchdown(thrO: float = -1.0):
 		var dt := 0.1
 		spd += (tg - spd) * (0.28 if tg > spd else 0.3) * dt
 		var altT := clampf((spd - st) / (cr - st) * 100, -80, 120)
-		vs = maxf(clampf((altT - alt) * 1.3, -48, 22), -(5 + alt * 0.55))
+		vs = climb_vs(P, altT, alt)
 		alt += vs * dt
 		x += c * spd * dt + wx * dt
 		y += n * spd * dt + wy * dt

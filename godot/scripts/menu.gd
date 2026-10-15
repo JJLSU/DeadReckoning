@@ -176,9 +176,10 @@ func dbg_all_trinkets() -> void:
 	gm.sfx("click")
 	gm.toast("Testing: all %d trinkets added." % D.TRINKETS.size(), "good")
 
-func dbg_best_plane() -> void:
+## Testing: switch to plane i of D.PLANES (0 Kestrel, 1 Heron, 2 Albatross) with every upgrade and full tanks.
+func dbg_plane(i: int) -> void:
 	if gm.G == null: return
-	gm.G.plane = D.PLANES.size() - 1
+	gm.G.plane = i
 	gm.G.tanks = int(D.PLANES[gm.G.plane].tankMax)
 	gm.G.engine = gm.MAX_ENGINE
 	gm.G.fuel = gm.PS().fuelCap
@@ -216,10 +217,9 @@ func dbg_bombs() -> void:
 	gm.toast("Testing: +100 bombs (%d total)." % gm.G.bombs, "good")
 
 func dbg_fuel() -> void:
-	if gm.G == null: return
-	gm.G.carried += 1000.0
+	gm.unl_fuel = not gm.unl_fuel
 	gm.sfx("click")
-	gm.toast("Testing: +1,000 gal in cans (%d total)." % int(floor(gm.G.carried)), "good")
+	gm.toast("Testing: unlimited fuel %s." % ("ON, the plane burns none" if gm.unl_fuel else "off"), "good")
 
 # ======================================================================
 # menu actions
@@ -308,7 +308,7 @@ func act(a: String, v = null) -> void:
 			gm.ui.close_ui()
 			gm.ui.open_pause()
 			gm.toast("Difficulty: %s. It takes full effect at the next airfield." % D.DIFFS[gm.G.diff].name, "mag")
-		"takeoff": gm.flight.takeoff()
+		"takeoff": Boarding.board(gm)   # fades to black and preloads the flight view first
 		"pour":
 			var n := minf(gm.G.carried, P.fuelCap - gm.G.fuel)
 			gm.G.fuel += n
@@ -428,9 +428,9 @@ func show_title() -> void:
 		gm.old_save_warned = true
 		gm.toast_later(0.6, "Your saved run is from the old, smaller map and can't be continued. Start a new run to play on the new map.", "bad")
 
-func _regen_world(seed_v: int) -> void:
+func _regen_world(seed_v: int, gen: int = World.WORLD_GEN) -> void:
 	gm.wd.PAD = gm.OCEAN_PAD
-	gm.wd.gen_world(seed_v)
+	gm.wd.gen_world(seed_v, gen)
 	gm.baker.set_world(gm.wd)
 	gm.TCACHE.clear()
 	gm.baker.build_overview(gm.OCEAN_PAD)
@@ -453,7 +453,9 @@ func start_new() -> void:
 
 func resume_from(st: Dictionary) -> void:
 	st = normalize(st)
-	if gm.baker.overview == null or int(st.seed) != gm.wd.SEED: _regen_world(int(st.seed))
+	# runs saved before airfields avoided forest have no wgen and keep the old layout
+	var wg := int(st.get("wgen", 1))
+	if gm.baker.overview == null or int(st.seed) != gm.wd.SEED or wg != gm.wd.GEN: _regen_world(int(st.seed), wg)
 	gm.G = st
 	for kv in [["time", 420.0], ["hull", 100.0], ["leak", 0.0], ["roadStrips", []], ["trinkets", []], ["diff", 1], ["band", 0], ["parts", 0], ["bombs", 0], ["armor", 0.0], ["rings", []], ["goods", {}], ["looted", {}], ["visits", {}], ["mayday", null], ["offers", []]]:
 		if not gm.G.has(kv[0]) or (gm.G[kv[0]] == null and kv[1] != null): gm.G[kv[0]] = kv[1]
@@ -485,7 +487,7 @@ func display_input(e: InputEvent) -> bool:
 		var zin: bool = c == KEY_EQUAL or c == KEY_KP_ADD
 		var zout: bool = c == KEY_MINUS or c == KEY_KP_SUBTRACT
 		var zreset: bool = c == KEY_0 or c == KEY_KP_0
-		if zin or zout or zreset:
+		if (zin or zout or zreset) and (ctrl or gm.mode != "flight"):   # the flight zoom is fixed
 			if ctrl:
 				set_ui_scale(1.0 if zreset else gm.ui_scale + (UI_STEP if zin else -UI_STEP))
 			else:
@@ -497,7 +499,7 @@ func display_input(e: InputEvent) -> bool:
 			set_fullscreen(not gm.fullscreen)
 			gm.ui.refresh_settings()
 			return true
-	elif e is InputEventMouseButton and e.pressed and gm.uist == "":
+	elif e is InputEventMouseButton and e.pressed and gm.uist == "" and (e.ctrl_pressed or gm.mode != "flight"):
 		if e.button_index == MOUSE_BUTTON_WHEEL_UP or e.button_index == MOUSE_BUTTON_WHEEL_DOWN:
 			var up: bool = e.button_index == MOUSE_BUTTON_WHEEL_UP
 			if e.ctrl_pressed: set_ui_scale(gm.ui_scale + (UI_STEP if up else -UI_STEP))

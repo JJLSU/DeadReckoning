@@ -166,21 +166,23 @@ func dashed(x0: float, y0: float, x1: float, y1: float, col: Color, lw: float, d
 
 func dashed_arc(x: float, y: float, r: float, a0: float, a1: float, col: Color, lw: float, dash: float, gap: float) -> void:
 	if r <= 0: return
-	var circ := r * absf(a1 - a0)
+	# every dash goes into one multiline draw (one draw call instead of one per dash)
 	var step := (dash + gap) / r
 	var a := a0
 	var cnt := 0
+	var pts := PackedVector2Array()
 	while a < a1 and cnt < 400:
 		var e := minf(a1, a + dash / r)
 		var n := maxi(2, int((e - a) * r / 6.0) + 2)
-		var pts := PackedVector2Array()
-		for i in n:
+		var prev := Vector2(x + cos(a) * r, y + sin(a) * r)
+		for i in range(1, n):
 			var q := a + (e - a) * i / (n - 1)
-			pts.append(Vector2(x + cos(q) * r, y + sin(q) * r))
-		ci.draw_polyline(pts, c(col), lw, true)
+			var p := Vector2(x + cos(q) * r, y + sin(q) * r)
+			pts.append(prev); pts.append(p)
+			prev = p
 		a += step
 		cnt += 1
-	if circ < 0: pass
+	if pts.size() >= 2: ci.draw_multiline(pts, c(col), lw, true)
 
 func rr_pts(x: float, y: float, w: float, h: float, r: float) -> PackedVector2Array:
 	r = minf(r, minf(w, h) / 2.0)
