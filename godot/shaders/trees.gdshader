@@ -8,6 +8,8 @@ shader_type canvas_item;
 // draw_fog). It goes over the ground, trees and buildings and under the plane.
 // And custom = (centre x, centre y, -2, 0) is a terrain chunk: its texture gets fine detail
 // (grain, clumps and a little relief lit by the sun) that fades in near the ground.
+// custom = (0, 0, -3, 0) is the Failsafe farm (failsafe.gd): each pixel traces the line of
+// sight through the farm's height map, then lights what it finds with the sun.
 uniform vec2 cam;          // camera centre, world units
 uniform float eye = 1000.0; // camera height above the ground, world units
 uniform vec2 trot = vec2(1.0, 0.0);    // cos/sin turn so the sprite's lit side faces the sun
@@ -37,6 +39,23 @@ uniform vec3 haze_col : source_color = vec3(0.7, 0.77, 0.86);
 uniform float detail = 0.0;             // 0..1, terrain detail strength (rises near the ground)
 uniform float chunk_w = 1025.0;         // terrain chunk quad size, world units
 uniform float fmist = 0.0;              // 0..1, forest mist lying under the treetops
+uniform float t3_a = 1.0;               // opacity of the 3D-rendered test trees (render.gd T3D)
+
+// Failsafe farm (failsafe.gd). Lengths in world units, in the farm's own frame.
+uniform sampler2D farm_col : filter_linear_mipmap, repeat_disable;   // seen from above, even sky light
+uniform sampler2D farm_hgt : filter_linear, repeat_disable;          // height, 0..1 of farm_h
+uniform sampler2D farm_wall : filter_linear_mipmap, repeat_disable;  // walls from 8 sides, 4 x 2
+uniform vec2 farm_size = vec2(267.0, 207.0);
+uniform vec2 farm_q = vec2(300.0);      // quad size
+uniform vec2 farm_cam;                  // camera
+uniform vec2 farm_sun = vec2(0.3, 0.5); // shadow offset per unit of height
+uniform float farm_h = 48.0;            // top of the height map
+uniform float farm_shear = 0.7;         // wall views: sideways shift per unit of height
+uniform float farm_gain = 1.0;
+uniform float farm_sat = 1.0;
+uniform sampler2D farm_shd : filter_linear, repeat_disable;   // sun shadows on the farm's surface (farm_shadow.gdshader)
+uniform vec4 farm_shd_area = vec4(0.0, 0.0, 1.0, 1.0);        // what farm_shd covers: corner xy, size zw
+uniform float farm_shd_ok = 0.0;                               // 1 once farm_shd has been made
 
 varying vec2 wpos;
 varying float fogm;
@@ -111,14 +130,129 @@ vec3 detail_at(vec3 c, vec2 p) {
 	return mix(c, d, detail * (1.0 - water));
 }
 
+float farm_ht(vec2 q) {
+	vec2 uv = q / farm_size + 0.5;
+	if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) return 0.0;
+	return textureLod(farm_hgt, uv, 0.0).r * farm_h;
+}
+
+// The ground point whose height-h top shows at p (render.gd lift(), backwards).
+vec2 farm_back(vec2 p, float h) {
+	return farm_cam + (p - farm_cam) / (1.0 + h / max(eye - h, eye * 0.25));
+}
+
+vec4 farm_at(vec2 p) {
+	vec2 g0 = dFdx(p) / farm_size;
+	vec2 g1 = dFdy(p) / farm_size;
+	// nothing to draw where neither the line of sight nor the sun's ray can reach the farm
+	vec2 top = farm_back(p, farm_h);
+	vec2 sp = p - farm_sun * farm_h;
+	vec2 bmin = min(min(top, p), sp);
+	vec2 bmax = max(max(top, p), sp);
+	vec2 fh = farm_size * 0.5;
+	if (bmax.x < -fh.x || bmax.y < -fh.y || bmin.x > fh.x || bmin.y > fh.y) return vec4(0.0);
+	// walk the line of sight down from the top of the height map until it goes under the surface,
+	// in steps of about 1.5 units of lean (few near the middle of the view, where tops barely lean)
+	int N = clamp(int(length(p - top) / 1.5), 4, 48);
+	float hp = farm_h;
+	float dp = farm_h - farm_ht(farm_back(p, farm_h));
+	float hc = 0.0;
+	float dc = 0.0;
+	for (int i = 1; i <= N; i++) {
+		hc = farm_h * (1.0 - float(i) / float(N));
+		dc = hc - farm_ht(farm_back(p, hc));
+		if (dc <= 0.0) break;
+		hp = hc;
+		dp = dc;
+	}
+	float lo = hc, hi = hp;
+	for (int i = 0; i < 5; i++) {
+		float m = 0.5 * (lo + hi);
+		if (m - farm_ht(farm_back(p, m)) <= 0.0) lo = m; else hi = m;
+	}
+	float h = 0.5 * (lo + hi);
+	vec2 q = farm_back(p, h);
+	vec2 uv = q / farm_size + 0.5;
+	vec2 ld = normalize(p - farm_cam + vec2(0.0001, 0.0));   // the way tops lean, away from the eye
+	// a wall when the surface keeps rising just beyond the hit, into the building
+	bool wall = farm_ht(q + ld * 1.5) - h > 2.0;
+	vec4 c;
+	vec3 nrm = vec3(0.0, 0.0, 1.0);
+	vec3 l = normalize(vec3(-farm_sun, 1.0));
+	if (wall) {
+		// walls: from the two side views nearest this line of sight
+		float a = atan(ld.y, ld.x) / 0.785398;
+		a = mod(a + 8.0, 8.0);
+		int j0 = int(floor(a)) % 8;
+		int j1 = (j0 + 1) % 8;
+		float f = fract(a);
+		vec4 cs[2];
+		for (int k = 0; k < 2; k++) {
+			int j = k == 0 ? j0 : j1;
+			float th = float(j) * 0.785398;
+			vec2 w = (q + vec2(cos(th), sin(th)) * farm_shear * h) / farm_size + 0.5;
+			w = clamp(w, vec2(0.002), vec2(0.998));
+			vec2 au = (vec2(float(j % 4), float(j / 4)) + w) / vec2(4.0, 2.0);
+			cs[k] = textureGrad(farm_wall, au, g0 / vec2(4.0, 2.0), g1 / vec2(4.0, 2.0));
+		}
+		c = mix(cs[0], cs[1], f);
+		nrm = vec3(-ld, 0.0);
+	} else {
+		c = textureGrad(farm_col, uv, g0, g1);
+		float e = farm_size.x / float(textureSize(farm_hgt, 0).x);
+		float hx = farm_ht(q + vec2(e, 0.0)) - farm_ht(q - vec2(e, 0.0));
+		float hy = farm_ht(q + vec2(0.0, e)) - farm_ht(q - vec2(0.0, e));
+		if (abs(hx) < 3.0 * e && abs(hy) < 3.0 * e) nrm = normalize(vec3(-hx, -hy, 2.0 * e));
+	}
+	if (uv.x < 0.0 || uv.y < 0.0 || uv.x > 1.0 || uv.y > 1.0) c.a = 0.0;
+	// sun: slopes and walls turned to it are brighter, then shadows from the height map
+	float lit = 1.0 + 0.7 * (dot(nrm, l) - (wall ? 0.0 : l.z));
+	lit = mix(1.0, clamp(lit, 0.6, 1.3), sun_a);
+	float sh = 0.0;
+	vec2 su = (q - farm_shd_area.xy) / farm_shd_area.zw;
+	if (sun_a > 0.01 && !wall && farm_shd_ok > 0.5) {
+		// roofs and ground: read the shadows made once for this sun (Failsafe._bake_shadow)
+		if (su.x >= 0.0 && su.y >= 0.0 && su.x <= 1.0 && su.y <= 1.0) sh = textureLod(farm_shd, su, 0.0).r;
+	} else if (sun_a > 0.01) {
+		// walls (and before that texture exists): march toward the sun here
+		// step about 2 units along the ground so thin things (poles, silos) still cast whole shadows
+		float top = farm_h - h;
+		int n = clamp(int(length(farm_sun) * top / 2.0), 8, 64);
+		float t0 = wall ? 3.0 : 0.6;
+		for (int i = 1; i <= n && sh == 0.0; i++) {
+			float t = t0 + top * float(i) / float(n);
+			if (farm_ht(q - farm_sun * t) > h + t + 0.3) sh = 1.0;
+		}
+	}
+	float sa = 0.5 * sun_a * sh; if (farm_gain > 5.0) return vec4(sh, h / farm_h, wall ? 1.0 : 0.0, 1.0);
+	float lum = dot(c.rgb, vec3(0.299, 0.587, 0.114));
+	vec3 rgb = mix(vec3(lum), c.rgb, farm_sat) * farm_gain * lit * (1.0 - sa);
+	float a = c.a + sa * (1.0 - c.a);
+	return vec4(rgb * c.a / max(a, 0.001), a);
+}
+
 void vertex() {
 	float r = INSTANCE_CUSTOM.w;
 	fogm = 0.0;
-	if (r > 500.0) {   // forest mist puff: leans like a canopy at its height, mist coloured
+	if (r > 200.0 && r < 400.0) {   // 3D-rendered tree layer: leans like a canopy, solid, own colours
+		vec2 v = VERTEX;
+		float k = (r - 300.0) / max(eye - INSTANCE_CUSTOM.z, eye * 0.25);
+		VERTEX = vec2(v.x * trot.x - v.y * trot.y, v.x * trot.y + v.y * trot.x) + (INSTANCE_CUSTOM.xy - cam) * k;
+		COLOR.a *= t3_a;
+	} else if (r < -200.0 && r > -400.0) {   // 3D-rendered tree shadow: its silhouette along the sun
+		float q = -(r + 300.0);
+		vec2 v = VERTEX;
+		v.x *= 1.0 + sun_len * q * 0.65;
+		VERTEX = vec2(v.x * sun_dir.x - v.y * sun_dir.y, v.x * sun_dir.y + v.y * sun_dir.x) + sun * q * 0.675;
+		COLOR.a *= t3_a * sun_a;
+	} else if (r > 500.0) {   // forest mist puff: leans like a canopy at its height, mist coloured
 		vec2 v = VERTEX;
 		float k = (r - 1000.0) / max(eye - INSTANCE_CUSTOM.z, eye * 0.25);
 		VERTEX = v + (INSTANCE_CUSTOM.xy - cam) * k;
 		COLOR = vec4(mist_col, fmist * 0.5 * mist_fade);
+	} else if (r == 0.0 && INSTANCE_CUSTOM.z < -2.5) {
+		fogm = 4.0;
+		wpos = VERTEX * farm_q;
 	} else if (r == 0.0 && INSTANCE_CUSTOM.z < -1.5) {
 		fogm = 2.0;
 		wpos = INSTANCE_CUSTOM.xy + VERTEX * chunk_w;
@@ -141,7 +275,8 @@ void vertex() {
 }
 
 void fragment() {
-	if (fogm > 2.5) {
+	if (fogm > 3.5) COLOR = farm_at(wpos);
+	else if (fogm > 2.5) {
 		COLOR.a = min(1.0, COLOR.a * mix(canopy_core, canopy_rim, smoothstep(0.0, 0.9, length(UV - 0.5) * 2.0)));
 		float lum = dot(COLOR.rgb, vec3(0.299, 0.587, 0.114));
 		COLOR.rgb = clamp(mix(vec3(lum), COLOR.rgb, canopy_sat) * canopy_bright, 0.0, 1.0);

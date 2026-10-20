@@ -94,6 +94,7 @@ func event(e: InputEvent) -> bool:
 			JOY_BUTTON_A: gm.jump()
 			JOY_BUTTON_B: gm.heal()
 			JOY_BUTTON_X, JOY_BUTTON_DPAD_RIGHT: gm.swap_weapon()
+			JOY_BUTTON_DPAD_LEFT: gm.start_reload()
 			JOY_BUTTON_Y:
 				if gm.S.nearPlane: gm.ui.open_menu()
 			JOY_BUTTON_RIGHT_SHOULDER: gm.throw_bomb()

@@ -10,6 +10,14 @@ static var LPUFF: Texture2D
 static var GRAIN: Texture2D
 static var glows := {}
 static var TREES: Array = []
+## On foot: the original three tree sprites (Greg, 2026-10-15: on-foot trees back as they were).
+static var FOOT_TREES: Array = []
+## Trees rendered from 3D models in Blender (Environments thread, 2026-10-18, a test for Greg):
+## per tree [full, low, middle, top] sprites from res://sprites/trees3d/t<i>_<layer>.png. The full
+## one is its shadow silhouette; the three height layers stack and lean in flight.
+static var T3D: Array = []
+const T3D_N := 9
+const T3D_FALL := 6   # trees from this index on are fall colours
 static var PSPR := {}   # "Kestrel" / "Kestrel_s" -> texture
 ## Pre-rendered frames from a 3D model, per plane name: res://sprites/planes/<name>/pR_bNN.png.
 ## R is the pitch row (0 = level, then nose up to PITCH_DEG), NN runs from full left bank (00)
@@ -65,9 +73,32 @@ static func glow(key: String) -> Texture2D:
 	glows[key] = t
 	return t
 
+## A PNG as a texture: imported if Godot has imported it, else read straight from the file.
+static func _png(path: String) -> Texture2D:
+	if ResourceLoader.exists(path): return load(path)
+	var img := Image.load_from_file(ProjectSettings.globalize_path(path))
+	return ImageTexture.create_from_image(img) if img else null
+
+## A 3D tree layer with its see-through edge pixels coloured like their neighbours and with
+## mipmaps, so it shrinks smoothly from altitude instead of turning jagged (draw layer 0
+## samples with mipmaps; Greg, 2026-10-18).
+static func _smooth(t: Texture2D) -> Texture2D:
+	var img := t.get_image()
+	if img == null: return t
+	if img.is_compressed(): img.decompress()
+	img.fix_alpha_edges()
+	img.generate_mipmaps()
+	return ImageTexture.create_from_image(img)
+
 static func bake_all(baker: Baker) -> void:
 	for v in TREE_GREEN + TREE_WIDE + TREE_FALL:
 		TREES.append(await baker.bake(Vector2i(128, 128), func(p: Pen): _draw_tree(p, v)))
+	for v in 3:
+		FOOT_TREES.append(await baker.bake(Vector2i(128, 128), func(p: Pen): _draw_foot_tree(p, v)))
+	for i in T3D_N:
+		var t := []
+		for n in ["full", "l0", "l1", "l2"]: t.append(_png("res://sprites/trees3d/t%d_%s.png" % [i, n]))
+		if not t.has(null): T3D.append(t.map(_smooth))
 	for P in D.PLANES:
 		PSPR[P.name] = await baker.bake(Vector2i(512, 512), func(p: Pen): _draw_plane_sprite(p, P, false))
 		PSPR[P.name + "_s"] = await baker.bake(Vector2i(512, 512), func(p: Pen): _draw_plane_sprite(p, P, true))
@@ -156,6 +187,18 @@ static func _draw_tree(g: Pen, v: int, shade: float = -1.0) -> void:
 	m.set_shader_parameter("seed", v * 7 + 1)
 	g.ci.material = m
 	g.ci.draw_rect(Rect2(0, 0, 128, 128), Color.WHITE)
+
+## The original on-foot tree: nine soft green blobs.
+static func _draw_foot_tree(g: Pen, v: int) -> void:
+	var Rn := U.Mulberry.new(v * 99 + 5)
+	var b: Array = [[46, 70, 34], [56, 80, 38], [40, 60, 32]][v]
+	for k in 9:
+		var a := Rn.next() * TAU
+		var dd := Rn.next() * 24
+		var x := 64 + cos(a) * dd
+		var y := 64 + sin(a) * dd
+		var r := 22 + Rn.next() * 16
+		g.radial(x, y, [[2.0, U.rgb(b[0] + 40, b[1] + 46, b[2] + 20)], [r * 0.72, U.rgb(b[0], b[1], b[2])], [r, U.rgb(b[0] - 15, b[1] - 20, b[2] - 12, 0)]], 28, Vector2(-r * 0.35, -r * 0.35))
 
 ## Linear gradient colour lookup: stops [[t, Color]].
 static func lg(stops: Array, t: float) -> Color:

@@ -73,6 +73,7 @@ var ui: UI
 # Systems split out of this script; each keeps a reference back to the game (gm).
 var survivors := Survivors.new(self)
 var farm := FarmFolk.new(self)   # family farm folk and pets
+var fields := Fields.new(self)   # clearing and settling hostile fields
 var pad = preload("res://scripts/pad.gd").new(self)   # game controller input
 var blasts := Blasts.new(self)
 var flight := Flight.new(self)
@@ -91,6 +92,7 @@ var mode := "title"
 var torch := false      # flashlight on? (F)
 var unl_fuel := false   # testing: the Unlimited Fuel toggle (debug buttons); the plane burns and leaks nothing
 var invuln := false     # testing: the Invulnerable toggle (debug buttons); you take no damage
+var unl_ammo := false   # testing: the Unlimited Ammo toggle (debug buttons); guns never run dry
 var uist := "title"     # current overlay: "" (none), title, menu, pause, map, dead, win
 var menu_tab := "contracts"
 var known := {}
@@ -146,6 +148,7 @@ func _ready() -> void:
 		var l := DrawLayer.new()
 		l.idx = i
 		l.game = self
+		if i == 0: l.texture_filter = CanvasItem.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS   # only textures that have mipmaps (the 3D trees) use them
 		if i == 1 or i == 4:
 			var m := CanvasItemMaterial.new()
 			m.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
@@ -215,8 +218,8 @@ func _resize() -> void:
 # ======================================================================
 func new_state(seed_v: int) -> Dictionary:
 	return {"v": 1, "world": WORLD, "seed": seed_v, "wgen": World.WORLD_GEN, "cash": 150, "plane": 0, "tanks": 0, "engine": 0, "fuel": 18.0, "time": 420.0, "hull": 100.0, "leak": 0.0, "roadStrips": [],
-		"band": 3, "parts": 1, "bombs": 1, "diff": 1, "armor": 0.0, "goods": {}, "rings": [], "trinkets": [], "carried": 0.0, "ammo": 70, "med": 2, "hp": 100.0,
-		"weapons": [0], "weapon": 0, "contracts": [], "known": [], "strip": wd.START, "looted": {}, "offers": [], "nav": -1, "visits": {}, "mayday": null,
+		"band": 3, "parts": 1, "bombs": 1, "diff": 1, "armor": 0.0, "goods": {}, "rings": [], "trinkets": [], "carried": 0.0, "ammo": {"rev": 70}, "mag": {"0": 6}, "med": 2, "hp": 100.0,
+		"weapons": [0], "weapon": 0, "contracts": [], "known": [], "strip": wd.START, "looted": {}, "offers": [], "nav": -1, "visits": {}, "mayday": null, "pax": [], "fields": {}, "crew": 0,
 		"stats": {"flights": 0, "deliv": 0, "kills": 0, "dist": 0.0}}
 
 func PS() -> Dictionary:
@@ -316,6 +319,7 @@ func _unhandled_input(e: InputEvent) -> void:
 			if c == KEY_E and S and S.nearPlane: ui.open_menu()
 			if c == KEY_SPACE: jump()
 			if c == KEY_Q: swap_weapon()
+			if c == KEY_R: start_reload()
 			var weapon_slot := [KEY_1, KEY_2, KEY_3, KEY_4, KEY_5, KEY_6, KEY_7].find(c)
 			if weapon_slot < 0: weapon_slot = [KEY_KP_1, KEY_KP_2, KEY_KP_3, KEY_KP_4, KEY_KP_5, KEY_KP_6, KEY_KP_7].find(c)
 			if weapon_slot >= 0: select_weapon(weapon_slot)
@@ -331,6 +335,7 @@ func _unhandled_input(e: InputEvent) -> void:
 				mouse.x = x; mouse.y = y
 			mouse.active = true
 			if mode == "ground":
+				if uist == "" and farm.click_bell(Vector2(x, y)): return   # Failsafe's bell
 				mouse.down = true
 				return
 			if uist != "": return
@@ -538,7 +543,7 @@ func gen_site(s: Dictionary) -> Dictionary:
 		"p": {"x": plane.x + 150, "y": plane.y - 8, "ang": 0.0, "cd": 0.0, "stam": 100.0, "jt": 0.0, "jcd": 0.0, "safe": Vector2(plane.x + 150, plane.y - 8), "jx": 0, "wk": 0.0, "sprint": false},
 		"zs": [], "sv": [], "bul": [], "drops": [], "fx": [], "fl": [], "mf": [], "t": 0.0, "spawnT": 5.0, "danger": s.danger, "scrN": 0,
 		"cx": plane.x + 150, "cy": plane.y, "shake": 0.0, "flash": 0.0, "hurt": 0.0, "nearPlane": false, "scorch": [], "flow": PackedInt32Array(), "flowT": 0.0,
-		"boomFlash": 0.0, "rain": minf(1.0, wd.storm_at(s.x, s.y).k * 1.6), "npc": null, "air": false, "tSprint": false, "noAmmoT": -9.0, "flN": 0, "cawT": -9.0, "sipT": -9.0, "tkHint": false,
+		"boomFlash": 0.0, "rain": minf(1.0, wd.storm_at(s.x, s.y).k * 1.6), "npcs": [], "safes": [], "air": false, "tSprint": false, "noAmmoT": -9.0, "flN": 0, "cawT": -9.0, "sipT": -9.0, "tkHint": false,
 		"rcx": 0.0, "rcy": 0.0, "adsK": 0.0, "cap": 0, "rooms_ra": []})
 	var bg := SiteBg.new()
 	add_child(bg)
@@ -563,10 +568,11 @@ func gen_site(s: Dictionary) -> Dictionary:
 	site.svh = []        # garrison members still inside buildings
 	site.alarm = false   # set once the garrison is alerted
 	var fam: bool = site.arch == "family"   # family farm: friendly folk only, no dead
+	var calm: bool = Fields.calm(s)         # a field you cleared or settled: nobody hostile left (fields.gd)
 	var nz := int(round(DF().count * (3 if first else 2 + s.danger * 3 + (3 if site.arch == "town" else 0) + (4 if site.arch == "road" else 0) + 4) + round(dark() * 3)))
-	if hostile or fam: nz = 0
+	if hostile or fam or calm: nz = 0
 	for i in nz: spawn_z(true)
-	if not first and not hostile and not fam:
+	if not first and not hostile and not fam and not calm:
 		var nd2 := int(round((1 + s.danger * 0.8) * DF().count))
 		for i in nd2:
 			var n0: int = S.zs.size()
@@ -575,7 +581,7 @@ func gen_site(s: Dictionary) -> Dictionary:
 				var z: Dictionary = S.zs[S.zs.size() - 1]
 				if z.kind == "scream": S.scrN -= 1
 				z.dormant = true; z.kind = ""; z.arm = false; z.da = randf() * TAU; z.hp = 45.0 + s.danger * 8
-	site.cap = 0 if (hostile or fam) else int(round((8 if first else 10 + s.danger * 4) * DF().count))
+	site.cap = 0 if (hostile or fam or calm) else int(round((8 if first else 10 + s.danger * 4) * DF().count))
 	# First visit to any site starts silent; return visits start with some noise.
 	var first_visit: bool = int(G.visits.get(str(s.id), 0)) <= 1
 	site.noise = 0.0 if first_visit else (6 + s.danger * 2) * DF().noise
@@ -594,7 +600,7 @@ func gen_site(s: Dictionary) -> Dictionary:
 		survivors.spawn_garrison(site)
 	elif fam:
 		farm.spawn(site)
-	elif not first and randf() < 0.2 + 0.08 * s.danger + (0.25 if site.arch == "military" else 0.0) and site.rooms.size():
+	elif not first and not calm and randf() < 0.2 + 0.08 * s.danger + (0.25 if site.arch == "military" else 0.0) and site.rooms.size():
 		var n := 1 + int(randf() * mini(3, s.danger))
 		for i in n:
 			var o: Dictionary = site.rooms[randi() % site.rooms.size()]
@@ -606,13 +612,16 @@ func gen_site(s: Dictionary) -> Dictionary:
 
 func enter_ground(s: Dictionary) -> void:
 	_free_site()
+	fields.tick(true)   # a cleared field whose time ran out is the enemy's again before you land
 	gen_site(s)
+	fields.on_enter(S)
 	survivors.spawn_npc(s)
 	mode = "ground"
 	ui.close_ui()
 	clear_input()
 	F = null
-	if s.get("hostile", false):
+	if Fields.calm(s): pass   # fields.on_enter says how it stands
+	elif s.get("hostile", false):
 		toast("Armed survivors hold this strip. No fuel, no trade, no jobs. Keep your head down.", "bad")
 	elif s.get("arch", "") == "family":
 		toast("Friendly folks live here. You put your weapons away. Fuel and medicine for sale.", "good")
@@ -730,9 +739,12 @@ func walk_clear(x0: float, y0: float, x1: float, y1: float) -> bool:
 		if hit_box(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, 10): return false
 	return true
 
-## Inside the rescue survivor's hiding place (while that mission is running here)?
+## Inside a rescue survivor's hiding place (while that mission is running here)?
 func in_safe(x: float, y: float) -> bool:
-	return S != null and S.get("safe") != null and (S.safe as Rect2).has_point(Vector2(x, y))
+	if S == null: return false
+	for r in S.get("safes", []):
+		if (r as Rect2).has_point(Vector2(x, y)): return true
+	return false
 
 ## Would a shot fired now reach world point (tx, ty)? Drives the red dot in the
 ## exploration cursor. Mirrors shoot() and the bullet loop: same muzzle point
@@ -743,7 +755,8 @@ func shot_reaches(tx: float, ty: float) -> bool:
 	var p: Dictionary = S.p
 	var to := Vector2(tx - p.x, ty - p.y)
 	var d := to.length()
-	if G.ammo <= 0: return d < 44.0
+	if ammo_left() <= 0: return d < 44.0
+	if reloading() or mag_of() <= 0: return false   # nothing in the gun to fire
 	var w: Dictionary = D.WEAPONS[G.weapon]
 	var travel := d - 16.0   # distance from the muzzle to the cursor
 	if travel <= 0.0: return true
@@ -934,6 +947,9 @@ func spawn_edge(run: bool) -> void:
 		return
 
 func spawn_z(initial: bool) -> void:
+	if not initial and S.has("pool"):   # a field you're clearing has only so many dead (fields.gd)
+		if int(S.pool) <= 0: return
+		S.pool = int(S.pool) - 1
 	for t in 40:
 		var c := 1 + int(randf() * (S.cols - 2))
 		var r := 1 + int(randf() * (S.rows - 2))
@@ -975,9 +991,9 @@ func toxic(e: Dictionary) -> void:
 			if z.hp <= 0:
 				z.dead = true
 				G.stats.kills += 1
-	if S.npc:
-		var d := Vector2(S.npc.x - e.x, S.npc.y - e.y).length()
-		if d < 95: survivors.npc_hurt(18, Vector2(S.npc.x - e.x, S.npc.y - e.y))
+	for n in S.npcs.duplicate():
+		var d := Vector2(n.x - e.x, n.y - e.y).length()
+		if d < 95: survivors.npc_hurt(n, 18, Vector2(n.x - e.x, n.y - e.y))
 	if S == null: return
 	var pd := Vector2(S.p.x - e.x, S.p.y - e.y).length()
 	if pd < 95:
@@ -1026,14 +1042,99 @@ func killed(e: Dictionary, isZ: bool) -> void:
 		var a := randf() * TAU
 		var v := 40 + randf() * 120
 		S.fx.append({"x": e.x, "y": e.y, "vx": cos(a) * v, "vy": sin(a) * v, "life": 0.4, "c": "#6e120d", "sz": 3.0, "drag": true})
-	if isZ and randf() < 0.25: S.drops.append({"x": e.x, "y": e.y, "k": "ammo", "n": 3 + randi() % 6})
+	if isZ and randf() < 0.25:
+		var ak := ammo_roll()
+		S.drops.append({"x": e.x, "y": e.y, "k": "ammo", "t": ak, "n": ammo_n(ak, 3 + randi() % 6)})
+
+# ======================================================================
+# ammo: one pool per type (D.AMMO); each gun names its type, the shotguns share shells
+# ======================================================================
+## G.ammo is {type: count}. Older saves had one shared number: it becomes revolver rounds.
+func ammo_pool() -> Dictionary:
+	if not (G.ammo is Dictionary): G.ammo = {"rev": int(G.ammo)}
+	return G.ammo
+
+func ammo_key(wi: int = -1) -> String:
+	return String(D.WEAPONS[G.weapon if wi < 0 else wi].ammo)
+
+## Rounds left for a gun, loaded plus spare (the one in hand by default). Unlimited Ammo counts as plenty.
+func ammo_left(wi: int = -1) -> int:
+	if unl_ammo: return 9999
+	return mag_of(wi) + int(ammo_pool().get(ammo_key(wi), 0))
+
+## Spare rounds for a gun's ammo type (not counting what's loaded).
+func reserve_left(wi: int = -1) -> int:
+	if unl_ammo: return 9999
+	return int(ammo_pool().get(ammo_key(wi), 0))
+
+# ----------------------------------------------------------------------
+# magazines and reloading: G.mag[str(weapon index)] = rounds loaded (str keys survive JSON).
+# Firing takes from the magazine; an empty gun reloads itself, R reloads early, switching cancels.
+# ----------------------------------------------------------------------
+func mag_pool() -> Dictionary:
+	if not (G.get("mag") is Dictionary): G.mag = {}
+	return G.mag
+
+func mag_of(wi: int = -1) -> int:
+	return int(mag_pool().get(str(G.weapon if wi < 0 else wi), 0))
+
+func mag_cap(wi: int = -1) -> int:
+	return int(D.WEAPONS[G.weapon if wi < 0 else wi].mag)
+
+func reloading() -> bool:
+	return S != null and float(S.p.get("rl", 0.0)) > 0.0
+
+func start_reload() -> void:
+	if mode != "ground" or S == null or uist != "" or reloading(): return
+	if mag_of() >= mag_cap() or reserve_left() <= 0: return
+	S.p.rl = float(D.WEAPONS[G.weapon].rl)
+	S.p.rlw = G.weapon
+	sfx("reload")
+
+## Each frame on foot: count the reload down and load the gun when it's done, or start one
+## by itself when the gun in hand is empty and there are spare rounds.
+func upd_reload(p: Dictionary, dt: float) -> void:
+	if float(p.get("rl", 0.0)) > 0.0:
+		if int(p.get("rlw", -1)) != G.weapon:
+			p.rl = 0.0   # switched guns: the reload is lost
+			return
+		p.rl -= dt
+		if p.rl <= 0.0:
+			p.rl = 0.0
+			var take := mini(mag_cap() - mag_of(), reserve_left())
+			mag_pool()[str(G.weapon)] = mag_of() + take
+			if not unl_ammo: ammo_pool()[ammo_key()] = reserve_left() - take
+			sfx("reloaded")
+	elif mag_of() <= 0 and reserve_left() > 0 and not unarmed_here():
+		start_reload()
+
+## Add n of type k; returns the floater text, e.g. "+12 shotgun shells".
+func add_ammo(k: String, n: int) -> String:
+	var a := ammo_pool()
+	a[k] = int(a.get(k, 0)) + n
+	var t: Dictionary = D.AMMO[k]
+	return "+%d %s" % [n, String(t.one if n == 1 else t.name).to_lower()]
+
+## A random ammo type for a find, weighted by D.AMMO[k].w (bolts are the rarest).
+func ammo_roll() -> String:
+	var tot := 0.0
+	for k in D.AMMO_KEYS: tot += float(D.AMMO[k].w)
+	var r := randf() * tot
+	for k in D.AMMO_KEYS:
+		r -= float(D.AMMO[k].w)
+		if r <= 0: return k
+	return "rev"
+
+## How many of type k an ammo find of `base` old shared-pool rounds gives (at least 1).
+func ammo_n(k: String, base: float) -> int:
+	return maxi(1, int(round(base * float(D.AMMO[k].find))))
 
 func shoot() -> void:
 	var w: Dictionary = D.WEAPONS[G.weapon]
 	var p: Dictionary = S.p
 	p.cd = w.rate
 	regen_reset()
-	if G.ammo <= 0:
+	if ammo_left() <= 0:
 		p.cd = 0.42
 		S.swing = 0.18
 		sfx("swing")
@@ -1066,12 +1167,16 @@ func shoot() -> void:
 		if hit: sfx("hit")
 		if S.t - S.noAmmoT > 4:
 			S.noAmmoT = S.t
-			floater(p.x, p.y - 24, "Out of ammo. Using the machete.", "#e3644c")
+			floater(p.x, p.y - 24, "Out of %s. Using the machete." % String(D.AMMO[ammo_key()].name).to_lower(), "#e3644c")
 		return
-	G.ammo -= 1
+	if reloading() or mag_of() <= 0:
+		p.cd = 0.1   # empty or mid-reload: no shot (an empty gun starts reloading)
+		start_reload()
+		return
+	mag_pool()[str(G.weapon)] = mag_of() - 1
 	sfx(w.snd)
-	if S.npc and S.npc.follow and not w.silent:
-		S.npc.fire_t = S.t + Survivors.NPC_FIRE_WINDOW   # your rescue joins in
+	for n in S.npcs:
+		if n.follow and not w.silent: n.fire_t = S.t + Survivors.NPC_FIRE_WINDOW   # your rescues join in
 	var spr: float = w.spr * (ADS_AUTO_SPREAD if ads and w.get("auto", false) else 1.0)
 	# some weapons hit harder when aimed down sights ("ads_dmg" in D.WEAPONS, e.g. the crossbow).
 	# Only counts once the aim has fully settled in (adsK reaches 1), not the moment you press.
@@ -1085,7 +1190,7 @@ func shoot() -> void:
 	var zdmg: float = (float(w.hip_zdmg) if w.has("hip_zdmg") and not aimed and not mid_ease else base_dmg) * scope_k
 	for i in w.pel:
 		var a: float = p.ang + (randf() - 0.5) * spr * 2
-		S.bul.append({"x": p.x + cos(p.ang) * 16, "y": p.y + sin(p.ang) * 16, "vx": cos(a) * w.spd, "vy": sin(a) * w.spd, "life": w.life, "dmg": base_dmg * scope_k, "zdmg": zdmg, "aim": aimed, "pl": true, "kb": w.kb, "bolt": w.bolt})
+		S.bul.append({"x": p.x + cos(p.ang) * 16, "y": p.y + sin(p.ang) * 16, "vx": cos(a) * w.spd, "vy": sin(a) * w.spd, "life": w.life, "dmg": base_dmg * scope_k, "zdmg": zdmg, "aim": aimed, "pl": true, "kb": w.kb, "bolt": w.bolt, "src": p})
 	if not w.bolt:   # spent casing — guns only, the crossbow has none
 		S.fx.append({"x": p.x + cos(p.ang) * 8, "y": p.y + sin(p.ang) * 8, "vx": cos(p.ang + 1.6) * 110 + (randf() - 0.5) * 40, "vy": sin(p.ang + 1.6) * 110 + (randf() - 0.5) * 40, "life": 0.7, "c": "#d9b35a", "sz": 2.2, "drag": true})
 	add_noise(w.noise)
@@ -1147,9 +1252,9 @@ func roll_loot(k: String, ty: String) -> Variant:
 			G.carried += n
 			return ["+%d gal fuel" % n, "#d9a441"]
 		"ammo":
-			var n := int(round(((22 if mil else 12) + randi() % 14) * (1 + 0.1 * (S.danger - 1)) * (1.3 if has("bandolier") else 1.0)))
-			G.ammo += n
-			return ["+%d rounds" % n, "#efe6cf"]
+			var ak := ammo_roll()
+			var n := ammo_n(ak, ((22 if mil else 12) + randi() % 14) * (1 + 0.1 * (S.danger - 1)) * (1.3 if has("bandolier") else 1.0))
+			return [add_ammo(ak, n), "#efe6cf"]
 		"cash":
 			var n := int(round(((40 + randi() % 100) if (ty == "register" or ty == "safe") else (15 + randi() % 56)) * (1 + 0.12 * (S.danger - 1))))
 			G.cash += n
@@ -1197,8 +1302,8 @@ func roll_loot(k: String, ty: String) -> Variant:
 			for i in range(1, D.WEAPONS.size()):
 				if not G.weapons.has(i): un.append(i)
 			if un.is_empty():
-				G.ammo += 30
-				return ["+30 rounds", "#efe6cf"]
+				var ak := ammo_roll()
+				return [add_ammo(ak, int(D.AMMO[ak].box)), "#efe6cf"]
 			var w: int = un[randi() % un.size()]
 			G.weapons.append(w)
 			toast("Picked up %s. Press %d to equip." % [D.WEAPONS[w].name, w + 1], "good")
@@ -1309,6 +1414,7 @@ func select_weapon(index: int) -> void:
 		if S != null:
 			floater(S.p.x, S.p.y - 26, D.WEAPONS[index].name, "#efe6cf")
 			S.p.cd = maxf(S.p.cd, 0.25)
+			S.p.rl = 0.0   # switching guns drops a reload in progress
 
 func swap_weapon() -> void:
 	if mode != "ground" or S == null or uist != "" or G.weapons.size() < 2: return
@@ -1348,6 +1454,7 @@ func throw_bomb() -> void:
 func upd_ground(dt: float) -> void:
 	S.t += dt
 	G.time += dt * 0.5
+	fields.tick()
 	var nk := 1 + (0.12 if G.diff == 0 else (0.3 if G.diff == 2 else 0.2)) * dark()
 	var p: Dictionary = S.p
 	blasts.blast_dmg_tick(p, dt)
@@ -1371,6 +1478,8 @@ func upd_ground(dt: float) -> void:
 	if upd_zombies(p, nk, dt): return
 	survivors.upd_survivors(p, dt)
 	farm.update(p, dt)
+	fields.update(p, dt)
+	if S == null: return
 	upd_drops(p)
 	upd_spawns(dt)
 	for br in S.barrels:
@@ -1469,6 +1578,7 @@ func upd_player(p: Dictionary, dt: float) -> float:
 		fire = mouse.down or pad.fire()
 	if aim != null: p.ang = aim
 	elif Vector2(mx, my).length() > 0.1: p.ang = atan2(my, mx)
+	upd_reload(p, dt)
 	p.cd -= dt
 	if fire and p.cd <= 0 and not unarmed_here():
 		var carry: float = p.cd if p.cd > -dt else 0.0   # held trigger: the bit of this frame past the cooldown
@@ -1535,7 +1645,9 @@ func upd_bullets(p: Dictionary, dt: float) -> bool:
 							dmg_enemy(v, b.dmg * (BOLT_SNEAK_MULT if b.bolt and b.get("aim", false) and not v.alert else 1.0))
 							hurt_cry(v)
 							v.hit = 0.1
-							survivors.sv_hear(v, p.x, p.y)
+							var src: Dictionary = b.get("src", p)   # you or a rescue survivor: they'll go for whoever it was
+							survivors.sv_hear(v, src.x, src.y)
+							v.atk = src; v.atkT = S.t
 							survivors.sv_suppress(v, b.x, b.y, b.vx, b.vy)
 							blood(v.x, v.y, 1)
 							if v.hp > 0: blood_spray(v.x, v.y, Vector2(b.vx, b.vy))
@@ -1544,12 +1656,11 @@ func upd_bullets(p: Dictionary, dt: float) -> bool:
 								G.stats.kills += 1
 								blood(v.x, v.y, 6)
 								if not was_alert: death_ugh(v)
-								var am := randf() < 0.6
-								S.drops.append({"x": v.x, "y": v.y, "k": "ammo" if randf() < 0.6 else "cash", "n": (10 + randi() % 10) if am else (30 + randi() % 60)})
-								if randf() < Survivors.SV_GUN_DROP and not v.get("unarmed", false):
-									S.drops.append({"x": v.x + 14, "y": v.y + 6, "k": "gun", "w": int(v.get("w", 0)), "n": 0})
+								sv_drop_loot(v)
 							dead = true
 							break
+			elif sv_bullet_hits(b):   # a hostile survivor's round into a zombie or a rescue survivor
+				dead = true
 			elif pow(p.x - b.x, 2) + pow(p.y - b.y, 2) < 110:
 				hurt(b.dmg, "shot")
 				if S and uist == "": blood_spray(p.x, p.y, Vector2(b.vx, b.vy))
@@ -1559,6 +1670,72 @@ func upd_bullets(p: Dictionary, dt: float) -> bool:
 		if dead or b.life <= 0: S.bul.remove_at(i)
 		i -= 1
 	return false
+
+## A dead hostile survivor's drop: rounds for the gun they carried or cash, sometimes the gun.
+func sv_drop_loot(v: Dictionary) -> void:
+	var am := randf() < 0.6
+	var vk := ammo_key(int(v.get("w", 0)))
+	S.drops.append({"x": v.x, "y": v.y, "k": "ammo" if am else "cash", "t": vk, "n": ammo_n(vk, 10 + randi() % 10) if am else (30 + randi() % 60)})
+	if randf() < Survivors.SV_GUN_DROP and not v.get("unarmed", false):
+		S.drops.append({"x": v.x + 14, "y": v.y + 6, "k": "gun", "w": int(v.get("w", 0)), "n": 0})
+
+## A hostile survivor's bullet b: does it hit a zombie or a rescue survivor out of hiding?
+## Zombies and survivors fight anywhere, but a zombie only loses HP while it and the shooter
+## are both on screen (Greg 2026-10-20), so you can walk up on a fight still in progress.
+func sv_bullet_hits(b: Dictionary) -> bool:
+	var src = b.get("src")
+	if src is Dictionary:
+		for z in S.zs:
+			if not z.dead and pow(z.x - b.x, 2) + pow(z.y - b.y, 2) < 144:
+				if z.dormant:
+					z.dormant = false; z.rise = 0.35
+				z.alert = true
+				z.svt = src   # it goes for whoever shot it
+				if survivors.on_screen(src.x, src.y) and survivors.on_screen(z.x, z.y):
+					z.hp -= float(b.dmg)
+					z.hit = 0.1
+					blood(z.x, z.y, 1)
+					if z.hp <= 0:
+						z.dead = true
+						blood(z.x, z.y, 6)
+				return true
+	for n in S.npcs:
+		if pow(n.x - b.x, 2) + pow(n.y - b.y, 2) < 144 and not in_safe(n.x, n.y):
+			survivors.npc_hurt(n, b.dmg, Vector2(b.vx, b.vy))
+			return true
+	return false
+
+## Which hostile survivor zombie z (alerted, d px from you) goes for instead of you, if any:
+## the one that shot it, else one much nearer than you.
+func zombie_sv_target(z: Dictionary, d: float) -> Variant:
+	var t = z.get("svt")
+	if t is Dictionary and (t.dead or not S.sv.has(t)):
+		z.erase("svt")
+		t = null
+	if t is Dictionary: return t
+	var bd := minf(d * 0.7, 300.0)
+	for v in S.sv:
+		if v.dead: continue
+		var nd := Vector2(v.x - z.x, v.y - z.y).length()
+		if nd < bd and los(z.x, z.y, v.x, v.y):
+			t = v; bd = nd
+	return t
+
+## Zombie z bites hostile survivor v: they go for it, but are only hurt while both are on screen.
+func zombie_bites_sv(z: Dictionary, v: Dictionary) -> void:
+	survivors.sv_hear(v, z.x, z.y)
+	v.atk = z; v.atkT = S.t
+	if not (survivors.on_screen(z.x, z.y) and survivors.on_screen(v.x, v.y)): return
+	dmg_enemy(v, z.dmg)
+	v.hit = 0.1
+	blood(v.x, v.y, 1)
+	if v.hp > 0:
+		hurt_cry(v)
+		blood_spray(v.x, v.y, Vector2(v.x - z.x, v.y - z.y))
+	else:
+		v.dead = true
+		blood(v.x, v.y, 6)
+		sv_drop_loot(v)
 
 ## Zombies: waking, chasing (flow field), lunging, screamers, biting you and the
 ## rescue survivor. nk is the night speed-up. Returns true when the frame should stop.
@@ -1584,6 +1761,11 @@ func upd_zombies(p: Dictionary, nk: float, dt: float) -> bool:
 			continue
 		if z.alert and d < S.nd: S.nd = d
 		if d < 250 * seen_k() and not z.alert and los(z.x, z.y, p.x, p.y): z.alert = true   # sight only; sound alerts are separate
+		if not z.alert:   # a hostile survivor in sight
+			for v in S.sv:
+				if not v.dead and Vector2(v.x - z.x, v.y - z.y).length() < 250 and los(z.x, z.y, v.x, v.y):
+					z.alert = true; z.svt = v
+					break
 		var vx: float
 		var vy: float
 		var sp: float
@@ -1595,13 +1777,21 @@ func upd_zombies(p: Dictionary, nk: float, dt: float) -> bool:
 				var fd = flow_dir(z.x, z.y)
 				if fd:
 					vx = fd.x; vy = fd.y
-			if S.npc and not in_safe(S.npc.x, S.npc.y):   # don't mob the hiding place
-				var nx: float = S.npc.x - z.x
-				var ny: float = S.npc.y - z.y
+			for n in S.npcs:
+				if in_safe(n.x, n.y): continue   # don't mob the hiding place
+				var nx: float = n.x - z.x
+				var ny: float = n.y - z.y
 				var nd := Vector2(nx, ny).length()
 				if nd == 0: nd = 1
 				if nd < d * 0.7 and nd < 300:
 					vx = nx / nd; vy = ny / nd
+					break
+			var tv = zombie_sv_target(z, d)
+			if tv is Dictionary:   # after a hostile survivor instead
+				var sx: float = tv.x - z.x
+				var sy: float = tv.y - z.y
+				var sdd := maxf(1.0, Vector2(sx, sy).length())
+				vx = sx / sdd; vy = sy / sdd
 			if z.det > 0:
 				z.det -= dt
 				var px: float = -vy * z.ds
@@ -1675,13 +1865,19 @@ func upd_zombies(p: Dictionary, nk: float, dt: float) -> bool:
 				o.alert = true
 				if o.dormant: o.wake = true
 			for k in 4: spawn_z(false)
-		if S.npc:
-			var nd := Vector2(S.npc.x - z.x, S.npc.y - z.y).length()
-			if nd < 250 and not z.alert and los(z.x, z.y, S.npc.x, S.npc.y): z.alert = true
-			if nd < 22 and z.cd <= 0 and not in_safe(S.npc.x, S.npc.y):
+		for n in S.npcs.duplicate():
+			var nd := Vector2(n.x - z.x, n.y - z.y).length()
+			if nd < 250 and not z.alert and los(z.x, z.y, n.x, n.y): z.alert = true
+			if nd < 22 and z.cd <= 0 and not in_safe(n.x, n.y):
 				z.cd = 0.85
-				survivors.npc_hurt(z.dmg, Vector2(S.npc.x - z.x, S.npc.y - z.y))
+				survivors.npc_hurt(n, z.dmg, Vector2(n.x - z.x, n.y - z.y))
 				if S == null: return true
+		if z.alert and z.cd <= 0:
+			for v in S.sv:
+				if not v.dead and Vector2(v.x - z.x, v.y - z.y).length() < 22:
+					z.cd = 0.85
+					zombie_bites_sv(z, v)
+					break
 		if d < 24 and z.cd <= 0 and not (p.jt > 0):
 			z.cd = 0.85
 			hurt(z.dmg, "bitten")
@@ -1699,8 +1895,7 @@ func upd_drops(p: Dictionary) -> void:
 		if Vector2(d.x - p.x, d.y - p.y).length() < 22:
 			if d.k == "ammo":
 				d.n = int(round(d.n * (1.3 if has("bandolier") else 1.0)))
-				G.ammo += d.n
-				floater(d.x, d.y - 16, "+%d rounds" % d.n)
+				floater(d.x, d.y - 16, add_ammo(String(d.get("t", "rev")), d.n))
 			elif d.k == "gun":
 				var wi: int = int(d.w)
 				var wn: String = D.WEAPONS[wi].name
@@ -1711,9 +1906,9 @@ func upd_drops(p: Dictionary) -> void:
 					sfx("jackpot")
 				else:
 					# already have one: strip it for its rounds
-					var n := int(round(12 * (1.3 if has("bandolier") else 1.0)))
-					G.ammo += n
-					floater(d.x, d.y - 16, "+%d rounds (spare %s)" % [n, String(wn).to_lower()])
+					var gk := ammo_key(wi)
+					var n := ammo_n(gk, 12 * (1.3 if has("bandolier") else 1.0))
+					floater(d.x, d.y - 16, "%s (spare %s)" % [add_ammo(gk, n), String(wn).to_lower()])
 			else:
 				G.cash += d.n
 				floater(d.x, d.y - 16, "+$%d" % d.n, "#9cc063")
@@ -1724,7 +1919,7 @@ func upd_drops(p: Dictionary) -> void:
 ## steady trickle of new arrivals.
 func upd_spawns(dt: float) -> void:
 	# (no background noise: the meter only rises from what the player does)
-	if S.arch == "family": return   # nothing comes for you at a family farm
+	if S.arch == "family" or S.get("calm", false): return   # nothing comes for you at a family farm or a field you cleared
 	var held: bool = S.get("hostile", false)
 	# At survivor-held strips the noise waves are armed reinforcements, not the dead.
 	var waves := [[35, 0, "Doors bang open. Everyone inside is coming out to look for you."], [65, 3, "Engines on the road. They are bringing friends."], [100, 4, "Everyone they have is coming. Get to the plane."]] if held \

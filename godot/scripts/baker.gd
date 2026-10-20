@@ -47,6 +47,7 @@ func set_world(w: World) -> void:
 	mat.set_shader_parameter("seed", w.SEED)
 	mat.set_shader_parameter("haven", w.HAVEN)
 	mat.set_shader_parameter("WORLD", D.WORLD)
+	mat.set_shader_parameter("gen", w.GEN)
 	var rp := PackedVector4Array()
 	for i in ROAD_SLOTS:
 		if i < w.ROADS.size():

@@ -1,0 +1,4 @@
+res://scripts/game.gd
+res://scripts/survivors.gd
+res://scripts/fields.gd
+res://scripts/render.gd

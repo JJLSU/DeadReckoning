@@ -9,6 +9,10 @@ const LANDING_ASSIST := false
 
 var gm: Game   # the game: run state, site, shared helpers
 
+# Greg 2026-10-19: wider turns and slower climbs and descents for every plane.
+const AIR_TURN := 0.67   # share of the plane's turn rate it gets in the air (turns 1.5x as wide); taxiing is unchanged
+const VS_TIME := 1.5     # climbs and descents take this many times as long
+
 func _init(game: Game) -> void:
 	gm = game
 
@@ -25,6 +29,10 @@ func takeoff() -> void:
 		"rollStrip": s, "bank": 0.0, "bankV": 0.0, "pitch": 0.0, "prop": 0.0, "storm": 0.0, "tb": 0.0, "tracers": [], "underFire": 0.0, "flash": 0.0, "gx": 0.0, "gy": 0.0, "gfT": 0.0,
 		"wind": Vector2(cos(wa) * ws, sin(wa) * ws), "trk": a, "cruise": false, "crashed": false, "assist": false, "inStorm": false, "warnedFire": false, "evT": 60 + randf() * 50, "autothr": false}
 	gm.mode = "flight"
+	if gm.G.mayday and gm.G.mayday.get("landed", false):
+		var nl: int = gm.G.mayday.ppl.size()
+		gm.G.mayday = null
+		gm.toast_later(0.5, "You left %s behind. The mayday is over." % ("one survivor" if nl == 1 else "%d survivors" % nl), "bad")
 	gm._free_site()
 	gm.ui.close_ui()
 	gm.cam_snap = true
@@ -37,6 +45,7 @@ func _thr_touch() -> bool:
 
 func upd_flight(dt: float) -> void:
 	gm.G.time += dt
+	gm.fields.tick()
 	var P := gm.PS()
 	var steer := 0.0
 	if gm.key(KEY_A) or gm.key(KEY_LEFT): steer -= 1
@@ -95,7 +104,7 @@ func upd_flight(dt: float) -> void:
 		else: gm.F.spd = maxf(target, gm.F.spd - (38.0 if eff < 0.08 else 14.0) * dt)
 	else:
 		gm.F.spd += (target - gm.F.spd) * (0.28 if target > gm.F.spd else 0.3) * dt
-	var turnK: float = clampf(gm.F.spd / 30.0, 0, 1) * 0.7 if gm.F.onGround else 1.0
+	var turnK: float = clampf(gm.F.spd / 30.0, 0, 1) * 0.7 if gm.F.onGround else AIR_TURN
 	# Bank follows the stick on a critically damped spring, so it eases in and out instead of snapping.
 	# Rolling back toward level is a little slower than rolling into a turn.
 	var bt: float = 0.0 if gm.F.onGround else steer
@@ -117,8 +126,8 @@ func upd_flight(dt: float) -> void:
 	else:
 		gm.F.vs = climb_vs(P, altT, gm.F.alt)
 		gm.F.alt += gm.F.vs * dt
-	# Nose comes up while climbing (full pitch at a climb rate of 18 and above) and eases back down.
-	var pitch_t: float = 0.0 if gm.F.onGround else clampf(gm.F.vs / 18.0, 0, 1)
+	# Nose comes up while climbing (full pitch at a climb rate of 18 / VS_TIME and above) and eases back down.
+	var pitch_t: float = 0.0 if gm.F.onGround else clampf(gm.F.vs * VS_TIME / 18.0, 0, 1)
 	gm.F["pitch"] = lerpf(gm.F.get("pitch", 0.0), pitch_t, minf(1, dt * 1.5))
 	if not gm.F.onGround:
 		if gm.F.alt <= 0:
@@ -217,15 +226,23 @@ func upd_flight(dt: float) -> void:
 			var rn := gm.range_now()
 			var cand := gm.wd.strips.filter(func(s):
 				var d := Vector2(s.x - gm.F.x, s.y - gm.F.y).length()
-				return s.type != "haven" and s.type != "road" and not s.get("hostile", false) and s.id != gm.G.strip and d > 1200 and d < minf(5500, rn * 0.9))
+				return s.type != "haven" and s.type != "road" and not s.get("hostile", false) and s.get("arch", "") != "family" and not Fields.calm(s) and s.id != gm.G.strip and d > 1200 and d < minf(5500, rn * 0.9))
 			if cand.size():
 				var s: Dictionary = cand[randi() % cand.size()]
 				gm.known[s.id] = true
 				var d := Vector2(s.x - gm.F.x, s.y - gm.F.y).length()
-				gm.G.mayday = {"id": s.id, "until": gm.G.time + d / 100 * 2.2 + 40, "reward": int(round((150 + d / 100 * 6) / 5.0)) * 5}
+				# 1-3 people hiding in town buildings (Greg, 2026-10-20); more people pay more
+				var np := 1 + randi() % 3
+				var ppl: Array = []
+				var names: Array = D.RNAMES.duplicate()
+				names.shuffle()
+				var wk: Array = D.WHERE.keys()
+				for k in np: ppl.append({"who": names[k], "where": wk[randi() % wk.size()]})
+				gm.G.mayday = {"id": s.id, "until": gm.G.time + d / 100 * 2.2 + 40, "reward": int(round((150 + d / 100 * 6) * (0.6 + 0.4 * np) / 5.0)) * 5,
+					"ppl": ppl, "total": np, "landed": false}
 				gm.sfx("rare")
-				gm.toast("Radio: \"Mayday, mayday. We are pinned down at %s. Anyone out there?\" Land within %d minutes for $%d." % [s.name, int(round(gm.G.mayday.until - gm.G.time)), gm.G.mayday.reward], "mag")
-	if gm.G.mayday and gm.G.time > gm.G.mayday.until:
+				gm.toast("Radio: \"Mayday, mayday. %s hiding in town at %s. Anyone out there?\" Land within %d minutes for $%d." % ["I'm" if np == 1 else ("There are %d of us" % np), s.name, int(round(gm.G.mayday.until - gm.G.time)), gm.G.mayday.reward], "mag")
+	if gm.G.mayday and not gm.G.mayday.get("landed", false) and gm.G.time > gm.G.mayday.until:
 		gm.toast("The mayday has gone silent.", "bad")
 		gm.G.mayday = null
 	gm.discT -= dt
@@ -287,11 +304,11 @@ func approach_info():
 
 ## Vertical speed toward the altitude the airspeed supports, scaled by the plane's "climb_k" when
 ## climbing and "descend_k" when descending (D.PLANES; Greg 2026-10-14: the Albatross takes about
-## twice as long to climb out and 1.5x as long to come down).
+## twice as long to climb out and 1.5x as long to come down), and slowed for every plane by VS_TIME.
 static func climb_vs(P: Dictionary, altT: float, alt: float) -> float:
 	var v := clampf((altT - alt) * 1.3, -48, 22)
-	if v > 0: return v * P.get("climb_k", 1.0)
-	return maxf(v, -(5 + alt * 0.55)) * P.get("descend_k", 1.0)
+	if v > 0: return v * P.get("climb_k", 1.0) / VS_TIME
+	return maxf(v, -(5 + alt * 0.55)) * P.get("descend_k", 1.0) / VS_TIME
 
 func predict_touchdown(thrO: float = -1.0):
 	var P := gm.PS()
@@ -386,9 +403,20 @@ func arrive(s: Dictionary) -> void:
 	if s.type == "road" and int(gm.G.visits.get(str(s.id), 0)) == 0:
 		gm.toast_later(0.9, "No pump and no mechanic out here. Find fuel and get off this road.", "bad")
 	if gm.G.mayday and int(gm.G.mayday.id) == s.id:
-		var mr: int = gm.G.mayday.reward
-		gm.G.cash += mr; gm.G.band += 2; gm.G.ammo += 20; gm.G.mayday = null
-		gm.toast_later(0.05, "You made it in time. The survivors pay $%d and press bandages and rounds into your hands." % mr, "good")
+		# landed in time: now find them on foot (Survivors.spawn_npc). Saves from before carry no list.
+		var md: Dictionary = gm.G.mayday
+		if not md.has("ppl"):
+			md.ppl = [{"who": D.RNAMES[randi() % D.RNAMES.size()], "where": "house"}]
+			md.total = 1
+		md.landed = true
+	# mayday survivors you carried get off at any family farm (not Failsafe) and pay up
+	if gm.G.pax.size() and s.get("arch", "") == "family" and not s.get("failsafe", false):
+		var pp := 0
+		for x in gm.G.pax: pp += int(x.pay)
+		var np: int = gm.G.pax.size()
+		gm.G.cash += pp; gm.G.band += np; gm.add_ammo(gm.ammo_key(), gm.ammo_n(gm.ammo_key(), 10 * np))
+		gm.G.pax = []
+		gm.toast_later(0.05, "The survivors you flew out are safe. They pay $%d and press bandages and rounds into your hands." % pp, "good")
 	if paid:
 		gm.G.cash += paid
 		gm.G.stats.deliv += n
@@ -404,6 +432,18 @@ func nav_target():
 	if gm.G.nav >= 0: return gm.strip(gm.G.nav)
 	if gm.G.contracts.size(): return gm.strip(gm.menu.contract_target(gm.G.contracts[0]))
 	return null
+
+## The nearest family farm (not Failsafe) to strip s, or null. Mayday survivors are flown there.
+func nearest_farm(s: Dictionary):
+	var best = null
+	var bd := 1e18
+	for o in gm.wd.strips:
+		if o.get("arch", "") != "family" or o.get("failsafe", false): continue
+		var d := Vector2(o.x - s.x, o.y - s.y).length()
+		if d < bd:
+			bd = d
+			best = o
+	return best
 
 ## The airfield sending an active mayday, if any (shown in red alongside your destination).
 func mayday_target():

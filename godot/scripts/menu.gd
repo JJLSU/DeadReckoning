@@ -72,7 +72,7 @@ func checkpoint() -> void:
 
 ## JSON turns ints into floats; put integer fields back.
 func normalize(st: Dictionary) -> Dictionary:
-	for k in ["seed", "cash", "plane", "tanks", "engine", "band", "parts", "bombs", "diff", "ammo", "med", "weapon", "strip", "nav"]:
+	for k in ["seed", "cash", "plane", "tanks", "engine", "band", "parts", "bombs", "diff", "med", "weapon", "strip", "nav"]:
 		if st.has(k) and st[k] != null: st[k] = int(st[k])
 	var ws: Array = []
 	for w in st.get("weapons", [0]): ws.append(int(w))
@@ -82,6 +82,13 @@ func normalize(st: Dictionary) -> Dictionary:
 			for k in ["dest", "pickup", "reward"]:
 				if c.has(k): c[k] = int(c[k])
 	for k in st.get("goods", {}).keys(): st.goods[k] = int(st.goods[k])
+	# ammo is {type: count}; older saves had one shared pool, which becomes revolver rounds
+	if st.has("ammo"):
+		if st.ammo is Dictionary:
+			for k in st.ammo.keys(): st.ammo[k] = int(st.ammo[k])
+		else: st.ammo = {"rev": int(st.ammo)}
+	if st.get("mag") is Dictionary:
+		for k in st.mag.keys(): st.mag[k] = int(st.mag[k])
 	if st.get("mayday") is Dictionary:
 		st.mayday.id = int(st.mayday.id); st.mayday.reward = int(st.mayday.reward)
 	var stt: Dictionary = st.get("stats", {})
@@ -101,7 +108,7 @@ func normalize(st: Dictionary) -> Dictionary:
 # contracts
 # ======================================================================
 func gen_offers(s: Dictionary) -> Array:
-	if s.get("hostile", false): return []
+	if not Fields.friendly(s): return []   # job boards only at friendly fields: farms, Failsafe and settled fields (Greg)
 	var R := gm.range_full()
 	var n := 2 if s.type == "dirt" else (3 if s.type == "regional" else 4)
 	var c: Array = []
@@ -116,7 +123,7 @@ func gen_offers(s: Dictionary) -> Array:
 		var d := Vector2(o.x - s.x, o.y - s.y).length()
 		var cg: Array = D.CARGO[randi() % D.CARGO.size()]
 		out.append({"id": U.rid(), "type": "", "dest": o.id, "icon": cg[0], "what": cg[1], "reward": int(round((70 + d / 100 * 8) * (1 + 0.15 * o.danger) * (0.85 + randf() * 0.3) / 5.0)) * 5})
-	var rc := c.slice(n).filter(func(o): return o.get("arch", "") != "family")   # rescues hide in a town; farms have none
+	var rc := c.slice(n).filter(func(o): return o.get("arch", "") != "family" and not Fields.calm(o))   # rescues hide in a town; farms and cleared fields have none
 	if rc.size() and randf() < 0.6:
 		var o: Dictionary = rc[0]
 		var d := Vector2(o.x - s.x, o.y - s.y).length()
@@ -131,11 +138,17 @@ func contract_target(c: Dictionary) -> int:
 	return int(c.pickup) if (c.get("type", "") == "rescue" and c.get("stage", "") == "pickup") else int(c.dest)
 
 func objective() -> String:
-	if gm.S and gm.S.npc == null:
+	if gm.S and gm.S.npcs.is_empty():
+		if gm.G.pax.size(): return "Board the plane and fly %s to a family farm." % " and ".join(gm.G.pax.map(func(x): return x.who))
 		if gm.G.contracts.size(): return "Board the plane and fly to %s." % gm.strip(contract_target(gm.G.contracts[0])).name
 		return "No job yet. Board the plane to see the job board."
-	if gm.S and gm.S.npc:
-		return ("Lead %s back to the plane." % gm.S.npc.name) if gm.S.npc.follow else ("Find %s in %s." % [gm.S.npc.name, D.WHERE[gm.S.npc.where]])
+	if gm.S and gm.S.npcs.size():
+		var hid: Array = gm.S.npcs.filter(func(n): return not n.follow)
+		if hid.is_empty(): return "Lead %s back to the plane." % " and ".join(gm.S.npcs.map(func(n): return n.name))
+		var more := ("" if hid.size() == 1 else (" 1 more is hiding too." if hid.size() == 2 else " %d more are hiding too." % (hid.size() - 1)))
+		return "Find %s in %s.%s" % [hid[0].name, D.WHERE[hid[0].where], more]
+	if gm.G.pax.size():
+		return "Fly %s to a family farm." % " and ".join(gm.G.pax.map(func(x): return x.who))
 	for k in gm.G.contracts:
 		if k.get("type", "") == "rescue":
 			return ("Rescue %s at %s." % [k.who, gm.strip(int(k.pickup)).name]) if k.stage == "pickup" else ("Fly %s to %s." % [k.who, gm.strip(int(k.dest)).name])
@@ -164,10 +177,9 @@ func dbg_all_weapons() -> void:
 	gm.toast("Testing: all weapons added. Press 1-%d to equip." % D.WEAPONS.size(), "good")
 
 func dbg_ammo() -> void:
-	if gm.G == null: return
-	gm.G.ammo += 1000
+	gm.unl_ammo = not gm.unl_ammo
 	gm.sfx("click")
-	gm.toast("Testing: +1,000 rounds (%d total)." % gm.G.ammo, "good")
+	gm.toast("Testing: unlimited ammo %s." % ("ON, guns never run dry" if gm.unl_ammo else "off"), "good")
 
 func dbg_all_trinkets() -> void:
 	if gm.G == null: return
@@ -367,12 +379,10 @@ func act(a: String, v = null) -> void:
 				gm.toast("Bought %s. Press %d to equip." % [w.name, i + 1], "good")
 			gm.ui.render_menu()
 		"ammo":
-			if gm.G.cash >= 35:
-				gm.G.cash -= 35; gm.G.ammo += 30
-			gm.ui.render_menu()
-		"ammo100":
-			if gm.G.cash >= 100:
-				gm.G.cash -= 100; gm.G.ammo += 100
+			var ak := String(v)
+			var at: Dictionary = D.AMMO[ak]
+			if gm.G.cash >= int(at.price):
+				gm.G.cash -= int(at.price); gm.add_ammo(ak, int(at.box))
 			gm.ui.render_menu()
 		"med":
 			if gm.G.cash >= 60:
@@ -439,6 +449,7 @@ func start_new() -> void:
 	var seed_v := randi() % 1000000000
 	_regen_world(seed_v)
 	gm.G = gm.new_state(seed_v)
+	gm.fields.apply()
 	gm.known = {gm.wd.START: true}
 	var st := gm.strip(gm.wd.START)
 	var others := gm.wd.strips.filter(func(s): return s.type != "haven" and s.id != gm.wd.START)
@@ -457,7 +468,7 @@ func resume_from(st: Dictionary) -> void:
 	var wg := int(st.get("wgen", 1))
 	if gm.baker.overview == null or int(st.seed) != gm.wd.SEED or wg != gm.wd.GEN: _regen_world(int(st.seed), wg)
 	gm.G = st
-	for kv in [["time", 420.0], ["hull", 100.0], ["leak", 0.0], ["roadStrips", []], ["trinkets", []], ["diff", 1], ["band", 0], ["parts", 0], ["bombs", 0], ["armor", 0.0], ["rings", []], ["goods", {}], ["looted", {}], ["visits", {}], ["mayday", null], ["offers", []]]:
+	for kv in [["time", 420.0], ["hull", 100.0], ["leak", 0.0], ["roadStrips", []], ["trinkets", []], ["diff", 1], ["band", 0], ["parts", 0], ["bombs", 0], ["armor", 0.0], ["rings", []], ["goods", {}], ["looted", {}], ["visits", {}], ["mayday", null], ["offers", []], ["pax", []], ["fields", {}], ["crew", 0]]:
 		if not gm.G.has(kv[0]) or (gm.G[kv[0]] == null and kv[1] != null): gm.G[kv[0]] = kv[1]
 	gm.wd.strips = gm.wd.strips.filter(func(s): return s.type != "road")
 	for r in gm.G.roadStrips:
@@ -473,6 +484,7 @@ func resume_from(st: Dictionary) -> void:
 	gm.known = {}
 	for k in gm.G.get("known", []): gm.known[int(k)] = true
 	gm.known[gm.G.strip] = true
+	gm.fields.apply()
 	gm.enter_ground(gm.strip(gm.G.strip))
 	checkpoint()
 

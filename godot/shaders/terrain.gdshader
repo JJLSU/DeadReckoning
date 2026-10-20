@@ -10,6 +10,7 @@ uniform vec2 origin = vec2(0.0);
 uniform float step_u = 4.0;
 uniform float grid = 256.0;
 uniform bool shade_on = true;
+uniform int gen = 2;   // World.GEN: 3 adds bridges, tapered road ends and towns that thin out
 
 uniform float WORLD = 60000.0;   // land size, set from D.WORLD by baker.gd
 
@@ -73,7 +74,7 @@ int terr(float x, float y, out float TE, out float TM) {
 	if (edge < 1800.0) e -= (1800.0 - edge) / 1800.0 * 0.25;
 	if (dh < 1700.0) e = max(e, 0.47);
 	TE = e;
-	if (e >= 0.36) {
+	if (e >= 0.36 || gen >= 3) {   // gen 3 roads carry on over water as bridges
 		for (int i = 0; i < 64; i++) {
 			if (i >= road_count) break;
 			vec4 r = road_p[i];
@@ -81,6 +82,17 @@ int terr(float x, float y, out float TE, out float TM) {
 			float dx = r.z - r.x, dy = r.w - r.y, len2 = dx * dx + dy * dy, len = sqrt(len2);
 			float tt = clamp(((x - r.x) * dx + (y - r.y) * dy) / len2, 0.0, 1.0);
 			float ex = r.x + dx * tt - x, ey = r.y + dy * tt - y, d2 = ex * ex + ey * ey;
+			if (gen >= 3) {
+				float de = min(tt, 1.0 - tt) * len;
+				if (de < 380.0) {   // the road peters out into a dirt track that fades away
+					if (d2 < 36.0 && hsh(int(x) >> 3, int(y) >> 3, seed + 65) < de / 60.0) return 13;
+					continue;
+				}
+				if (de < 540.0) {   // and narrows before it gets there
+					float k = 0.4 + 0.6 * (de - 380.0) / 160.0;
+					d2 /= k * k;
+				}
+			}
 			if (d2 < 400.0) return (d2 < 9.0 && (int(floor(tt * len / 40.0)) & 1) == 1) ? 12 : 11;
 			if (d2 < 800.0) return 13;
 		}
@@ -94,9 +106,15 @@ int terr(float x, float y, out float TE, out float TM) {
 	if (e > 0.70) return e > 0.75 ? 8 : 7;
 	if (dh > 1700.0) {
 		float tn = vnoise(x / 2200.0 + 5.0, y / 2200.0 + 5.0, seed + 55);
-		if (tn > 0.86 && e < 0.62) {
+		if (tn > (gen >= 3 ? 0.8 : 0.86) && e < 0.62) {
 			int gx = int(floor(x / 70.0)), gy = int(floor(y / 70.0));
-			return (gx % 4 == 0 || gy % 4 == 0) ? 10 : 9;
+			bool street = gx % 4 == 0 || gy % 4 == 0;
+			if (gen < 3) return street ? 10 : 9;
+			// gen 3: blocks thin out toward the edge, down to the odd house on open ground
+			float p = smoothstep(0.82, 0.88, tn + (vnoise(x / 600.0, y / 600.0, seed + 57) - 0.5) * 0.04) * smoothstep(0.62, 0.58, e);
+			if (street) {
+				if (p > 0.3 + hsh(int(floor(float(gx) / 4.0)), int(floor(float(gy) / 4.0)), seed + 59) * 0.4) return 10;
+			} else if (hsh(gx, gy, seed + 61) < p) return 9;
 		}
 	}
 	float m = fbm(x / 4500.0 + 40.0, y / 4500.0 + 40.0, seed + 7, 4);
@@ -212,6 +230,48 @@ vec3 colr(int t, float x, float y, float e, float sh) {
 	return (c + vec3(j)) * L;
 }
 
+// Soft, ragged edges between natural ground types. Only the colour changes: terr() and
+// the CPU copy of it keep their hard thresholds, so gameplay sees the same ground.
+float edge_jit(float x, float y) {
+	return (vnoise(x / 90.0, y / 90.0, seed + 141) - 0.5) * 0.02 + (vnoise(x / 23.0, y / 23.0, seed + 143) - 0.5) * 0.003;
+}
+int low_type(float m) {
+	if (m > 0.62) return 6;
+	if (m > 0.53) return 5;
+	if (m < 0.43) return 4;
+	return 3;
+}
+vec3 blend_biomes(int t, vec3 c, float x, float y, float e, float sh) {
+	float j = edge_jit(x, y);
+	// farmland follows whole fields: a field near the edge is either all crop or all grass
+	if (t == 3 || t == 4) {
+		float wx = x + (vnoise(x / 700.0, y / 700.0, seed + 41) - 0.5) * 360.0;
+		float wy = y + (vnoise(x / 700.0 + 9.0, y / 700.0 + 9.0, seed + 43) - 0.5) * 360.0;
+		float cx = floor(wx / 420.0), cy = floor(wy / 300.0);
+		float mc = fbm(((cx + 0.5) * 420.0) / 4500.0 + 40.0, ((cy + 0.5) * 300.0) / 4500.0 + 40.0, seed + 7, 4);
+		mc += (hsh(int(cx), int(cy), seed + 25) - 0.5) * 0.03;
+		bool farm = mc < 0.43;
+		if (t == 3 && farm) c = colr(4, x, y, e, sh);
+		else if (t == 4 && !farm) c = colr(3, x, y, e, sh);
+	}
+	// beaches fade into the grass behind them
+	if (e < 0.43 && t <= 6) {
+		float k = 1.0 - smoothstep(0.401, 0.416, e + j * 0.3);
+		c = mix(c, colr(2, x, y, e, sh), k);
+	}
+	// rock and snow feather out over the hills instead of a cut line
+	if (e > 0.665) {
+		vec3 low = c;
+		if (t >= 7) low = colr(low_type(fbm(x / 4500.0 + 40.0, y / 4500.0 + 40.0, seed + 7, 4)), x, y, e, sh);
+		vec3 rock = t == 7 ? c : colr(7, x, y, e, sh);
+		float r = smoothstep(0.684, 0.716, e + j);
+		vec3 o = mix(low, rock, r);
+		if (e > 0.73) o = mix(o, colr(8, x, y, e, sh), smoothstep(0.741, 0.759, e + j * 0.7));
+		c = o;
+	}
+	return c;
+}
+
 void fragment() {
 	vec2 px = floor(UV * grid);
 	vec2 w = origin + px * step_u + vec2(step_u * 0.5);
@@ -224,6 +284,13 @@ void fragment() {
 		sh = clamp((pe - te) * 95.0, -0.36, 0.36);
 	}
 	vec3 c = colr(t, w.x, w.y, te, sh);
+	if (t >= 2 && t <= 8) c = blend_biomes(t, c, w.x, w.y, te, sh);
+	bool wet = te < 0.40;
+	if (t >= 11 && t <= 13 && !wet && te < 0.62 && distance(w, haven) > 1700.0)
+		wet = abs(fbm(w.x / 8000.0 + 17.3, w.y / 8000.0 + 3.1, seed + 99, 3) - 0.5) < 0.009;   // river
+	if (t >= 11 && t <= 13 && wet) {   // bridge deck over water, dark railings
+		c = t == 13 ? vec3(44.0, 42.0, 40.0) : (t == 12 ? vec3(190.0, 170.0, 90.0) : vec3(88.0, 84.0, 78.0));
+	}
 	if (t == 5) {   // the dark forest floor shades in from the grass instead of a hard edge
 		float ed = clamp((tm - 0.53) / 0.03, 0.0, 1.0);
 		if (ed < 1.0) c = mix(colr(3, w.x, w.y, te, sh), c, ed * ed * (3.0 - 2.0 * ed));

@@ -184,14 +184,19 @@ func dashed_arc(x: float, y: float, r: float, a0: float, a1: float, col: Color, 
 		cnt += 1
 	if pts.size() >= 2: ci.draw_multiline(pts, c(col), lw, true)
 
+static var RR_UNIT := PackedVector2Array()   # the corner arcs' unit offsets, worked out once
 func rr_pts(x: float, y: float, w: float, h: float, r: float) -> PackedVector2Array:
 	r = minf(r, minf(w, h) / 2.0)
+	if RR_UNIT.is_empty():
+		for k in 4:
+			for i in 5:
+				var a: float = -PI / 2 + PI / 2 * k + PI / 2 * i / 4.0
+				RR_UNIT.append(Vector2(cos(a), sin(a)))
+	var cs := [Vector2(x + w - r, y + r), Vector2(x + w - r, y + h - r), Vector2(x + r, y + h - r), Vector2(x + r, y + r)]
 	var pts := PackedVector2Array()
-	var corners := [[x + w - r, y + r, -PI / 2], [x + w - r, y + h - r, 0.0], [x + r, y + h - r, PI / 2], [x + r, y + r, PI]]
-	for cc in corners:
-		for i in 5:
-			var a: float = cc[2] + PI / 2 * i / 4.0
-			pts.append(Vector2(cc[0] + cos(a) * r, cc[1] + sin(a) * r))
+	pts.resize(20)
+	for j in 20:
+		pts[j] = cs[j / 5] + RR_UNIT[j] * r
 	return pts
 
 func rr(x: float, y: float, w: float, h: float, r: float, col: Color) -> void:
@@ -213,9 +218,23 @@ func tex_region(t: Texture2D, dst: Rect2, src: Rect2, mod: Color = Color.WHITE) 
 
 # ---------- text ----------
 ## align: -1 left, 0 center, 1 right. Vertical: y is the middle of the text (textBaseline=middle).
+## Shaped lines of text, kept so a string drawn again next frame is not shaped again
+## (shaping is most of the cost of drawing text). Cleared when it grows large.
+static var LINES := {}
+static func shaped(s: String, size: int, weight: String) -> TextLine:
+	var key := "%s|%d|%s" % [weight, size, s]
+	var tl: TextLine = LINES.get(key)
+	if tl == null:
+		if LINES.size() > 600: LINES.clear()
+		tl = TextLine.new()
+		tl.add_string(s, font(weight), size)
+		LINES[key] = tl
+	return tl
+
 func text(s: String, x: float, y: float, size: int, col: Color, align: int = -1, weight: String = "600", outline_w: float = 0.0, outline_col: Color = Color(0, 0, 0, 0.65), max_w: float = -1.0) -> void:
 	var f := font(weight)
-	var tw := f.get_string_size(s, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+	var tl := shaped(s, size, weight)
+	var tw := tl.get_size().x
 	var sc := 1.0
 	if max_w > 0 and tw > max_w:
 		sc = max_w / tw
@@ -223,17 +242,18 @@ func text(s: String, x: float, y: float, size: int, col: Color, align: int = -1,
 	if align == 0: x0 = x - tw * sc / 2.0
 	elif align == 1: x0 = x - tw * sc
 	var base := y + (f.get_ascent(size) - f.get_descent(size)) / 2.0
+	var top := -tl.get_line_ascent()   # TextLine draws from its top; draw_string drew from the baseline
 	if sc < 1.0:
 		save()
 		translate(x0, base)
 		scale(sc, 1.0)
-		if outline_w > 0: ci.draw_string_outline(f, Vector2.ZERO, s, HORIZONTAL_ALIGNMENT_LEFT, -1, size, int(outline_w), c(outline_col))
-		ci.draw_string(f, Vector2.ZERO, s, HORIZONTAL_ALIGNMENT_LEFT, -1, size, c(col))
+		if outline_w > 0: tl.draw_outline(ci.get_canvas_item(), Vector2(0, top), int(outline_w), c(outline_col))
+		tl.draw(ci.get_canvas_item(), Vector2(0, top), c(col))
 		restore()
 		return
 	if outline_w > 0:
-		ci.draw_string_outline(f, Vector2(x0, base), s, HORIZONTAL_ALIGNMENT_LEFT, -1, size, int(outline_w), c(outline_col))
-	ci.draw_string(f, Vector2(x0, base), s, HORIZONTAL_ALIGNMENT_LEFT, -1, size, c(col))
+		tl.draw_outline(ci.get_canvas_item(), Vector2(x0, base + top), int(outline_w), c(outline_col))
+	tl.draw(ci.get_canvas_item(), Vector2(x0, base + top), c(col))
 
 ## Alphabetic-baseline text (canvas default textBaseline), used where the original did not set middle.
 func text_base(s: String, x: float, y: float, size: int, col: Color, align: int = -1, weight: String = "600") -> void:
@@ -245,7 +265,7 @@ func text_base(s: String, x: float, y: float, size: int, col: Color, align: int 
 	ci.draw_string(f, Vector2(x0, y), s, HORIZONTAL_ALIGNMENT_LEFT, -1, size, c(col))
 
 static func measure(s: String, size: int, weight: String = "600") -> float:
-	return font(weight).get_string_size(s, HORIZONTAL_ALIGNMENT_LEFT, -1, size).x
+	return shaped(s, size, weight).get_size().x
 
 func tri(a: Vector2, b: Vector2, cc: Vector2, ca: Color, cb: Color, ccol: Color) -> void:
 	ci.draw_primitive(PackedVector2Array([a, b, cc]), PackedColorArray([c(ca), c(cb), c(ccol)]), PackedVector2Array())

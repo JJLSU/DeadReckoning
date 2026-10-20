@@ -203,6 +203,13 @@ const SV_AUTO_MULT := 3.0     # automatics (SMG, assault rifle) this many times 
 const SV_AR_MULT := 3.0       # ...and of those, assault rifles weighted up this much against SMGs (Greg)
 const SV_BURST := Vector2i(6, 9)   # rounds per automatic burst (was 3-5; Greg)
 const SV_DMG_REF := 30.0
+# Reloading (Greg 2026-10-20): survivors' guns hold D.WEAPONS "mag" rounds (v.mag) and take "rl"
+# seconds to reload, like yours (spare ammo unlimited). Empty, they reload: peekers duck back,
+# anyone without cover runs for some first. SV_RELOAD_CALL of the time they shout "Reloading!"
+# (speech bubble only). Ducked in cover with under SV_RELOAD_TOPUP of a mag, they top up.
+const SV_RELOAD_CALL := 0.5
+const SV_ATK_MEM := 8.0   # s: whoever hurt a survivor stays their target this long (Greg 2026-10-20)
+const SV_RELOAD_TOPUP := 0.5
 # Settled aim (Greg 2026-10-13): after standing still SV_SETTLE_T s a survivor's aim wobble (and
 # a single-bullet gun's spread) is down to SV_SETTLE_ACC of normal, easing in. Snap shots aren't.
 const SV_SETTLE_T := 0.8
@@ -470,7 +477,7 @@ func sv_suppress(v: Dictionary, bx: float, by: float, bvx: float, bvy: float) ->
 			cv.dk = int(cv.get("dk", 0)) + 1
 			if cv.dk >= SV_DUCK_MAX:   # pinned here: somewhere else
 				v.cvBad = {"x": cv.x, "y": cv.y, "t": gm.S.t + SV_DUCK_AVOID_T}
-				var nc = sv_find_cover(v, gm.S.p)
+				var nc = sv_find_cover(v, v.get("tgt", gm.S.p))
 				if nc is Dictionary:
 					v.cv = nc
 					v.cph = 0; v.cpt = 0.0; v.miss = 0; v.flk = 0.0; v.pks = 0
@@ -1069,7 +1076,9 @@ func sv_cover_fight(v: Dictionary, p: Dictionary, see: bool, dt: float) -> Varia
 		return nv * SV_COVER_SPD
 	if v.cph == 1:   # ducked down, gun on where they last saw you
 		v.ang = atan2(v.lky - v.y, v.lkx - v.x)
-		if v.cpt >= v.hide:
+		if at_cover and not v.has("rl") and int(v.get("mag", sv_mag_cap(v))) < sv_mag_cap(v) * SV_RELOAD_TOPUP:
+			sv_start_reload(v)   # a quiet moment: top up
+		if v.cpt >= v.hide and not v.has("rl"):   # (reloaded first)
 			v.cph = 2; v.cpt = 0.0; v.seen = -1.0; v.shots = 0
 		return Vector2.ZERO if at_cover else sv_nav(v, cv.x, cv.y)
 	if cv.has("sm"):   # in smoke: no stepping out, they shoot from inside it
@@ -1119,6 +1128,7 @@ func sv_cover_fight(v: Dictionary, p: Dictionary, see: bool, dt: float) -> Varia
 ## A survivor fires their gun. Automatics fire SV_BURST-round bursts; shotguns fire a spread of
 ## pellets. Damage per bullet is the normal survivor damage x (gun damage / SV_DMG_REF).
 func sv_fire(v: Dictionary, spread: float = 1.0) -> void:
+	if v.has("rl"): return   # reloading
 	var w: Dictionary = D.WEAPONS[int(v.get("w", 0))]
 	var auto: bool = w.get("auto", false)
 	var dmg: float = (8 + gm.S.danger) * gm.DF().dmg * float(w.dmg) / SV_DMG_REF
@@ -1130,10 +1140,14 @@ func sv_fire(v: Dictionary, spread: float = 1.0) -> void:
 	for k in int(w.pel):
 		var a: float = aim + (randf() - 0.5) * spr * 2.0
 		gm.S.bul.append({"x": v.x + cos(a) * 14, "y": v.y + sin(a) * 14, "vx": cos(a) * w.spd * 0.65, "vy": sin(a) * w.spd * 0.65,
-			"life": w.life, "dmg": dmg, "pl": false, "kb": 0.0, "bolt": w.bolt})
+			"life": w.life, "dmg": dmg, "pl": false, "kb": 0.0, "bolt": w.bolt, "src": v})
 	gm.sfx("bow" if w.silent else "enemy")
 	if not w.silent: gm.add_noise(float(w.noise) * SV_SHOT_NOISE)
 	if not w.silent: gm.muzzle_flash(v.x, v.y, aim)
+	v.mag = int(v.get("mag", sv_mag_cap(v))) - 1
+	if v.mag <= 0:   # empty
+		sv_start_reload(v)
+		return
 	if auto:
 		if v.burst <= 0: v.burst = randi_range(SV_BURST.x, SV_BURST.y)
 		v.burst -= 1
@@ -1168,8 +1182,58 @@ func sv_lead(v: Dictionary, spd: float) -> float:
 	var ahead := r + u * t * k
 	return v.ang + wrapf(ahead.angle() - direct, -PI, PI)
 
+## Who survivor v fights (Greg 2026-10-20): first whoever attacked them in the last SV_ATK_MEM s
+## (you, a rescue survivor, or a zombie while both are on screen); else the nearest of you and the
+## rescue survivors out of hiding that they can see; else you.
+func sv_target(v: Dictionary, p: Dictionary) -> Dictionary:
+	var a = v.get("atk")
+	if a is Dictionary and gm.S.t - float(v.get("atkT", -99.0)) < SV_ATK_MEM and sv_atk_live(v, a): return a
+	v.erase("atk")
+	var best: Dictionary = p
+	var bd := Vector2(p.x - v.x, p.y - v.y).length()
+	var pvis := gm.los(v.x, v.y, p.x, p.y)
+	for n in gm.S.npcs:
+		if gm.in_safe(n.x, n.y): continue   # hidden away: they don't know about them
+		var nd := Vector2(n.x - v.x, n.y - v.y).length()
+		if nd < 520 and (nd < bd or not pvis) and gm.los(v.x, v.y, n.x, n.y):
+			best = n; bd = nd; pvis = true
+	return best
+
+## Is attacker a still worth fighting for survivor v?
+func sv_atk_live(_v: Dictionary, a: Dictionary) -> bool:
+	if is_same(a, gm.S.p): return true
+	if gm.S.npcs.has(a): return not gm.in_safe(a.x, a.y)
+	return gm.S.zs.has(a) and not a.dead   # a zombie, while it's up
+
+## How many rounds survivor v's gun holds.
+func sv_mag_cap(v: Dictionary) -> int:
+	return int(D.WEAPONS[int(v.get("w", 0))].get("mag", 6))
+
+## Survivor v starts reloading (D.WEAPONS "rl" seconds, no shooting meanwhile): any burst ends,
+## SV_RELOAD_CALL of the time they shout it, and they get into cover to do it: a peeker ducks
+## back, someone in the open runs for cover if there's any (rushers just reload where they are).
+func sv_start_reload(v: Dictionary) -> void:
+	if v.has("rl"): return
+	v.rl = float(D.WEAPONS[int(v.get("w", 0))].get("rl", 2.0))
+	v.burst = 0
+	v.cd = maxf(v.cd, v.rl)
+	if randf() < SV_RELOAD_CALL: sv_say(v, "Reloading!")
+	if v.has("cv"):
+		if v.cph == 2 and not v.cv.has("sm"):
+			v.cph = 1; v.cpt = 0.0
+			v.hide = randf_range(SV_HIDE_MIN, SV_HIDE_MAX)
+	elif v.alert and not v.get("rush", false):
+		var nc = sv_find_cover(v, v.get("tgt", gm.S.p))
+		if nc is Dictionary:
+			v.cv = nc
+			v.cph = 0; v.cpt = 0.0; v.miss = 0; v.flk = 0.0; v.pks = 0
+
 ## Reinforcement survivor arriving from the edge of the map (noise waves at held strips).
 func spawn_edge_sv(n: int = 1) -> void:
+	if gm.S.has("pool"):   # a field you're clearing has only so many left to send (fields.gd)
+		n = mini(n, int(gm.S.pool))
+		if n <= 0: return
+		gm.S.pool = int(gm.S.pool) - n
 	for t2 in 40:
 		var side := randi() % 4
 		var c: int = 1 if side == 0 else (gm.S.cols - 2 if side == 1 else 1 + int(randf() * (gm.S.cols - 2)))
@@ -1201,24 +1265,38 @@ func spawn_edge_sv(n: int = 1) -> void:
 # the rescue survivor (pickup missions)
 # ======================================================================
 func spawn_npc(s: Dictionary) -> void:
-	var c = null
+	if gm.S == null: return
+	var used: Array = []
 	for k in gm.G.contracts:
 		if k.get("type", "") == "rescue" and k.stage == "pickup" and int(k.pickup) == s.id:
-			c = k
-			break
-	if c == null or gm.S == null: return
+			_spawn_one(k.who, k.where, k.id, used)
+	# a mayday you landed for (Greg, 2026-10-20): 1-3 people hiding in different buildings
+	var md = gm.G.mayday
+	if md and int(md.id) == s.id and md.get("landed", false):
+		for pp in md.ppl: _spawn_one(pp.who, pp.where, "", used)
+		var n: int = md.ppl.size()
+		gm.toast_later(1.6, ("%d survivors are hiding in town. Find them and bring them to the plane." % n) if n > 1 else "One survivor is hiding in town. Find them and bring them to the plane.", "mag")
+
+## Puts one rescue survivor in their hiding place: the building of kind `where` if the
+## town has one nobody else is using, else any free building. cid "" marks a mayday survivor.
+func _spawn_one(who: String, where: String, cid: String, used: Array) -> void:
 	var rm = null
 	for r in gm.S.rooms:
-		if r.kind == c.where:
+		if r.kind == where and not used.has(r):
 			rm = r
 			break
 	if rm == null:
 		for r in gm.S.rooms:
-			if r.kind == "house":
+			if r.kind == "house" and not used.has(r):
 				rm = r
 				break
-	if rm == null and gm.S.rooms.size(): rm = gm.S.rooms[gm.S.rooms.size() - 1]
+	if rm == null:
+		for r in gm.S.rooms:
+			if D.WHERE.has(r.kind) and not used.has(r):
+				rm = r
+				break
 	if rm == null: return
+	used.append(rm)
 	var x: float = (rm.c + rm.w / 2.0) * gm.TS
 	var y: float = (rm.r + rm.h / 2.0) * gm.TS
 	var q := 0
@@ -1226,15 +1304,28 @@ func spawn_npc(s: Dictionary) -> void:
 		x = (rm.c + 1.5 + randf() * (rm.w - 3)) * gm.TS
 		y = (rm.r + 1.5 + randf() * (rm.h - 3)) * gm.TS
 		q += 1
-	var where: String = c.where if rm.kind == c.where else "house"
-	gm.S.npc = {"x": x, "y": y, "ang": PI / 2, "hp": 60.0, "voice": randf_range(Synth.VOICE.x, Synth.VOICE.y), "name": c.who, "where": where, "cid": c.id, "follow": false, "wk": 0.0, "hit": 0.0,
-		"w": NPC_GUNS[randi() % NPC_GUNS.size()], "cd": 0.0, "fire_t": -1.0}
+	var wh: String = where if rm.kind == where else (rm.kind if D.WHERE.has(rm.kind) else "house")
 	# The building they're hiding in is safe for the mission: nothing spawns in it,
 	# zombies can't walk in, and anything already inside is removed.
-	gm.S.safe = Rect2(rm.c * gm.TS, rm.r * gm.TS, rm.w * gm.TS, rm.h * gm.TS)
+	var safe := Rect2(rm.c * gm.TS, rm.r * gm.TS, rm.w * gm.TS, rm.h * gm.TS)
+	gm.S.npcs.append({"x": x, "y": y, "ang": PI / 2, "hp": 60.0, "voice": randf_range(Synth.VOICE.x, Synth.VOICE.y), "name": who, "where": wh, "cid": cid, "follow": false, "wk": 0.0, "hit": 0.0,
+		"w": NPC_GUNS[randi() % NPC_GUNS.size()], "cd": 0.0, "fire_t": -1.0, "safe": safe})
+	gm.S.safes.append(safe)
 	gm.S.zs = gm.S.zs.filter(func(z): return not gm.in_safe(z.x, z.y))
 	gm.S.sv = gm.S.sv.filter(func(v): return not gm.in_safe(v.x, v.y))
-	gm.toast_later(0.7, "%s is hiding in %s." % [c.who, D.WHERE[where]], "mag")
+	if cid != "": gm.toast_later(0.7, "%s is hiding in %s." % [who, D.WHERE[wh]], "mag")
+
+## Takes a rescue survivor off the map (boarded or dead) and opens their hiding place again.
+func _drop_npc(n: Dictionary) -> void:
+	gm.S.npcs.erase(n)
+	gm.S.safes.erase(n.safe)
+
+## A mayday survivor is out of the mission (boarded or dead). When nobody is left, it's over.
+func _mayday_done(n: Dictionary) -> void:
+	var md = gm.G.mayday
+	if md == null: return
+	md.ppl = md.ppl.filter(func(pp): return pp.who != n.name)
+	if md.ppl.is_empty(): gm.G.mayday = null
 
 ## The rescue survivor shoots back: only once they're following you, and only for a
 ## while after you fire something loud (crossbow shots keep them quiet too).
@@ -1258,15 +1349,13 @@ func npc_fight(n: Dictionary, dt: float) -> void:
 	for k in int(w.pel):
 		var a: float = a0 + (randf() - 0.5) * float(w.spr) * 2.0
 		gm.S.bul.append({"x": n.x + cos(a) * 14, "y": n.y + sin(a) * 14, "vx": cos(a) * w.spd, "vy": sin(a) * w.spd, "life": w.life,
-			"dmg": float(w.dmg) * NPC_DMG, "pl": true, "kb": float(w.kb) * 0.5, "bolt": false})
+			"dmg": float(w.dmg) * NPC_DMG, "pl": true, "kb": float(w.kb) * 0.5, "bolt": false, "src": n})
 	gm.sfx(w.snd)
 	if not w.silent: gm.muzzle_flash(n.x, n.y, a0)
 	gm.add_noise(float(w.noise) * 0.5)
 	n.cd = (0.75 + float(w.rate)) * (1.0 + randf() * 0.4)
 
-func npc_hurt(d: float, dir: Vector2 = Vector2.ZERO) -> void:
-	var n = gm.S.npc
-	if n == null: return
+func npc_hurt(n: Dictionary, d: float, dir: Vector2 = Vector2.ZERO) -> void:
 	n.hp -= d
 	n.hit = 0.15
 	gm.hurt_cry(n)
@@ -1275,14 +1364,20 @@ func npc_hurt(d: float, dir: Vector2 = Vector2.ZERO) -> void:
 	if n.hp <= 0:
 		gm.blood(n.x, n.y, 8)
 		gm.stamp_corpse({"x": n.x, "y": n.y, "a": randf() * TAU, "shirt": "#3f7a7a", "skin": "#e0b894"})
-		gm.G.contracts = gm.G.contracts.filter(func(k): return k.id != n.cid)
-		gm.toast("%s did not make it. The job is gone." % gm.cap(n.name), "bad")
-		gm.S.npc = null
-		gm.S.safe = null
+		if n.cid == "":
+			_mayday_done(n)
+			gm.toast("%s did not make it." % gm.cap(n.name), "bad")
+		else:
+			gm.G.contracts = gm.G.contracts.filter(func(k): return k.id != n.cid)
+			gm.toast("%s did not make it. The job is gone." % gm.cap(n.name), "bad")
+		_drop_npc(n)
 
 func upd_npc(dt: float) -> void:
-	var n = gm.S.npc
-	if n == null: return
+	for n in gm.S.npcs.duplicate():
+		_upd_one(n, dt)
+		if gm.S == null: return
+
+func _upd_one(n: Dictionary, dt: float) -> void:
 	var p: Dictionary = gm.S.p
 	var dx: float = p.x - n.x
 	var dy: float = p.y - n.y
@@ -1308,15 +1403,27 @@ func upd_npc(dt: float) -> void:
 		n.ang = atan2(vy, vx)
 	npc_fight(n, dt)
 	if n.follow and (Vector2(n.x - gm.S.plane.x, n.y - gm.S.plane.y).length() < 160 or (gm.S.nearPlane and d < 120)):
-		for c in gm.G.contracts:
-			if c.id == n.cid:
-				c.stage = "aboard"
-				gm.G.nav = int(c.dest)
-				gm.toast("%s climbs into the back. Fly them to %s." % [gm.cap(n.name), gm.strip(int(c.dest)).name], "good")
+		if n.cid == "":
+			# a mayday survivor rides along and pays their share at a family farm (Greg, 2026-10-20)
+			var md = gm.G.mayday
+			if md:
+				var share: int = int(round(float(md.reward) / float(md.total) / 5.0)) * 5
+				gm.G.pax.append({"who": n.name, "pay": share})
+				_mayday_done(n)
+				var farm = gm.flight.nearest_farm(gm.S.s)
+				if farm and gm.G.nav < 0: gm.G.nav = int(farm.id)
+				var left: String = " Fly them to a family farm." if gm.G.mayday == null else (" %d still out there." % gm.G.mayday.ppl.size())
+				gm.toast("%s climbs into the back.%s" % [gm.cap(n.name), left], "good")
 				gm.sfx("cash")
-				break
-		gm.S.npc = null
-		gm.S.safe = null
+		else:
+			for c in gm.G.contracts:
+				if c.id == n.cid:
+					c.stage = "aboard"
+					gm.G.nav = int(c.dest)
+					gm.toast("%s climbs into the back. Fly them to %s." % [gm.cap(n.name), gm.strip(int(c.dest)).name], "good")
+					gm.sfx("cash")
+					break
+		_drop_npc(n)
 
 # ======================================================================
 # bombs
@@ -1681,7 +1788,8 @@ func sv_flee(v: Dictionary, dangers: Array, see: bool, dt: float) -> Variant:
 			v.erase("rfg")
 		elif there:
 			if v.alert and see and v.get("yell", 0.0) <= 0 and not v.has("unarmed"):
-				v.ang = atan2(gm.S.p.y - v.y, gm.S.p.x - v.x)
+				var tg: Dictionary = v.get("tgt", gm.S.p)
+				v.ang = atan2(tg.y - v.y, tg.x - v.x)
 				if v.cd <= 0: sv_fire(v)
 			return Vector2.ZERO
 		else:
@@ -1787,23 +1895,26 @@ func upd_survivors(p: Dictionary, dt: float) -> void:
 		if v.has("jt"):
 			v.jt -= dt
 			if v.jt <= 0: v.erase("jt")
-		var dx: float = p.x - v.x
-		var dy: float = p.y - v.y
+		var tp := sv_target(v, p)   # who they're fighting: you, a rescue survivor, or whoever's attacking them
+		v.tgt = tp
+		var isp := is_same(tp, p)
+		var dx: float = tp.x - v.x
+		var dy: float = tp.y - v.y
 		var d := Vector2(dx, dy).length()
 		if d == 0: d = 1
-		var lit: float = gm.seen_k()   # a flashlight at night carries farther
-		var see := d < 520 * lit and gm.los(v.x, v.y, p.x, p.y) and not smoke_blocks(v.x, v.y, p.x, p.y) and window_sight_ok(v.x, v.y, p.x, p.y)
+		var lit: float = gm.seen_k() if isp else 1.0   # a flashlight at night carries farther
+		var see := d < 520 * lit and gm.los(v.x, v.y, tp.x, tp.y) and not smoke_blocks(v.x, v.y, tp.x, tp.y) and window_sight_ok(v.x, v.y, tp.x, tp.y)
 		var fa := absf(U.ang_diff(atan2(dy, dx), float(v.ang)))   # how far off their facing you are
 		if v.alert: see = see and (d < SV_SENSE or fa < deg_to_rad(SV_VIEW_HALF_ALERT))
 		var iq: float = v.get("iq", 1.0)
 		var spot: bool = see and (v.alert or (d < SV_SPOT_R * iq * lit and (d < SV_SENSE * iq or fa < deg_to_rad(SV_VIEW_HALF * iq))))
 		if spot:   # seen: alerted, knows exactly where you are
-			sv_hear(v, p.x, p.y)
-			gm.S.svSeenT = gm.S.t   # (for the squad: someone has eyes on you)
+			sv_hear(v, tp.x, tp.y)
+			if isp: gm.S.svSeenT = gm.S.t   # (for the squad: someone has eyes on you)
 			if not v.get("called", false):   # first sighting (since they last stood down): raise the alarm
 				v.called = true
 				v.jt = SV_STARTLE_T   # startled hop
-				sv_raise(v.x, v.y, p.x, p.y)
+				sv_raise(v.x, v.y, tp.x, tp.y)
 				v.yell = SV_YELL_MIN + randf() * (SV_YELL_MAX - SV_YELL_MIN)
 				v.cd = maxf(v.cd, v.yell)
 				# one "Hey!" at a time: after a yell the rest wait SV_YELL_GAP seconds (they still
@@ -1812,6 +1923,11 @@ func upd_survivors(p: Dictionary, dt: float) -> void:
 					gm.S.yellT = gm.S.t + randf_range(SV_YELL_GAP.x, SV_YELL_GAP.y)
 					gm.sfx("yell", -1.0, v.get("voice", 1.0))
 		v.cd -= dt
+		if v.has("rl"):   # reloading
+			v.rl -= dt
+			if v.rl <= 0:
+				v.erase("rl")
+				v.mag = sv_mag_cap(v)
 		v.yell = maxf(0.0, v.get("yell", 0.0) - dt)
 		v.hit -= dt
 		if v.has("supW"): sv_dodge_wait(v, dt)   # a dodge coming once the beat is up
@@ -1831,15 +1947,16 @@ func upd_survivors(p: Dictionary, dt: float) -> void:
 				sv_mourn_tick(v, dt)
 				if v.mst <= 0: v.erase("mourn")
 		elif v.alert and v.has("sup"):   # under fire: out of its way first
-			var dg = sv_dodge(v, p, see, dt)
+			var dg = sv_dodge(v, tp, see, dt)
 			if dg is Vector2:
 				vx = dg.x; vy = dg.y
 		elif v.alert:
 			var sw = sv_smoke_wind(v, dt)
-			var bs = sv_bomb(v, p, see, dt) if v.yell <= 0 and not (sw is Vector2) else null
-			var fls = sv_flank(v, p, see, d, dt) if not (sw is Vector2) and not (bs is Vector2) and v.yell <= 0 and v.has("fl") else null
+			# (bombs and flanking are for you; other fights are just cover and shooting)
+			var bs = sv_bomb(v, p, see, dt) if isp and v.yell <= 0 and not (sw is Vector2) else null
+			var fls = sv_flank(v, p, see, d, dt) if isp and not (sw is Vector2) and not (bs is Vector2) and v.yell <= 0 and v.has("fl") else null
 			var cvs = null
-			if not (sw is Vector2) and not (bs is Vector2) and not (fls is Vector2) and v.yell <= 0: cvs = sv_cover_fight(v, p, see, dt)
+			if not (sw is Vector2) and not (bs is Vector2) and not (fls is Vector2) and v.yell <= 0: cvs = sv_cover_fight(v, tp, see, dt)
 			if sw is Vector2:   # winding up a smoke grenade
 				vx = sw.x; vy = sw.y
 			elif bs is Vector2:   # going to throw a bomb, or winding up to
@@ -1879,7 +1996,7 @@ func upd_survivors(p: Dictionary, dt: float) -> void:
 				if v.cd <= 0: sv_fire(v)
 			else:
 				# can't see you: go to where they last saw/heard you, search there, then give up
-				if not v.has("lkx"): sv_hear(v, p.x, p.y)   # alerted by a hit: they know where it came from
+				if not v.has("lkx"): sv_hear(v, tp.x, tp.y)   # alerted by a hit: they know where it came from
 				v.lost = v.get("lost", 0.0) + dt
 				if v.lost > SV_FORGET:
 					v.alert = false

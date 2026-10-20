@@ -197,6 +197,10 @@ func _render(kind: String) -> PackedFloat32Array:
 		"enemy": _noise(b, .16, 1400, .8, .25)
 		"hit": _noise(b, .07, 500, 1, .18)
 		"hurt": _tone(b, 140, 70, .18, .3, "square")
+		"bell":   # Failsafe's brass bell: a strike, then bell partials (hum, prime, tierce, quint, nominal...) dying away
+			_noise(b, .05, 2600, 1, .12)
+			for pt in [[220, 3.2, .09], [440, 2.6, .13], [441.2, 2.6, .05], [521, 2.0, .07], [663, 1.6, .05], [880, 1.4, .07], [1106, 1.0, .035], [1171, .9, .025]]:
+				_tone(b, pt[0], pt[0], pt[1], pt[2], "sine", 0.0, 0.0, 0.0, false, 0.003)
 		"loot": _tone(b, 660, 660, .08, .14, "triangle"); _tone(b, 990, 990, .12, .14, "triangle", .08)
 		"cash": _tone(b, 880, 880, .06, .1, "square"); _tone(b, 1320, 1320, .1, .1, "square", .06)
 		"scream": _noise(b, .9, 2300, 3, .35); _tone(b, 700, 1350, .7, .07, "square"); _tone(b, 520, 900, .7, .05, "sawtooth")
@@ -236,6 +240,8 @@ func _render(kind: String) -> PackedFloat32Array:
 		"swing": _noise(b, .14, 2600, 1.2, .25)
 		"thunder": _noise(b, 2.4, 110, .3, 1.1, "lowpass"); _noise(b, .4, 900, .5, .3)
 		"empty": _tone(b, 900, 700, .03, .08, "square")
+		"reload": _noise(b, .06, 2600, 1.4, .14); _tone(b, 420, 260, .05, .08, "square", .07)   # magazine out
+		"reloaded": _noise(b, .05, 3200, 1.6, .16); _tone(b, 700, 380, .04, .1, "square", .05); _noise(b, .07, 1800, 1.2, .12, "bandpass", .1)   # in, and racked
 		_:
 			if kind.begins_with("groan"):
 				var v := 0.06
@@ -414,7 +420,7 @@ func sfx(kind: String, vv: float = -1.0, pitch: float = 1.0) -> void:
 
 ## Pre-render common sounds so the first gunshot does not hitch.
 func warm() -> void:
-	for k in ["pistol", "hit", "hurt", "loot", "open", "click", "thump", "enemy", "cash", "swing", "boom", "bigboom"]:
+	for k in ["pistol", "hit", "hurt", "loot", "open", "click", "thump", "enemy", "cash", "swing", "boom", "bigboom", "reload", "reloaded"]:
 		if not sounds.has(k): sounds[k] = _to_stream(_render(k))
 		await get_tree().process_frame
 

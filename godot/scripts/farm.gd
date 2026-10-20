@@ -34,6 +34,13 @@ const CATCOL := ["#d8843a", "#7a7a78", "#1e1c1c", "#e8e2d8", "#a8763a"]
 static var fields: Array = []   # crop fields of the site being built: [Rect2i, wheat?]
 static var mill_at := Vector2.ZERO   # windmill of the site being built (px), copied into the site by spawn()
 static var solar: Array = []          # solar arrays of the site being built: Rect2i in tiles
+static var bell_at := Vector2.ZERO    # Failsafe's bell (px), copied into the site by spawn()
+# Failsafe's brass bell (Greg, 2026-10-20): hangs from a wooden frame in the middle of the
+# site; stand within BELL_REACH and click it to ring it.
+const BELL_REACH := 80.0     # px from the bell you can ring it from
+const BELL_CLICK := 30.0     # px round the bell a click counts as on it
+const BELL_SWING := 1.2      # swings per second after a ring
+const BELL_DAMP := 0.55      # swing left after one second
 const DESAT := 0.72          # farm colours keep this much of their saturation, so they sit with the rest of the world
 const FALL := ["#e08a2a", "#d0502a", "#e8b83a", "#b8402a"]   # fall foliage tints
 const FALL_CHANCE := 0.35    # share of farm trees in fall colours
@@ -56,20 +63,89 @@ static func pick_farms(wd, seed_v: int) -> void:
 		var roll: float = rng.next()
 		if s.type == "haven" or s.type == "airport" or s.id == wd.START or s.get("hostile", false): continue
 		if roll >= float(FAMILY_CHANCE[clampi(int(s.danger), 0, FAMILY_CHANCE.size() - 1)]): continue
-		var sn: String = SURNAMES[int(rng.next() * SURNAMES.size())]
-		for q in 10:
-			if not used.has(sn): break
-			sn = SURNAMES[int(rng.next() * SURNAMES.size())]
-		used[sn] = true
-		s.arch = "family"
-		s.type = "dirt"
-		s.len = 360.0
-		s.wid = 40.0
-		s.name = sn + " Family Farm"
-		s.fuel = true
-		s.fuelPrice = 5
-		s.shop = false
-		s.dealer = false
+		_make_farm(s, rng, used)
+
+## Greg (2026-10-20): only farms and Failsafe sell fuel, so every world gets one of them
+## within HOME_REACH of the home field. If none is there, the nearest free strip becomes
+## a farm, or a survivor-held one in reach when no free strip is, or failing both a new farm
+## strip is laid. Runs after Failsafe.place; own random stream.
+const HOME_REACH := 4500.0   # world units, about 80% of the Kestrel's starting range (18 gal)
+
+static func ensure_near_home(wd, seed_v: int) -> void:
+	var st: Dictionary = wd.strips[wd.START]
+	var used := {}
+	var pick = null
+	var pd := 1e18
+	for s in wd.strips:
+		if s.get("arch", "") == "family":
+			if Vector2(s.x - st.x, s.y - st.y).length() <= HOME_REACH: return
+			used[String(s.name).split(" ")[0]] = true
+			continue
+		if s.type == "haven" or s.type == "airport" or s.type == "road" or s.id == wd.START: continue
+		var d := Vector2(s.x - st.x, s.y - st.y).length()
+		var held: bool = s.get("hostile", false)
+		if held and d > HOME_REACH: continue
+		# a free strip in reach first, then a survivor-held one in reach, then the nearest free one
+		if held: d += 1e6
+		elif d > HOME_REACH: d += 2e6
+		if d < pd:
+			pd = d
+			pick = s
+	var rng := U.Mulberry.new(seed_v * 37 + 3)
+	if pick == null or pd >= 2e6:
+		# no strip at all in reach: lay a new farm strip between home and HOME_REACH
+		var s = _new_strip(wd, st, rng)
+		if s: pick = s
+	if pick:
+		pick.hostile = false   # only when no free strip is in reach: the survivors there move on
+		_make_farm(pick, rng, used)
+
+## A fresh strip near home on open ground, clear of other fields, or null if none fits.
+static func _new_strip(wd, st: Dictionary, rng):
+	# rings from 2500 out to near HOME_REACH first, then closer in down to 1200
+	var radii := range(2500, int(HOME_REACH) - 199, 250) + range(2250, 1199, -250)
+	for r in radii:
+		var n := maxi(8, int(TAU * r / 300))
+		var a0: float = rng.next() * TAU
+		for i in n:
+			var a := a0 + TAU * i / n
+			var x: float = st.x + cos(a) * r
+			var y: float = st.y + sin(a) * r
+			var ok := true
+			for o in wd.strips:
+				if Vector2(o.x - x, o.y - y).length() < 1200: ok = false; break
+			if not ok: continue
+			for k in 4:
+				var ang := k * PI / 4
+				var good := true
+				var q := -1.0
+				while q <= 1.0:
+					var tt: int = wd.terr(x + cos(ang) * 200 * q, y + sin(ang) * 200 * q)
+					if tt <= 2 or tt >= 7: good = false; break
+					q += 0.25
+				if not good or wd.in_forest(x, y, ang, 360.0, false): continue
+				var s := {"id": wd.strips.size(), "name": "", "type": "dirt", "x": x, "y": y, "ang": ang, "len": 360.0, "wid": 40.0,
+					"fuel": true, "shop": false, "dealer": false, "fuelPrice": 5, "seed": int(rng.next() * 1e9), "danger": 1,
+					"arch": "family", "home": false, "hostile": false}
+				wd.strips.append(s)
+				return s
+	return null
+
+static func _make_farm(s: Dictionary, rng, used: Dictionary) -> void:
+	var sn: String = SURNAMES[int(rng.next() * SURNAMES.size())]
+	for q in 10:
+		if not used.has(sn): break
+		sn = SURNAMES[int(rng.next() * SURNAMES.size())]
+	used[sn] = true
+	s.arch = "family"
+	s.type = "dirt"
+	s.len = 360.0
+	s.wid = 40.0
+	s.name = sn + " Family Farm"
+	s.fuel = true
+	s.fuelPrice = 5
+	s.shop = false
+	s.dealer = false
 
 # =====================================================================
 # Site layout (called from SiteGen.build)
@@ -83,6 +159,8 @@ static func build_site(gen: SiteGen, s: Dictionary) -> void:
 	var hh := gen.ri(9, 10)
 	var hc0 := COLS / 2 - hw / 2 + gen.ri(-3, 3)
 	var hr0 := ry / 2 - hh / 2 + gen.ri(-3, 0)
+	var fsafe: bool = s.get("failsafe", false)
+	if fsafe: hr0 = ry / 2 - hh - 4   # at Failsafe the house stands back so the bell has the middle
 	var roofs := ["#3f6f9f", "#4a7a5a", "#7a8088"]
 	gen.box(hc0, hr0, hw, hh, {"kind": "house", "split": true, "loot": [0, 0], "floor": "#9a7a52", "roof": dh(roofs[int(gen.R() * roofs.size())]), "flat": false})
 	var door: Array = gen.rooms[gen.rooms.size() - 1].door
@@ -92,6 +170,15 @@ static func build_site(gen: SiteGen, s: Dictionary) -> void:
 	for r in range(hr0 + hh, ry):
 		for c in [lc, lc + 1]:
 			if gen.at(c, r) == 0: gen.set_(c, r, 11)
+	# Failsafe: a gravel square in the middle of the site with the bell frame on it
+	bell_at = Vector2.ZERO
+	if fsafe:
+		var bc: int = COLS / 2 - 2
+		var br: int = ry / 2 - 2
+		for r in range(br, br + 5):
+			for c in range(bc, bc + 5):
+				if gen.at(c, r) == 0: gen.set_(c, r, 11)
+		bell_at = Vector2((bc + 2.5) * SiteGen.TS, (br + 2.5) * SiteGen.TS)
 	# barns: big, red, wide doors
 	var nb := gen.ri(1, 2)
 	var barns: Array = []
@@ -267,9 +354,53 @@ static func tree_tint(S: Dictionary, c: int, r: int) -> Color:
 	var f := U.hx(FALL[int(U.hash3(r, c, 78) * FALL.size())])
 	return Color(f.r * 2.2, f.g * 2.0, f.b * 1.6)
 
+## A click at screen point sp: rings Failsafe's bell when it lands on the bell and you
+## stand close enough. True when the click was used (so it isn't taken as anything else).
+func click_bell(sp: Vector2) -> bool:
+	var S = gm.S
+	if S == null or S.get("bell", Vector2.ZERO) == Vector2.ZERO: return false
+	var gs: float = gm.ground_scale()
+	var w := Vector2(S.cx + (sp.x - gm.Wv / 2) / gs, S.cy + (sp.y - gm.Hv / 2) / gs)
+	var b: Vector2 = S.bell
+	if w.distance_to(b) > BELL_CLICK: return false
+	if Vector2(S.p.x, S.p.y).distance_to(b) > BELL_REACH:
+		gm.toast("Get closer to ring the bell.")
+		return true
+	gm.sfx("bell")
+	S.bellA = 0.5
+	S.bellP = 0.0
+	gm.fields.on_bell()   # settlers come out to fill the plane (fields.gd)
+	return true
+
+## Failsafe's bell: the frame's shadow, two posts, the crossbeam and the brass bell,
+## swinging after a ring. Drawn above people so you can stand under it.
+func _draw_bell(g: Pen, b: Vector2) -> void:
+	var S: Dictionary = gm.S
+	var sw: float = float(S.get("bellA", 0.0)) * sin(float(S.get("bellP", 0.0)))
+	var wood := U.hx("#6a4a2a")
+	var brass := U.hx("#c8a040")
+	# shadows, offset like the trees'
+	g.rect(b.x - 30 + 10, b.y - 3 + 14, 60, 6, Color(0, 0, 0, .22))
+	g.circle(b.x + 9 + sw * 30, b.y + 14, 13, Color(0, 0, 0, .25))
+	# posts (seen from above) and the beam across them
+	g.rect(b.x - 34, b.y - 5, 10, 10, U.shade(wood, 0.8))
+	g.rect(b.x + 24, b.y - 5, 10, 10, U.shade(wood, 0.8))
+	g.rect(b.x - 32, b.y - 3, 64, 6, wood)
+	g.rect(b.x - 32, b.y - 3, 64, 2, U.shade(wood, 1.3))
+	# the bell, swinging toward the viewer and back along the beam's normal
+	var by: float = b.y + sw * 22
+	g.circle(b.x, by, 13, U.shade(brass, 0.6))          # lip
+	g.circle(b.x, by - 1, 11, brass)                     # shoulder
+	g.circle(b.x - 3, by - 4, 5, U.shade(brass, 1.35))   # shine
+	g.circle(b.x, by - 1, 3, U.shade(brass, 0.75))       # crown and the hanger
+	# a soft pulse while it's still ringing, so you can see it was rung
+	var a: float = float(S.get("bellA", 0.0))
+	if a > 0.05: g.ring(b.x, by, 16 + (1.0 - a / 0.5) * 18, Color(1.0, 0.85, 0.4, a * 0.9), 2)
+
 ## The windmill's wheel and tail vane, drawn above roofs and trees.
 func draw_top(g: Pen) -> void:
 	var S: Dictionary = gm.S
+	if S.get("bell", Vector2.ZERO) != Vector2.ZERO: _draw_bell(g, S.bell)
 	var m: Vector2 = S.get("mill", Vector2.ZERO)
 	if m == Vector2.ZERO: return
 	var T: float = gm.T
@@ -339,6 +470,9 @@ func spawn(site: Dictionary) -> void:
 	site.pets = []
 	site.mill = mill_at
 	site.solar = solar.duplicate()
+	site.bell = bell_at
+	site.bellA = 0.0   # swing amplitude (rad), set by a ring and dying away
+	site.bellP = 0.0   # swing phase
 	site.greetT = 0.0
 	var house = null
 	for rm in site.rooms:
@@ -423,6 +557,9 @@ func _step_to(e: Dictionary, tx: float, ty: float, spd: float, stop: float, paus
 func update(p: Dictionary, dt: float) -> void:
 	var S: Dictionary = gm.S
 	if not S.has("ff"): return
+	if S.get("bellA", 0.0) > 0.001:
+		S.bellA *= pow(BELL_DAMP, dt)
+		S.bellP += TAU * BELL_SWING * dt
 	S.greetT -= dt
 	for v in S.ff:
 		var dp := Vector2(p.x - v.x, p.y - v.y)

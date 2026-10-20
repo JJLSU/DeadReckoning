@@ -6,7 +6,10 @@ const WORLD := D.WORLD   # land size: set in data.gd
 const AIRFIELDS := 180     # airfields generated, not counting Haven (one name each in D.NAMES)
 const ROAD_COUNT := 64     # roads generated (must not exceed baker.ROAD_SLOTS / road_p[] in the shader)
 const DEADZONE := 13500.0
-const WORLD_GEN := 2          # map layout version; 2 keeps airfields out of forests
+const WORLD_GEN := 3          # map layout version; 2 keeps airfields out of forests, 3 adds bridges,
+							  # dirt-track road ends, no long lake crossings and towns that thin out
+const ROAD_TRACK := 380.0     # gen 3: last stretch of each road end that is a narrow dirt track
+const BRIDGE_MAX := 280.0     # gen 3: longest water crossing a new road may bridge
 const FOREST_MAX := 0.25      # most of an airfield's surroundings that may be forest
 # Survivor-held strips: no dead, an armed garrison, no fuel/trade/jobs.
 # Chance per strip by danger level (index = danger; 0 is Haven, 1 is the lowest tier).
@@ -75,13 +78,21 @@ func terr(x: float, y: float) -> int:
 	if edge < 1800: e -= (1800 - edge) / 1800.0 * 0.25
 	if dh < 1700: e = maxf(e, 0.47)
 	TE = e
-	if e >= 0.36:
+	if e >= 0.36 or GEN >= 3:   # gen 3 roads carry on over water as bridges
 		for r in ROADS:
 			if x < r.minx or x > r.maxx or y < r.miny or y > r.maxy: continue
 			var tt := clampf(((x - r.x1) * r.dx + (y - r.y1) * r.dy) / r.len2, 0.0, 1.0)
 			var ex: float = r.x1 + r.dx * tt - x
 			var ey: float = r.y1 + r.dy * tt - y
 			var d2 := ex * ex + ey * ey
+			if GEN >= 3:
+				var de: float = minf(tt, 1.0 - tt) * r.len
+				if de < ROAD_TRACK:   # the road peters out into a dirt track that fades away
+					if d2 < 36 and U.hash3(int(x) >> 3, int(y) >> 3, SEED + 65) < de / 60.0: return 13
+					continue
+				if de < ROAD_TRACK + 160:   # and narrows before it gets there
+					var k := (de - ROAD_TRACK) / 160.0
+					d2 /= (0.4 + 0.6 * k) * (0.4 + 0.6 * k)
 			if d2 < 400:
 				return 12 if (d2 < 9 and (int(floor(tt * r.len / 40.0)) & 1) == 1) else 11
 			if d2 < 800: return 13
@@ -94,10 +105,16 @@ func terr(x: float, y: float) -> int:
 	if e > 0.70: return 8 if e > 0.75 else 7
 	if dh > 1700:
 		var tn := U.vnoise(x / 2200.0 + 5, y / 2200.0 + 5, SEED + 55)
-		if tn > 0.86 and e < 0.62:
+		if tn > (0.8 if GEN >= 3 else 0.86) and e < 0.62:
 			var gx := int(floor(x / 70.0))
 			var gy := int(floor(y / 70.0))
-			return 10 if (gx % 4 == 0 or gy % 4 == 0) else 9
+			var street := gx % 4 == 0 or gy % 4 == 0
+			if GEN < 3: return 10 if street else 9
+			# gen 3: blocks thin out toward the edge, down to the odd house on open ground
+			var p := smoothstep(0.82, 0.88, tn + (U.vnoise(x / 600.0, y / 600.0, SEED + 57) - 0.5) * 0.04) * smoothstep(0.62, 0.58, e)
+			if street:
+				if p > 0.3 + U.hash3(int(floor(gx / 4.0)), int(floor(gy / 4.0)), SEED + 59) * 0.4: return 10
+			elif U.hash3(gx, gy, SEED + 61) < p: return 9
 	var m := U.fbm(x / 4500.0 + 40, y / 4500.0 + 40, SEED + 7, 4)
 	TM = m
 	if m > 0.62: return 6
@@ -213,6 +230,31 @@ func _add_ocean_storms(extra_land: int, st: Dictionary) -> void:
 	_sp_t = -1.0
 
 ## A route number (2-98) not used by another road yet, if one is left.
+## True when a straight road between these points would cross more than BRIDGE_MAX of
+## open water in one go (lakes, sea inlets); rivers and short gaps get bridges.
+func _long_water(x1: float, y1: float, x2: float, y2: float) -> bool:
+	var ln := Vector2(x2 - x1, y2 - y1).length()
+	var n := int(ln / 40.0)
+	var run := 0.0
+	for i in n + 1:
+		var t := float(i) / maxf(1.0, n)
+		var x := x1 + (x2 - x1) * t
+		var y := y1 + (y2 - y1) * t
+		if _wet(x, y):
+			run += 40.0
+			if run > BRIDGE_MAX: return true
+		else:
+			run = 0.0
+	return false
+
+## Open water (sea or lake; rivers don't count) by the same height noise terr() uses.
+func _wet(x: float, y: float) -> bool:
+	if x < 0 or y < 0 or x > WORLD or y > WORLD: return true
+	var e := U.fbm(x / 6500.0, y / 6500.0, SEED, 5)
+	var edge: float = min(min(x, y), min(WORLD - x, WORLD - y))
+	if edge < 1800: e -= (1800 - edge) / 1800.0 * 0.25
+	return e < 0.40
+
 func _route_no(R: Callable, used: Dictionary) -> int:
 	var n := 2 + int(R.call() * 97)
 	for _t in 97:
@@ -358,6 +400,17 @@ func gen_world(seed_v: int, gen: int = WORLD_GEN) -> void:
 		var y1: float = a.y + py - sin(an) * 600
 		var x2: float = b.x + px + cos(an) * 600
 		var y2: float = b.y + py + sin(an) * 600
+		if GEN >= 3:
+			# pull road ends that run out into water back to the shore
+			var cs := cos(an)
+			var sn := sin(an)
+			var pull := 0.0
+			while pull < 600 and _wet(x1, y1):
+				x1 += cs * 20; y1 += sn * 20; pull += 20
+			pull = 0.0
+			while pull < 600 and _wet(x2, y2):
+				x2 -= cs * 20; y2 -= sn * 20; pull += 20
+			if _long_water(x1, y1, x2, y2): continue
 		var dx := x2 - x1
 		var dy := y2 - y1
 		var len2 := dx * dx + dy * dy
@@ -436,3 +489,17 @@ func gen_world(seed_v: int, gen: int = WORLD_GEN) -> void:
 			s.dealer = false
 	# Family farms: friendly grass strips at low danger (FarmFolk.FAMILY_CHANCE). Own random stream too.
 	FarmFolk.pick_farms(self, SEED)
+	# Failsafe, the airfield by Greg's farm model, near the middle of the map (failsafe.gd)
+	Failsafe.place(self)
+	# a farm or Failsafe within reach of home, since nowhere else sells fuel (farm.gd)
+	FarmFolk.ensure_near_home(self, SEED)
+	# Trade (Greg, 2026-10-19): hangars at zombie and survivor-held fields sell nothing.
+	# Family farms sell fuel (plus their farm store), and Failsafe sells everything.
+	for s in strips:
+		if s.type == "haven": continue
+		var fs: bool = s.get("failsafe", false)
+		s.fuel = fs or s.get("arch", "") == "family"
+		s.shop = fs
+		s.dealer = fs
+	# what each strip is before any clearing or settling (Fields.apply puts the run's on top)
+	Fields.record_base(self)

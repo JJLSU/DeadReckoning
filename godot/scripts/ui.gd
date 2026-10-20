@@ -19,14 +19,15 @@ var pal := {}
 const LIGHT := {"paper": "#ebe3cb", "panel": "#f4eedd", "panel2": "#e3d9bd", "ink": "#1f2a2e", "dim": "#5f665f", "line": "#c8bb95", "magenta": "#9b2a68", "chart": "#2f5d7c", "good": "#4d6b2a", "bad": "#a3301f", "btn": "#1f2a2e", "btnink": "#f4eedd"}
 const DARK := {"paper": "#141a1c", "panel": "#1b2326", "panel2": "#243034", "ink": "#e8e1cc", "dim": "#9aa39a", "line": "#34443f", "magenta": "#d45a9d", "chart": "#79a9c9", "good": "#9cc063", "bad": "#e3644c", "btn": "#e8e1cc", "btnink": "#141a1c"}
 
-## Testing buttons (All weapons / 1,000 rounds / All trinkets / $1,000 / Unlimited fuel toggle / 1st, 2nd, 3rd plane / Reveal map /
+## Testing buttons (All weapons / Unlimited ammo toggle / All trinkets / $1,000 / Unlimited fuel toggle / 1st, 2nd, 3rd plane / Reveal map /
 ## Invulnerable toggle / 100 bombs) in exploration mode.
 ## Set to false to hide them for a release build.
 const DEBUG_BUTTONS := true
-## Test buttons are drawn at half the normal button size (Greg, 2026-10-15).
-const DBG_PAD := Vector2(6.5, 4.5)
-const DBG_FS := 7
-const DBG_R := 3
+## Test buttons are drawn at 0.65x the normal button size (Greg, 2026-10-15: half, then 1.3x that).
+const DBG_PAD := Vector2(8.5, 6)
+const DBG_FS := 9
+const DBG_R := 4
+const DBG_GAP := 4.0
 const DBG_KEYS := ["dbg_weapons", "dbg_ammo", "dbg_trinkets", "dbg_cash", "dbg_fuel", "dbg_plane1", "dbg_plane2", "dbg_plane3", "dbg_map", "dbg_invuln", "dbg_bombs"]
 
 func P(k: String) -> Color: return Color.html(pal[k])
@@ -44,7 +45,7 @@ func _ready() -> void:
 	root.theme = th
 	# HUD buttons
 	for spec in [["map", "Map"], ["pause", "Pause"], ["heal", "Heal"], ["throw", "Throw bomb"], ["cruise", "Cruise ×3"], ["board", "Board plane"], ["taxi", "Taxi back to hangar"],
-			["dbg_weapons", "All Weapons"], ["dbg_ammo", "1,000 Rounds"], ["dbg_trinkets", "All Trinkets"], ["dbg_cash", "$1,000"], ["dbg_fuel", "Unlimited Fuel"], ["dbg_plane1", "1st Plane"], ["dbg_plane2", "2nd Plane"], ["dbg_plane3", "3rd Plane"], ["dbg_map", "Reveal Map"],
+			["dbg_weapons", "All Weapons"], ["dbg_ammo", "Unlimited Ammo"], ["dbg_trinkets", "All Trinkets"], ["dbg_cash", "$1,000"], ["dbg_fuel", "Unlimited Fuel"], ["dbg_plane1", "1st Plane"], ["dbg_plane2", "2nd Plane"], ["dbg_plane3", "3rd Plane"], ["dbg_map", "Reveal Map"],
 			["dbg_invuln", "Invulnerable"], ["dbg_bombs", "100 Bombs"]]:
 		var b := Button.new()
 		b.text = spec[1]
@@ -418,7 +419,7 @@ const HELP := [
 	["Flying", "Once you are above about 2,000 feet and clear of weather, click Cruise or press C to fly three times faster. When you are low and near a charted runway, approach assist steers you onto the centerline as long as you let go of the stick. Radio maydays pop up on long flights and pay well if you land there in time."],
 	["Weather and damage", "Storms drift across the map and show on your minimap as blue patches. Their cores shake the plane apart. Flying low over towns draws gunfire that can hole the hull or the fuel lines. Hard landings cost hull too. Mechanics patch everything for cash."],
 	["Noise", "Your landing, gunfire, running, explosions, and siphoning fuel all fill the noise meter. At each mark a new wave of the dead arrives from the edges of the map. When it fills, the horde comes and does not stop. The crossbow and machete make no noise. Loot what you can and leave in time."],
-	["On foot", "WASD to move, aim with the mouse and click to fire. Hold Shift to run, hold right mouse to aim down sights for steadier, slower aim, Space to jump, 1–5 to select Revolver, Pump shotgun, Lever rifle, Submachine gun, or Assault rifle; 6 for Double-barrel, 7 for Crossbow, Q to cycle owned weapons, H to heal, G to throw a pipe bomb, F to switch your flashlight on or off (lit at night, you are seen from much farther), E to board the plane. Jumping clears sandbags and low fences inside the site, but not cars or the outer fence, and nothing can bite you in the air. Running is loud, and some of the bodies on the ground are not dead. Walk over containers to burst them open, then collect what spills out. Rarer finds glow green, blue, or gold. Locked safes take a spare part or a bomb and hold the best loot, including trinkets with permanent perks. Houses sometimes hide stashes under loose floorboards that only show up close. Footlockers hold ammo, bombs, and armor. Registers hold cash and jewelry. Toolboxes hold spare parts for field repairs. Medicine cabinets hold bandages and antibiotics. Every airfield has a small town beside it with shops and houses to search. Roofs lift away when you step inside. Each shop stocks by its trade: the pharmacy has medicine, the hardware store has parts, the gun shop has ammo. Traders pay different prices for goods at each field. Old charts reveal fields and narrow down Haven. The dead sometimes drop rounds. When you run dry you fight with a machete. Red barrels explode when shot. Gunfire draws more of the dead the longer you stay. Night falls at 18:00, and the dead move faster in the dark. You can sleep in the cockpit from the hangar tab. Return to the plane to refuel, take jobs, and upgrade."],
+	["On foot", "WASD to move, aim with the mouse and click to fire. Hold Shift to run, hold right mouse to aim down sights for steadier, slower aim, Space to jump, 1–5 to select Revolver, Pump shotgun, Lever rifle, Submachine gun, or Assault rifle; 6 for Double-barrel, 7 for Crossbow, Q to cycle owned weapons, R to reload (an empty gun reloads by itself, and switching guns cancels a reload), H to heal, G to throw a pipe bomb, F to switch your flashlight on or off (lit at night, you are seen from much farther), E to board the plane. Jumping clears sandbags and low fences inside the site, but not cars or the outer fence, and nothing can bite you in the air. Running is loud, and some of the bodies on the ground are not dead. Walk over containers to burst them open, then collect what spills out. Rarer finds glow green, blue, or gold. Locked safes take a spare part or a bomb and hold the best loot, including trinkets with permanent perks. Houses sometimes hide stashes under loose floorboards that only show up close. Footlockers hold ammo, bombs, and armor. Each gun takes its own ammo (the two shotguns share shells), and crossbow bolts are scarce. Registers hold cash and jewelry. Toolboxes hold spare parts for field repairs. Medicine cabinets hold bandages and antibiotics. Every airfield has a small town beside it with shops and houses to search. Roofs lift away when you step inside. Each shop stocks by its trade: the pharmacy has medicine, the hardware store has parts, the gun shop has ammo. Only family farms sell fuel, and only Failsafe, near the middle of the map, has a mechanic, trader and aircraft dealer. Old charts reveal fields and narrow down Haven. The dead sometimes drop rounds. When you run dry you fight with a machete. Red barrels explode when shot. Gunfire draws more of the dead the longer you stay. Night falls at 18:00, and the dead move faster in the dark. You can sleep in the cockpit from the hangar tab. Kill every enemy at a zombie or survivor-held field and it stays clear for two days. Ring the bell in Failsafe's square and settlers fill your plane's seats; fly enough of them in before time runs out and the field is yours for good, with fuel, medicine and a job board. Return to the plane to refuel, take jobs, and upgrade."],
 	["The goal", "Haven lies in one of the far corners of the map, across empty country no starter plane can cross. Old charts narrow down which. Earn a bigger airframe or bigger tanks first."],
 	["Keys", "M opens the chart. Esc or P pauses. On foot, the mouse wheel or + and − zoom the view, 0 resets it. Ctrl with + and − changes the interface size. F11 toggles fullscreen; Esc leaves fullscreen."]]
 
@@ -533,7 +534,9 @@ func render_menu() -> void:
 	tg.append(["Fuel pump, $%d/gal" % s.fuelPrice, true] if s.fuel else ["No fuel pump", false])
 	if s.shop: tg.append(["Mechanic and trader", true])
 	if s.dealer: tg.append(["Aircraft dealer", true])
-	if s.get("arch", "") == "family": tg.append(["Farm store: medicine", true])
+	var ft: Array = game.fields.tag(s)
+	if ft.size(): tg.append(ft)
+	if Fields.friendly(s) and not s.get("failsafe", false): tg.append(["Farm store: medicine", true])
 	if s.get("hostile", false): tg.append(["Held by armed survivors", false])
 	tags(tg)
 	note("Chalked on the hangar door: “%s”" % String(D.NOTES[int(s.seed) % D.NOTES.size()]).replace("{Dir}", World.haven_dir_name().capitalize()))
@@ -550,7 +553,7 @@ func render_menu() -> void:
 			row("⛽", "Buy 5 gallons", "$%d" % int(ceil(c5 * s.fuelPrice)), [["Buy", "b", "buy5", null, need < 0.1 or G.cash < int(ceil(c5 * s.fuelPrice))]])
 			row("⛽", "Fill the tanks", "%d gal for $%d" % [cf, cf * s.fuelPrice], [["Fill", "b", "fill", null, need < 0.1 or G.cash < s.fuelPrice]])
 		else:
-			empty("No pump here. Fuel comes from what you can scavenge.")
+			empty("Nobody sells fuel here. Family farms and Failsafe do. Otherwise it comes from what you can scavenge.")
 	elif mt == "contracts":
 		h4("Aboard, %d of %d" % [G.contracts.size(), Pp.slots])
 		if G.contracts.is_empty(): empty("Nothing aboard. Take a job from the board below.")
@@ -565,7 +568,7 @@ func render_menu() -> void:
 			row(c.icon, t, "%d km %s, pays $%d" % [U.km(Vector2(d.x - s.x, d.y - s.y).length()), game.menu.bearing(s, d), c.reward],
 				[["On course" if G.nav == d.id else "Set course", "alt", "nav", d.id], ["Drop", "alt", "dump", i]])
 		h4("Job board")
-		if G.offers.is_empty(): empty("The board is bare. Fields within your range have nothing posted.")
+		if G.offers.is_empty(): empty("The board is bare. Fields within your range have nothing posted." if Fields.friendly(s) else "Nobody posts jobs here. Family farms and Failsafe have job boards.")
 		for i in G.offers.size():
 			var c: Dictionary = G.offers[i]
 			var d: Dictionary = game.strip(game.menu.contract_target(c))
@@ -575,12 +578,12 @@ func render_menu() -> void:
 			row(c.icon, t, "%d km %s, danger %s, pays $%d%s" % [U.km(dd), game.menu.bearing(s, d), _pips(d.danger), c.reward, ", beyond current fuel" if dd > game.range_now() else ""],
 				[["Accept", "b", "accept", i, G.contracts.size() >= Pp.slots]])
 	elif mt == "shop":
-		if s.get("arch", "") == "family":
+		if Fields.friendly(s) and not s.get("failsafe", false):
 			h4("Farm store")
 			row("🩹", "Medkit", "$60, you have %d, heals 45" % G.med, [["Buy", "b", "med", null, G.cash < 60]])
 			row("🩹", "Bandage", "$25, you have %d, heals 20" % G.band, [["Buy", "b", "band", null, G.cash < 25]])
 		elif not s.shop:
-			empty("Nobody here but the dead. Regional fields and airports have mechanics and traders.")
+			empty(("The armed survivors here won't trade with you." if s.get("hostile", false) else "Nobody here but the dead.") + " Only Failsafe, near the middle of the map, has a mechanic and trader.")
 		else:
 			var tp: int = 450 * (G.tanks + 1) + G.plane * 200
 			var ep: int = 600 * (G.engine + 1)
@@ -600,8 +603,10 @@ func render_menu() -> void:
 				var st := ("in hand" if G.weapon == i else "owned") if own else ("$%d" % w.price)
 				row("🔫" if i == 0 else ("💥" if i == 1 else "🎯"), "[%d] %s" % [i + 1, w.name], "%s, %s" % [cap, st],
 					[[("Equipped" if G.weapon == i else "Equip") if own else "Buy", "b", "weapon", i, G.weapon == i or (not own and G.cash < w.price)]])
-			row("🧷", "Box of 30 rounds", "$35, you have %d" % G.ammo, [["Buy", "b", "ammo", null, G.cash < 35]])
-			row("📦", "Case of 100 rounds", "$100", [["Buy", "b", "ammo100", null, G.cash < 100]])
+			for ak in D.AMMO_KEYS:
+				var at: Dictionary = D.AMMO[ak]
+				row("🎯" if ak == "bolt" else "🧷", "%s, box of %d" % [at.name, at.box], "$%d, you have %d" % [at.price, int(game.ammo_pool().get(ak, 0))],
+					[["Buy", "b", "ammo", ak, G.cash < int(at.price)]])
 			row("🩹", "Medkit", "$60, you have %d, heals 45" % G.med, [["Buy", "b", "med", null, G.cash < 60]])
 			row("🩹", "Bandage", "$25, you have %d, heals 20" % G.band, [["Buy", "b", "band", null, G.cash < 25]])
 			row("💣", "Pipe bomb", "$60, you have %d" % G.bombs, [["Buy", "b", "bomb", null, G.cash < 60]])
@@ -628,7 +633,7 @@ func render_menu() -> void:
 		var ok := hr >= 17 or hr < 5
 		row("🌙", "Sleep in the cockpit until dawn", "Heals 40. The yard fills back up by morning." if ok else ("You can bed down after 17:00. It is %s." % game.clock()), [["Sleep", "b", "sleep", null, not ok]])
 		if not s.dealer:
-			empty("No aircraft for sale here. Airports sometimes have a dealer.")
+			empty("No aircraft for sale here. Failsafe has a dealer.")
 		else:
 			var trade := int(floor(D.PLANES[G.plane].price * 0.5))
 			for i in D.PLANES.size():
@@ -720,6 +725,9 @@ func update_buttons() -> void:
 	btns.taxi.visible = fl and F.onGround and F.departing and F.spd < 3
 	var inv: bool = gm.invuln
 	var uf: bool = gm.unl_fuel
+	var ua: bool = gm.unl_ammo
+	btns.dbg_ammo.text = "Unlimited Ammo: ON" if ua else "Unlimited Ammo"
+	btns.dbg_ammo.add_theme_stylebox_override("normal", _sb(Color(155 / 255.0, 42 / 255.0, 104 / 255.0, 0.85) if ua else Color(38 / 255.0, 52 / 255.0, 78 / 255.0, 0.8), Color.html("#d45a9d") if ua else Color(239 / 255.0, 230 / 255.0, 207 / 255.0, 0.25), 1, DBG_R, DBG_PAD))
 	btns.dbg_fuel.text = "Unlimited Fuel: ON" if uf else "Unlimited Fuel"
 	btns.dbg_fuel.add_theme_stylebox_override("normal", _sb(Color(155 / 255.0, 42 / 255.0, 104 / 255.0, 0.85) if uf else Color(38 / 255.0, 52 / 255.0, 78 / 255.0, 0.8), Color.html("#d45a9d") if uf else Color(239 / 255.0, 230 / 255.0, 207 / 255.0, 0.25), 1, DBG_R, DBG_PAD))
 	btns.dbg_invuln.text = "Invulnerable: ON" if inv else "Invulnerable"
@@ -741,7 +749,7 @@ func update_buttons() -> void:
 		b.visible = DEBUG_BUTTONS and gr
 		b.size.x = dw
 		b.position = Vector2(vs.x - 12 - b.size.x, dy)
-		dy += b.size.y + 3
+		dy += b.size.y + DBG_GAP
 
 # ---------------------------------------------------------------- map
 func toggle_map() -> void:
@@ -756,7 +764,7 @@ func toggle_map() -> void:
 	var ms := maxf(220, minf(minf(vs.x - 48, vs.y - 170), 760))
 	map_cv.custom_minimum_size = Vector2(ms, ms)
 	map_note.custom_minimum_size.x = ms
-	map_note.text = "Click a charted field to set your course. Magenta rings are fields, filled ones sell fuel. Amber rings are delivery stops. Red rings with a cross are held by armed survivors: no fuel, no trade. Green rings are family farms: friendly folk, fuel and medicine. Brown dashed rings mark rough danger zones around home. Gray squares are road landings you made. Blue patches are storms, which drift. The dashed circle is how far your fuel reaches now."
+	map_note.text = "Click a charted field to set your course. Magenta rings are fields, filled ones sell fuel. Amber rings are delivery stops. Red rings with a cross are held by armed survivors: no fuel, no trade. Green rings are family farms and fields your settlers hold: friendly folk, fuel and medicine. Orange rings with a count like 3/8 are fields you cleared and the settlers there so far: ring the bell at Failsafe and fly in enough to hold them before the enemy comes back. Brown dashed rings mark rough danger zones around home. Gray squares are road landings you made. Blue patches are storms, which drift. The dashed circle is how far your fuel reaches now."
 	map_cv.queue_redraw()
 
 
@@ -868,13 +876,14 @@ class MapView extends Control:
 				if ms > 420 or G.nav == s.id or s.id == G.strip:
 					g.text_base(s.name, x + r + 4, y + 4, 11, Color(20 / 255.0, 26 / 255.0, 28 / 255.0, 0.85), -1, "600")
 				continue
-			var sc: Color = Color.html("#4a7a4c") if s.get("arch", "") == "family" else mag   # family farms in green
+			# family farms and settled fields in green, cleared fields waiting for settlers in orange
+			var sc: Color = Color.html("#4a7a4c") if Fields.friendly(s) else (Color.html("#d8641a") if s.get("cleared", false) else mag)
 			g.ring(x, y, r, sc, 2)
 			if s.fuel: g.circle(x, y, r - 2.5, sc)
 			if dests.has(s.id): g.ring(x, y, r + 5, Color.html("#d9a441"), 2.5)
 			if G.nav == s.id: g.line(me.x * k, me.y * k, x, y, Color.WHITE, 1.5)
-			if ms > 420 or dests.has(s.id) or G.nav == s.id or s.id == G.strip:
-				g.text_base(s.name, x + r + 4, y + 4, 11, Color(20 / 255.0, 26 / 255.0, 28 / 255.0, 0.85), -1, "600")
+			if ms > 420 or dests.has(s.id) or G.nav == s.id or s.id == G.strip or s.get("cleared", false):
+				g.text_base(s.name + gm.fields.map_count(s), x + r + 4, y + 4, 11, Color(20 / 255.0, 26 / 255.0, 28 / 255.0, 0.85), -1, "600")
 		g.save()
 		# out over the open ocean you can be off the chart: pin the marker to its edge
 		g.translate(clampf(me.x * k, 8, ms - 8), clampf(me.y * k, 8, ms - 8))

@@ -427,7 +427,7 @@ func build(gm, s: Dictionary) -> Dictionary:
 			var gj := (U.vnoise(c / 5.0, r / 5.0, s.id + 3) - 0.5) * 12
 			var j := (U.hash3(c, r, s.id + 11) - 0.5) * 5
 			var b: Array
-			var fb = FarmFolk.tile_col(v, c, r, gj, j, s.id) if A == "family" else null
+			var fb = FarmFolk.tile_col(v, c, r, gj, j, s.id) if A == "family" and not (v == 3 and s.get("failsafe", false)) else null   # Failsafe's runway is paved
 			if fb != null: b = fb
 			elif v == 2: b = [104 + j, 86 + j, 64 + j]
 			elif v == 1 or v == 15: b = [40, 36, 31]
@@ -609,7 +609,9 @@ static func bake_draw(g: Pen, st: Dictionary) -> void:
 			if v == 10 and not fam: g.rect(cc * TS + 5, r * TS + 7, TS, TS, Color(0, 0, 0, .3))
 			elif v == 1 or v == 15:
 				for b in band.call(cc * TS + 5, r * TS + 7, arms.call(cc, r)): g.rect(b[0], b[1], b[2], b[3], Color(0, 0, 0, .3))
-	# (tree shadows are drawn live from the sun: render.gd foot_tree_shadows)
+	for r in rows:
+		for cc in cols:
+			if G1[r * cols + cc] == 5: g.ellipse((cc + .5) * TS + 9, (r + .5) * TS + 12, 30, 24, 0, U.rgb(10, 18, 8, .33))
 	for r in rows:
 		for cc in cols:
 			var v := G1[r * cols + cc]

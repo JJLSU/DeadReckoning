@@ -66,12 +66,33 @@ static func memo(gm, key: String):
 		MEMO_F = f
 	if MEMO.has(key): return MEMO[key]
 	var v
+	var now := Time.get_ticks_msec()
+	if key == "range" and now - RANGE_MS < 250 and now >= RANGE_MS and is_same(RANGE_GM, gm):
+		MEMO[key] = RANGE_V   # the fuel range is a readout: four times a second is plenty
+		return RANGE_V
 	match key:
 		"approach": v = gm.flight.approach_info()
 		"touchdown": v = gm.flight.predict_touchdown()
-		"range": v = gm.range_now()
+		"range":
+			v = gm.range_now()
+			RANGE_V = v; RANGE_MS = now; RANGE_GM = gm
 	MEMO[key] = v
 	return v
+static var RANGE_V = 0.0
+static var RANGE_MS := -100000
+static var RANGE_GM = null
+
+## The strips the player knows (to label and to show on the minimap), kept until that changes.
+static var KNOWN_L: Array = []
+static var KNOWN_D = null
+static var KNOWN_N := -1
+static var KNOWN_S := -1
+static func known_strips(gm) -> Array:
+	var wd = gm.wd
+	if not is_same(KNOWN_D, gm.known) or KNOWN_N != gm.known.size() or KNOWN_S != wd.strips.size():
+		KNOWN_D = gm.known; KNOWN_N = gm.known.size(); KNOWN_S = wd.strips.size()
+		KNOWN_L = wd.strips.filter(func(s): return gm.known.has(s.id))
+	return KNOWN_L
 
 ## How far a point at height hgt above (x, y) shifts on screen, in world units.
 static func lift(x: float, y: float, hgt: float) -> Vector2:
@@ -101,6 +122,21 @@ const TREE_FADE_GROUND := 0.16   # twice the top-altitude value (Greg, 2026-10-1
 const EDGE_OPACITY := 1.4
 ## Deep forest trees are this much bigger again (Greg, 2026-10-14); the edges keep their size.
 const DEEP_GROW := 1.3
+const DEEP_SHADOW_FROM := 0.3   # forest depth (dp) where tree shadows start thinning out...
+const DEEP_SHADOW_TO := 0.8     # ...and where none are left
+const DEEP_LOWER_DARK := 0.6    # lower-layer tint of a tree without a shadow
+## Isolated stands of the 3D-rendered test trees (Tx.T3D) in open grass, to compare with the
+## crown trees (Greg, 2026-10-18). A grass cell starts a stand with this chance.
+const T3D_STAND_P := 0.006
+const T3D_FOREST_P := 0.03          # share of forest trees drawn as 3D trees instead of crowns
+const T3D_STAND_H := Vector2(0.65, 1.6)   # a stand's height factor ranges over this (trees vary 0.85-1.15 of it)
+const T3D_SHADE_W := 1.3            # the dark patch under a 3D tree, times its width...
+const T3D_SHADE_A := 0.5            # ...and its opacity
+## A green 3D tree's tint: s from -1 (dark, cool green) through 0 (as rendered) to 1 (light, yellow green).
+static func _t3_shade(s: float) -> Color:
+	if s < 0.0: return Color(1, 1, 1).lerp(Color(0.72, 0.84, 0.78), -s)
+	return Color(1, 1, 1).lerp(Color(1.18, 1.12, 0.78), s)
+const T3D_TINT := [Color(0.4, 0.42, 0.39), Color(0.66, 0.68, 0.64), Color(1, 1, 1)]   # low, middle, top layers: darker toward the ground (Greg, 2026-10-18)
 const TREE_FADE_TOP := 0.08
 const TREE_FADE_ALT := 120.0   # the highest a plane climbs (flight.gd caps the target at 120)
 static func tree_fade(alt: float) -> float:
@@ -188,22 +224,39 @@ static func _scatter_chunk(gm, kx: int, ky: int, deadline: int):
 	var gy0 := int(ceil(ky * CH / SG))
 	var gy1 := int(ceil((ky + 1) * CH / SG))
 	if ch == null:
-		ch = {"done": false, "i": 0, "glint": PackedFloat32Array(), "car": [], "rock": [], "b": []}
-		for b in 2 + 2 * Tx.TREES.size(): ch.b.append(PackedFloat32Array())   # + the forest mist puffs
+		ch = {"done": false, "i": 0, "glint": PackedFloat32Array(), "car": [], "rock": [], "b": [], "hq": {}}
+		for b in 2 + 2 * Tx.TREES.size() + 4 * Tx.T3D.size(): ch.b.append(PackedFloat32Array())   # + the forest mist puffs, the 3D trees
 		gm.TCACHE[key] = ch
 		if gm.TCACHE.size() > 60000: gm.TCACHE.clear()
 	var nx := gx1 - gx0
 	var total := nx * (gy1 - gy0)
 	var bufs: Array = ch.b
 	var NT: int = Tx.TREES.size()
-	var tree := func(ti: int, x: float, y: float, w: float, op: float) -> void:
+	var tops: Dictionary = ch.hq
+	var tree := func(ti: int, x: float, y: float, w: float, op: float, dp: float) -> void:
 		var hf := 0.6 + U.hash3(int(x), int(y), seed_v + 215) * 0.9   # 0.6 to 1.5 times the average height
 		var hgt := w * TREE_H * hf
-		_q(bufs[0], x, y, w * 0.84, Color(1, 1, 1, 0.6), hgt, -hgt / (w * 0.84))
+		_hq_add(tops, x, y, w * 0.42, hgt)
+		# deep in a forest the shadows fall on the near-black floor under other crowns, where they
+		# barely show: they thin out from the edge inward (they cost a third of a forest's drawing)
+		# (a tree without one has a darker lower layer instead, so the canopy keeps its depth)
+		var lt := FLIGHT_LOWER_TINT
+		if U.hash3(int(y), int(x), seed_v + 217) >= smoothstep(DEEP_SHADOW_FROM, DEEP_SHADOW_TO, dp):
+			_q(bufs[0], x, y, w * 0.84, Color(1, 1, 1, 0.6), hgt, -hgt / (w * 0.84))
+		else:
+			lt *= DEEP_LOWER_DARK
 		var lo: Array = _lower_opts(ti)   # the lower layer is a different sprite of the same colour
 		_q(bufs[1 + lo[int(U.hash3(int(y), int(x), seed_v + 216) * lo.size()) % lo.size()]], x, y, w * 0.84,
-			Color(FLIGHT_LOWER_TINT, op * 0.5), hgt * 0.5, hgt * 0.5 / (w * 0.84))
+			Color(lt, op * 0.5), hgt * 0.5, hgt * 0.5 / (w * 0.84))
 		_q(bufs[1 + NT + ti], x, y, w, Color(1, 1, 1, op * 0.5), hgt, hgt / w)
+	var B3 := 2 + 2 * NT
+	# a 3D tree: hf scales its height, tint its colour; a soft dark patch lies on the ground under it
+	var t3 := func(v: int, x: float, y: float, w: float, hf: float, tint: Color) -> void:
+		var hgt := w * TREE_H * hf
+		_hq_add(tops, x, y, w * 0.42, hgt)
+		_q(bufs[0], x, y, w * T3D_SHADE_W, Color(1, 1, 1, T3D_SHADE_A), 0.0, -0.001)
+		_q(bufs[B3 + v * 4], x, y, w, Color(0, 0, 0, 0.45), hgt, -300.0 - hgt / w)
+		for l in 3: _q(bufs[B3 + v * 4 + 1 + l], x, y, w, T3D_TINT[l] * tint, hgt * (0.45 + 0.275 * l), 300.0 + hgt * (0.45 + 0.275 * l) / w)
 	while ch.i < total and Time.get_ticks_usec() < deadline:
 		var gx: int = gx0 + ch.i % nx
 		var gy: int = gy0 + ch.i / nx
@@ -216,7 +269,7 @@ static func _scatter_chunk(gm, kx: int, ky: int, deadline: int):
 		if tt <= 1:
 			if h < 0.25: ch.glint.append_array([wx, wy, h])
 			continue
-		if wd.strip_at(wx, wy, 6): continue
+		if wd.strip_at(wx, wy, 6) or Failsafe.on_farm(wd, wx, wy, 25): continue
 		if tt >= 11 and tt <= 13:
 			if h < 0.22:
 				var rd = wd.road_at(wx, wy)
@@ -224,6 +277,30 @@ static func _scatter_chunk(gm, kx: int, ky: int, deadline: int):
 			continue
 		if tt == 7 or tt == 8:
 			if h < 0.35: ch.rock.append([wx, wy, 5 + h * 22, h * 5, hc("#c8c8c4") if tt == 8 else hc("#8a857a")])
+			continue
+		if (tt == 3 or tt == 4) and not Tx.T3D.is_empty() and U.hash3(gx, gy, seed_v + 231) < T3D_STAND_P:
+			# a stand of 7-16 3D trees; fall ones where the ground has its autumn patches
+			# Each stand has its own height, size, green shade and one or two sprites, so its trees
+			# look alike and stands differ from each other (Greg, 2026-10-18).
+			var n3 := 7 + int(U.hash3(gx, gy, seed_v + 232) * 10)
+			var au := U.vnoise(wx / 650.0, wy / 650.0, seed_v + 131)
+			var fall := au > 0.6
+			var sh := lerpf(T3D_STAND_H.x, T3D_STAND_H.y, U.hash3(gx, gy, seed_v + 237))
+			var sw := lerpf(42.0, 74.0, U.hash3(gx, gy, seed_v + 238))
+			var stint := _t3_shade(U.hash3(gx, gy, seed_v + 239) * 2.0 - 1.0)
+			var sv := int(U.hash3(gx, gy, seed_v + 240) * Tx.T3D_FALL)
+			for q in n3:
+				var a := U.hash3(gx * 7 + q, gy, seed_v + 234) * TAU
+				var rr := sqrt(U.hash3(gx, gy * 7 + q, seed_v + 235)) * (50.0 + n3 * 9.0)
+				var tx := wx + cos(a) * rr
+				var ty := wy + sin(a) * rr
+				var tq := wd.terr(tx, ty)
+				if (tq != 3 and tq != 4) or Failsafe.on_farm(wd, tx, ty, 30): continue
+				var hv := U.hash3(gx + q * 13, gy - q, seed_v + 236)
+				var v := Tx.T3D_FALL + int(hv * (Tx.T3D_N - Tx.T3D_FALL)) if fall and hv < 0.7 else (sv + (1 if fmod(hv * 7.31, 1.0) > 0.7 else 0)) % Tx.T3D_FALL
+				var tj := 1.0 + (U.hash3(gx - q, gy + q * 5, seed_v + 241) - 0.5) * 0.12   # a little brightness per tree
+				var tint := Color(stint.r * tj, stint.g * tj, stint.b * tj) if v < Tx.T3D_FALL else Color(tj, tj, tj)
+				t3.call(mini(v, Tx.T3D.size() - 1), tx, ty, sw * (0.85 + hv * 0.3), sh * (0.85 + fmod(hv * 3.7, 1.0) * 0.3), tint)
 			continue
 		if tt == 3 and h >= 0.05 and h < 0.16:
 			var bs := 10 + h * 40
@@ -245,10 +322,19 @@ static func _scatter_chunk(gm, kx: int, ky: int, deadline: int):
 				var tx := (gx + U.hash3(gx, gy * 3 + q, seed_v + 212 + so)) * SG
 				var ty := (gy + U.hash3(gx + q, gy - q, seed_v + 213 + so)) * SG
 				var sz := lerpf(lerpf(0.5, 1.0, dp), lerpf(0.8, 1.5, dp), U.hash3(gx * 5 + q, gy * 7 - q, seed_v + 214 + so)) * lerpf(1.0, DEEP_GROW, dp)
-				tree.call(_tree_at(tx, ty, hq, seed_v), tx, ty, ((56 if tt == 6 else 50) + hq * 40) * sz, op)
+				var tw := ((56 if tt == 6 else 50) + hq * 40) * sz
+				if not Tx.T3D.is_empty() and U.hash3(gx * 11 + q, gy * 5 - q, seed_v + 242) < T3D_FOREST_P:
+					# now and then a 3D tree among the crowns, coloured like its neighbourhood
+					var nv := U.vnoise(tx / 260.0, ty / 260.0, seed_v + 141)
+					var fv := U.vnoise(tx / 650.0, ty / 650.0, seed_v + 131) > 0.6 and hq < 0.6
+					var v3 := Tx.T3D_FALL + int(hq * (Tx.T3D_N - Tx.T3D_FALL)) if fv else int(nv * Tx.T3D_FALL) % Tx.T3D_FALL
+					t3.call(mini(v3, Tx.T3D.size() - 1), tx, ty, tw * 0.75, lerpf(0.8, 1.4, U.hash3(gx, gy * 3 + q, seed_v + 243)),
+						_t3_shade(nv * 2.0 - 1.0) if v3 < Tx.T3D_FALL else Color.WHITE)
+				else:
+					tree.call(_tree_at(tx, ty, hq, seed_v), tx, ty, tw, op, dp)
 			continue
 		if (tt == 3 and h < 0.05) or (tt == 4 and h < 0.012):
-			tree.call(_tree_at(wx, wy, fmod(h * 20.0, 1.0), seed_v), wx, wy, 24 + h * 38, 1.0)
+			tree.call(_tree_at(wx, wy, fmod(h * 20.0, 1.0), seed_v), wx, wy, 24 + h * 38, 1.0, 0.0)
 	if ch.i < total: return null
 	var mms := []
 	for b in bufs.size():
@@ -265,9 +351,107 @@ static func _scatter_chunk(gm, kx: int, ky: int, deadline: int):
 		mm.buffer = buf
 		mms.append(mm)
 	ch.mm = mms
+	for k in tops: tops[k] = PackedFloat32Array(tops[k])
 	ch.erase("b")
 	ch.done = true
 	return ch
+
+## Treetop index of a chunk, for the plane's shadow: 70-unit cell -> [x, y, radius, height, ...]
+## (an Array while the chunk builds, packed once it is done).
+static func _hq_add(hq: Dictionary, x: float, y: float, r: float, h: float) -> void:
+	var k := Vector2i(int(floor(x / SG)), int(floor(y / SG)))
+	if not hq.has(k): hq[k] = []
+	hq[k].append_array([x, y, r, h])
+
+## The treetops within r of c, from the finished chunks, as one flat [x, y, radius, height, ...].
+static func _trees_near(gm, c: Vector2, r: float) -> PackedFloat32Array:
+	var out := PackedFloat32Array()
+	for cy in range(int(floor((c.y - r) / SG)) - 1, int(floor((c.y + r) / SG)) + 2):
+		for cx in range(int(floor((c.x - r) / SG)) - 1, int(floor((c.x + r) / SG)) + 2):
+			var ch = gm.TCACHE.get(Vector2i(int(floor((cx + 0.5) * SG / CH)), int(floor((cy + 0.5) * SG / CH))))
+			if ch == null or not ch.done: continue
+			var a = ch.hq.get(Vector2i(cx, cy))
+			if a != null: out.append_array(a)
+	return out
+
+## Treetop height at (x, y) from a _trees_near() list; crowns are domes, lower toward the rim.
+static func _tree_h(t: PackedFloat32Array, x: float, y: float) -> float:
+	var h := 0.0
+	for i in range(0, t.size(), 4):
+		var dx := t[i] - x
+		var dy := t[i + 1] - y
+		var r2 := t[i + 2] * t[i + 2]
+		var d2 := dx * dx + dy * dy
+		if d2 < r2: h = maxf(h, t[i + 3] * (0.55 + 0.45 * sqrt(1.0 - d2 / r2)))
+	return h
+
+## Height of the hangars, fuel tanks and town houses of the airfields in `near` at p, as
+## draw_strip places them (0 elsewhere).
+static func _strip_h(near: Array, p0: Vector2, seed_v: int) -> float:
+	var h := 0.0
+	for s in near:
+		var p := Vector2(p0.x - s.x, p0.y - s.y).rotated(-s.ang)
+		var L: float = s.len
+		var Wd: float = s.wid
+		if absf(p.x) > L / 2 + 420 or absf(p.y) > Wd / 2 + 320: continue
+		var dirt: bool = s.type == "dirt"
+		var hav: bool = s.type == "haven"
+		var nh := 4 if hav else (3 if s.type == "airport" else (2 if s.type == "regional" else 1))
+		for i in nh:
+			if Rect2(-L / 4 - 30 + i * 72, Wd / 2 + (22.0 if dirt else 26.0), 60, 38.0 if dirt else 46.0).has_point(p): h = maxf(h, HANGAR_H)
+		if s.fuel and not hav:
+			for i in 2:
+				if p.distance_to(Vector2(L / 4 + 10 + i * 26, Wd / 2 + 40)) < 11: h = maxf(h, TANK_H)
+		if not hav:
+			for hs in HOUSES.get(Vector2i(s.id, seed_v), []):
+				if Rect2(hs[0], hs[1], hs[2], hs[3]).has_point(p): h = maxf(h, HOUSE_H)
+	return h
+
+## Where the plane's shadow is drawn and how big: it lands on whatever is under it (treetops,
+## hangars, tanks, town houses, the Failsafe farm), so over them it is drawn at their height,
+## leaning with them as the roofs do, a bit bigger, and nearer the plane. Over forest the
+## height wobbles from crown to crown. It eases over a few frames so it rides up and down.
+const SHADOW_HU := 13.0        # the plane's height per unit of altitude: lower = the shadow pulls in more over tall things (30, then 20; Greg 2026-10-19: stronger again)
+const SHADOW_GROW := 2.25      # how much bigger it gets on high surfaces, times the lean's own growth (1.5 before)
+const SHADOW_SPREAD := 0.5     # the 4 outer height samples sit this share of the shadow's size out (0.3 before; Greg: coarser)
+const SHADOW_JITTER := 0.15    # over treetops the height wobbles by up to this share of it
+static var SHD_H := 0.0
+static var SHD_T := 0.0
+static var SHD_NEAR := []                  # airfields near the shadow (refreshed as it moves)
+static var SHD_AT := Vector2(INF, INF)
+static var SHD_WD = null
+static func plane_shadow(gm, F: Dictionary, psd: Vector2, size: float) -> Vector3:
+	var g0 := Vector2(F.x, F.y) + psd
+	if SHD_WD != gm.wd or g0.distance_squared_to(SHD_AT) > 250000.0:
+		SHD_WD = gm.wd
+		SHD_AT = g0
+		SHD_NEAR = []
+		for s in gm.wd.strips:
+			if s.type == "road" or s.get("arch", "") == "family": continue   # family farms and Failsafe have no 3D buildings here
+			if absf(s.x - g0.x) < 1300 and absf(s.y - g0.y) < 1300: SHD_NEAR.append(s)
+	var a := Vector2.from_angle(F.hdg) * size * SHADOW_SPREAD
+	var b := a.orthogonal()
+	var trees := _trees_near(gm, g0, size * SHADOW_SPREAD)
+	var ht := 0.0
+	var hb := 0.0
+	var wt := 2.0   # the middle counts double, so single crowns still show
+	for o in [Vector2.ZERO, a, -a, b, -b]:
+		var p: Vector2 = g0 + o
+		ht += _tree_h(trees, p.x, p.y) * wt
+		hb += maxf(Failsafe.height_at(gm.wd, p.x, p.y), _strip_h(SHD_NEAR, p, gm.wd.SEED)) * wt
+		wt = 1.0
+	ht /= 6.0
+	hb /= 6.0
+	if ht > 0.0: ht *= 1.0 + SHADOW_JITTER * (U.vnoise(g0.x / 16.0, g0.y / 16.0, 77) - 0.5) * 2.0
+	var hs := maxf(ht, hb)
+	var dt: float = gm.T - SHD_T
+	SHD_T = gm.T
+	SHD_H = hs if (dt < 0.0 or dt > 0.5) else SHD_H + (hs - SHD_H) * (1.0 - exp(-dt * 22.0))
+	var zp := maxf(0.0, F.alt) * SHADOW_HU
+	var h := minf(SHD_H, zp)
+	var p := Vector2(F.x, F.y) + psd * clampf(1.0 - h / maxf(zp, 1.0), 0.0, 1.0)
+	p += lift(p.x, p.y, h)
+	return Vector3(p.x, p.y, 1.0 + SHADOW_GROW * h / maxf(PV.z - h, PV.z * 0.25))
 
 ## Builds the scatter of the chunks the view will reach next: the view rectangle moved
 ## SC_AHEAD chunks along the heading (and the view itself, when descending into scatter range).
@@ -300,6 +484,7 @@ static func draw_scatter(gm, g: Pen, x0: float, y0: float, x1: float, y1: float,
 	TREE_MAT.set_shader_parameter("mist_fade", al)
 	TREE_MAT.set_shader_parameter("sun_a", SUN_A)
 	TREE_MAT.set_shader_parameter("canopy_a", CANOPY_A)
+	TREE_MAT.set_shader_parameter("t3_a", clampf(tf / TREE_FADE_GROUND, 0.5, 1.0))
 	var pad := SG * 1.5
 	var deadline := Time.get_ticks_usec() + SC_VIEW_US
 	var chs := []
@@ -345,6 +530,13 @@ static func draw_scatter(gm, g: Pen, x0: float, y0: float, x1: float, y1: float,
 			if b >= ch.mm.size(): continue
 			var mm = ch.mm[b]
 			if mm: g.ci.draw_multimesh(mm, tex)
+	# the 3D-rendered test trees: every shadow, then the low, middle and top layers
+	var B3 := 2 + 2 * NT
+	for l in 4:
+		for v in Tx.T3D.size():
+			var b := B3 + v * 4 + l
+			for ch in chs:
+				if b < ch.mm.size() and ch.mm[b]: g.ci.draw_multimesh(ch.mm[b], Tx.T3D[v][l])
 
 ## A terrain chunk drawn as a one-instance MultiMesh, so trees.gdshader knows it is ground and
 ## adds the close-up detail. The MultiMeshes are kept per chunk.
@@ -491,9 +683,13 @@ static func plane_pt(P: Dictionary, nm: String, bank: float, pitch: float):
 
 ## How much bigger the plane draws at this altitude: 1 + alt/130, times the plane's "top_k"
 ## (D.PLANES) phased in linearly up to the top altitude, so the size on the runway is unchanged.
+## On top of that the plane is pulled up toward the camera (Greg, 2026-10-18): PLANE_LIFT times
+## bigger from LIFT_ALT up, eased in from the ground. The shadow and the altimeter don't change.
+const PLANE_LIFT := 1.5   # 2.0 at first; Greg: 1.5
+const LIFT_ALT := 100.0   # cruise speed climbs to 100
 static func plane_grow(P: Dictionary, alt: float) -> float:
 	var k: float = lerpf(1.0, P.get("top_k", 1.0), clampf(alt / TREE_FADE_ALT, 0, 1))
-	return (1 + alt / 130.0) * k
+	return (1 + alt / 130.0) * k * lerpf(1.0, PLANE_LIFT, smoothstep(0.0, LIFT_ALT, alt))
 
 static func draw_plane(g: Pen, P: Dictionary, size: float, prop: float, shadow: bool, bank: float = 0.0, pitch: float = 0.0) -> void:
 	g.save()
@@ -724,6 +920,10 @@ static func draw_strip(gm, g: Pen, s: Dictionary) -> void:
 		var pc := rgba(212, 90, 157, 0.45)
 		g.dashed(-L / 2 - 900, 0, -L / 2 - 30, 0, pc, 3, 24, 18)
 		g.dashed(L / 2 + 30, 0, L / 2 + 900, 0, pc, 3, 24, 18)
+	if s.get("failsafe", false):
+		Failsafe.draw_air(gm, g, s)
+		g.restore()
+		return
 	if s.get("arch", "") == "family":
 		FarmFolk.draw_air(gm, g, s, L, Wd)
 		g.restore()
@@ -853,42 +1053,79 @@ static func draw_smoke(gm, g: Pen, x0: float, y0: float, x1: float, y1: float, t
 				v = wd.terr(sx, sy) > 2
 				gm.TCACHE[ck] = v
 			if not v: continue
-			g.circle(sx, sy, 6 + randf() * 3, rgba(255, 120 + randf() * 60, 40, 0.8))
-			for i in 8:
-				var k := fmod(t * 0.07 + i / 8.0 + U.hash3(cx, cy, 5), 1.0)
-				g.circle(sx + k * 300, sy - k * 170, 16 + k * 95, rgba(46, 44, 42, 0.38 * (1 - k)))
+			draw_wildfire(g, sx, sy, t, U.hash3(cx, cy, 5))
+	# the same fires at disputed fields (fields.gd), 3-5 on and round the strip
+	for s in wd.strips:
+		if not s.get("cleared", false) or s.x < x0 - 800 or s.x > x1 + 800 or s.y < y0 - 800 or s.y > y1 + 800: continue
+		var ci := 0
+		for p in Fields.camps(s):
+			draw_wildfire(g, p.x, p.y, t, U.hash3(int(s.id), ci, 5))
+			ci += 1
+
+## One of the fires burning out on the map: flame and its smoke plume (ph staggers the puffs).
+static func draw_wildfire(g: Pen, sx: float, sy: float, t: float, ph: float) -> void:
+	g.circle(sx, sy, 6 + randf() * 3, rgba(255, 120 + randf() * 60, 40, 0.8))
+	for i in 8:
+		var k := fmod(t * 0.07 + i / 8.0 + ph, 1.0)
+		g.circle(sx + k * 300, sy - k * 170, 16 + k * 95, rgba(46, 44, 42, 0.38 * (1 - k)))
 
 static func draw_clouds(gm, g: Pen, cx: float, cy: float, sc: float, alpha: float) -> void:
 	var C := 1700.0
 	var W: float = gm.Wv
 	var H: float = gm.Hv
 	var seed_v: int = gm.wd.SEED
-	var clouds_in := func(s2: float, pad: float, fn: Callable) -> void:
+	# every cloud's puffs (x, y, radius) are worked out once per cell and kept in CLOUD_CELLS
+	if CLOUD_SEED != seed_v:
+		CLOUD_CELLS.clear(); CLOUD_SEED = seed_v
+	var clouds_in := func(s2: float, pad: float, tex: Texture2D, off: Vector2, col: Color) -> void:
 		var x0 := cx - W / 2 / s2 - pad
 		var x1 := cx + W / 2 / s2 + pad
 		var y0 := cy - H / 2 / s2 - pad
 		var y1 := cy + H / 2 / s2 + pad
 		for gy in range(int(floor(y0 / C)), int(floor(y1 / C)) + 1):
 			for gx in range(int(floor(x0 / C)), int(floor(x1 / C)) + 1):
-				if U.hash3(gx, gy, seed_v + 91) > CLOUD_DENSITY: continue
-				var bx := (gx + U.hash3(gx, gy, seed_v + 92)) * C
-				var by := (gy + U.hash3(gx, gy, seed_v + 93)) * C
-				for i in 6:
-					var a := U.hash3(gx * 7 + i, gy, seed_v + 94) * TAU
-					var r := U.hash3(gx, gy * 7 + i, seed_v + 95)
-					fn.call(bx + cos(a) * r * 150, by + sin(a) * r * 85, 90 + r * 110)
+				var key := Vector2i(gx, gy)
+				var pf = CLOUD_CELLS.get(key)
+				if pf == null:
+					pf = PackedFloat32Array()
+					if U.hash3(gx, gy, seed_v + 91) <= CLOUD_DENSITY:
+						var bx := (gx + U.hash3(gx, gy, seed_v + 92)) * C
+						var by := (gy + U.hash3(gx, gy, seed_v + 93)) * C
+						for i in 6:
+							var a := U.hash3(gx * 7 + i, gy, seed_v + 94) * TAU
+							var r := U.hash3(gx, gy * 7 + i, seed_v + 95)
+							pf.append(bx + cos(a) * r * 150); pf.append(by + sin(a) * r * 85); pf.append(90 + r * 110)
+					if CLOUD_CELLS.size() > 400: CLOUD_CELLS.clear()
+					CLOUD_CELLS[key] = pf
+				for i in range(0, pf.size(), 3):
+					var rad: float = pf[i + 2]
+					g.ci.draw_texture_rect(tex, Rect2(pf[i] + off.x - rad, pf[i + 1] + off.y - rad, rad * 2, rad * 2), false, col)
 	g.set_view(sc, W / 2 - cx * sc, H / 2 - cy * sc)
-	g.ga = 0.13 * SUN_A
 	var cs := SUN * CLOUD_SHADOW
-	if g.ga > 0.005: clouds_in.call(sc, 800.0 + cs.length(), func(x, y, rad): g.tex(Tx.SPUFF, x + cs.x - rad, y + cs.y - rad, rad * 2, rad * 2))
+	var sa := 0.13 * SUN_A
+	if sa > 0.005: clouds_in.call(sc, 800.0 + cs.length(), Tx.SPUFF, cs, Color(1, 1, 1, sa))
 	if alpha > 0.01:
 		var s2 := sc * 1.3
 		g.set_view(s2, W / 2 - cx * s2, H / 2 - cy * s2)
-		g.ga = minf(1, alpha * 2.6)
-		clouds_in.call(s2, 400.0, func(x, y, rad): g.tex(Tx.PUFF, x - rad, y - rad, rad * 2, rad * 2))
+		clouds_in.call(s2, 400.0, Tx.PUFF, Vector2.ZERO, Color(1, 1, 1, minf(1, alpha * 2.6)))
 	g.ga = 1.0
 
+## Every storm's centre this frame (World.storm_pos keeps them all) and radius, as packed
+## arrays, so the storm loops skip the far ones cheaply.
+static var STORM_R := PackedFloat32Array()
+static var STORM_L = null
+static func storms_now(wd) -> PackedVector2Array:
+	if wd.STORMS.is_empty(): return PackedVector2Array()
+	wd.storm_pos(wd.STORMS[0])
+	if not is_same(STORM_L, wd.STORMS) or STORM_R.size() != wd.STORMS.size():
+		STORM_L = wd.STORMS
+		STORM_R.resize(wd.STORMS.size())
+		for i in wd.STORMS.size(): STORM_R[i] = wd.STORMS[i].r
+	return wd._sp
+static var CLOUD_CELLS := {}
+static var CLOUD_SEED := -1
 static var storm_imgs := {}
+static var STORM_PUFFS := {}   # a storm's 11 puffs (angle, distance, radius) by its size and the seed
 static func draw_storms(gm, g: Pen, cx: float, cy: float, sc: float) -> void:
 	var s2 := sc * 1.3
 	var W: float = gm.Wv
@@ -898,17 +1135,27 @@ static func draw_storms(gm, g: Pen, cx: float, cy: float, sc: float) -> void:
 	var hh := H / 2 / s2
 	var fade := 1 - clampf((gm.F.storm if gm.F else 0.0) * 1.6, 0, 0.85)
 	var seed_v: int = gm.wd.SEED
-	for s in gm.wd.STORMS:
-		var q: Vector2 = gm.wd.storm_pos(s)
-		var E: float = s.r * 1.3
+	var sps := storms_now(gm.wd)
+	for si in sps.size():
+		var q: Vector2 = sps[si]
+		var E: float = STORM_R[si] * 1.3
 		if q.x + E < cx - hw or q.x - E > cx + hw or q.y + E < cy - hh or q.y - E > cy + hh: continue
+		var s: Dictionary = gm.wd.STORMS[si]
 		g.ga = fade * 0.6
 		var ri := int(s.r)
-		for i in 11:
-			var a := U.hash3(i, ri, seed_v + 61) * TAU
-			var d: float = U.hash3(i, 7, ri) * s.r * 0.6
-			var rad: float = s.r * (0.34 + U.hash3(i, 3, ri) * 0.34)
-			g.tex(Tx.DPUFF, q.x + cos(a) * d - rad, q.y + sin(a) * d - rad, rad * 2, rad * 2)
+		var pk := Vector2i(ri, seed_v)
+		var pf = STORM_PUFFS.get(pk)
+		if pf == null:
+			pf = PackedFloat32Array()
+			for i in 11:
+				var a := U.hash3(i, ri, seed_v + 61) * TAU
+				var d: float = U.hash3(i, 7, ri) * s.r * 0.6
+				var rad: float = s.r * (0.34 + U.hash3(i, 3, ri) * 0.34)
+				pf.append(cos(a) * d - rad); pf.append(sin(a) * d - rad); pf.append(rad * 2)
+			STORM_PUFFS[pk] = pf
+		var sc0 := Color(1, 1, 1, g.ga)
+		for i in range(0, pf.size(), 3):
+			g.ci.draw_texture_rect(Tx.DPUFF, Rect2(q.x + pf[i], q.y + pf[i + 1], pf[i + 2], pf[i + 2]), false, sc0)
 		if randf() < 0.03:
 			var a := randf() * TAU
 			var d: float = randf() * s.r * 0.5
@@ -955,7 +1202,8 @@ static func flight_layer(gm, idx: int, g: Pen) -> void:
 			draw_fog(gm, g, gm.camX, gm.camY, sc, alt)
 			var grow := plane_grow(P, alt)
 			var psd := Vector2.from_angle(SUN_ANG) * alt * 1.31
-			g.save(); g.translate(F.x + psd.x, F.y + psd.y); g.rotate(F.hdg); draw_plane(g, P, P.size * 1.7, 0, true, F.bank, F.get("pitch", 0.0)); g.restore()
+			var sh := plane_shadow(gm, F, psd, P.size * 1.7)
+			g.save(); g.translate(sh.x, sh.y); g.rotate(F.hdg); draw_plane(g, P, P.size * 1.7 * sh.z, 0, true, F.bank, F.get("pitch", 0.0)); g.restore()
 			g.save(); g.translate(F.x, F.y); g.rotate(F.hdg); draw_plane(g, P, P.size * 1.7 * grow, F.prop, false, F.bank, F.get("pitch", 0.0)); g.restore()
 			if not F.onGround and not F.crashed and (F.vs < -0.5 or F.alt < 30):
 				var pt = memo(gm, "touchdown")
@@ -1050,6 +1298,10 @@ static func night_glows(gm, g: Pen, sc: float, alt: float, P: Dictionary) -> voi
 			for sd in [-1, 1]:
 				var o: float = sd * (s.wid / 2 + 6)
 				glow.call(s.x + c * u - n * o, s.y + n * u + c * o, lr, "140,230,120" if hav else "255,215,140", dk if hav else 0.85 * dk)
+	# fires at disputed fields (fields.gd): the same glow as the fires out on the map
+	for s in gm.wd.strips:
+		if not s.get("cleared", false) or s.x < vb.x0 - 800 or s.x > vb.x1 + 800 or s.y < vb.y0 - 800 or s.y > vb.y1 + 800: continue
+		for p in Fields.camps(s): glow.call(p.x, p.y, 170 + randf() * 20, "255,110,40", 0.45 * dk)
 	var C := 2600.0
 	var wd: World = gm.wd
 	for cy in range(int(floor((vb.y0 - 500) / C)), int(floor((vb.y1 + 300) / C)) + 1):
@@ -1081,6 +1333,10 @@ static func night_glows(gm, g: Pen, sc: float, alt: float, P: Dictionary) -> voi
 	if blink: glow.call(sz * ta.x, sz * ta.y, 16, "255,255,255", dk)
 	g.restore()
 
+static var NEAR_V = null
+static var NEAR_RD = null
+static var NEAR_MS := -100000
+static var NEAR_WD = null
 static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 	var F: Dictionary = gm.F
 	var G: Dictionary = gm.G
@@ -1142,24 +1398,25 @@ static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 				uvs.append(Vector2((F.x + (sp.x - mx) / k) / D.WORLD, (F.y + (sp.y - my) / k) / D.WORLD))
 			g.ci.draw_colored_polygon(pts, Color.WHITE, uvs, ov)
 	g.circle(mx, my, mr, rgba(10, 14, 12, 0.25))
-	for s in wd.STORMS:
-		var q: Vector2 = wd.storm_pos(s)
-		var sxp = mx + (q.x - F.x) * k
-		var syp = my + (q.y - F.y) * k
-		var sr: float = s.r * k
+	var sps := storms_now(wd)
+	var scol := rgba(120, 140, 190, 0.35)
+	for si in sps.size():
+		var q: Vector2 = sps[si]
+		var sxp: float = mx + (q.x - F.x) * k
+		var syp: float = my + (q.y - F.y) * k
+		var sr: float = STORM_R[si] * k
 		if Vector2(sxp - mx, syp - my).length() - sr > mr: continue
-		_clipped_disc(g, sxp, syp, sr, mx, my, mr, rgba(120, 140, 190, 0.35))
+		_clipped_disc(g, sxp, syp, sr, mx, my, mr, scol, si)
 	var rn: float = memo(gm, "range") * k
 	if rn < mr: g.dashed_arc(mx, my, rn, 0, TAU, rgba(212, 90, 157, 0.9), 1, 3, 3)
 	var nt = gm.flight.nav_target()
 	var mdt2 = gm.flight.mayday_target()
-	for s in wd.strips:
-		if not gm.known.has(s.id): continue
+	for s in known_strips(gm):
 		var dx: float = (s.x - F.x) * k
 		var dy: float = (s.y - F.y) * k
 		if dx * dx + dy * dy > mr * mr * 0.9: continue
 		var isnt: bool = nt != null and nt.id == s.id
-		g.ring(mx + dx, my + dy, 4.5 if isnt else 3.0, hc("#9cc063") if s.type == "haven" else (hc("#8fbf88") if s.get("arch", "") == "family" else hc("#e07ab3")), 2.5 if isnt else 1.5)
+		g.ring(mx + dx, my + dy, 4.5 if isnt else 3.0, hc("#9cc063") if s.type == "haven" else (hc("#8fbf88") if Fields.friendly(s) else (hc("#f0802a") if s.get("cleared", false) else hc("#e07ab3"))), 2.5 if isnt else 1.5)
 		if mdt2 != null and mdt2.id == s.id:
 			g.ring(mx + dx, my + dy, 7.0, hc("#ff2a1e"), 2.5)
 	g.save(); g.translate(mx, my); g.rotate(F.hdg)
@@ -1183,8 +1440,7 @@ static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 		var a2 := atan2(nt.y - F.y, nt.x - F.x)
 		var r2 := minf(W, H) * 0.2 + 24
 		ntp = Vector2(psx + cos(a2) * r2, psy + sin(a2) * r2)
-	for s in wd.strips:
-		if not gm.known.has(s.id): continue
+	for s in known_strips(gm):
 		var sx: float = W / 2 + (s.x - gm.camX) * sc
 		var sy: float = H / 2 + (s.y - gm.camY) * sc
 		if sx < -60 or sx > W + 60 or sy < -30 or sy > H + 30: continue
@@ -1270,8 +1526,14 @@ static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 	# status
 	var msg := ""
 	var c := ink
-	var near = wd.nearest_strip(F.x, F.y, 1600)
-	var rdh = wd.road_at(F.x, F.y) if (not F.onGround and F.alt < 40) else null
+	# the nearest strip and the road below only pick the status line: ten times a second will do
+	var nowm := Time.get_ticks_msec()
+	if nowm - NEAR_MS > 100 or nowm < NEAR_MS or not is_same(NEAR_WD, wd):
+		NEAR_V = wd.nearest_strip(F.x, F.y, 1600)
+		NEAR_RD = wd.road_at(F.x, F.y) if (not F.onGround and F.alt < 40) else null
+		NEAR_MS = nowm; NEAR_WD = wd
+	var near = NEAR_V
+	var rdh = NEAR_RD if (not F.onGround and F.alt < 40) else null
 	var blinkc := hc("#e3644c") if fmod(T, 0.5) < 0.25 else ink
 	if G.fuel <= 0 and not F.onGround:
 		msg = "Engine out. The road below will do." if rdh else "Engine out. Glide to a runway or a road."
@@ -1324,18 +1586,33 @@ static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 			g.line(p.sx - 70, p.sy, p.sx + 70, p.sy, rgba(239, 230, 207, 0.35), 2)
 			g.circle(clampf(p.x, p.sx - 70, p.sx + 70), p.sy, 14, rgba(239, 230, 207, 0.5))
 
-static func _clipped_disc(g: Pen, x: float, y: float, r: float, cx: float, cy: float, cr: float, col: Color) -> void:
+## key: the clipped outline is kept under it and reused while the disc and circle move less
+## than a quarter pixel (clipping polygons every frame is slow).
+static var CLIP_CACHE := {}
+static func _clipped_disc(g: Pen, x: float, y: float, r: float, cx: float, cy: float, cr: float, col: Color, key = null) -> void:
 	if Vector2(x - cx, y - cy).length() + r <= cr:
 		g.circle(x, y, r, col)   # wholly inside: nothing to clip
 		return
+	var sig := PackedFloat32Array([x, y, r, cx, cy, cr])
+	var hit = CLIP_CACHE.get(key) if key != null else null
+	if hit != null:
+		var same := true
+		for i in 6:
+			if absf(hit[0][i] - sig[i]) > 0.25: same = false; break
+		if same:
+			for poly in hit[1]: g.poly(poly, col)
+			return
 	var a := PackedVector2Array()
 	var b := PackedVector2Array()
 	for i in 32:
 		var t := TAU * i / 32.0
 		a.append(Vector2(x + cos(t) * r, y + sin(t) * r))
 		b.append(Vector2(cx + cos(t) * cr, cy + sin(t) * cr))
+	var polys := []
 	for poly in Geometry2D.intersect_polygons(a, b):
-		if poly.size() >= 3: g.poly(poly, col)
+		if poly.size() >= 3: polys.append(poly)
+	if key != null: CLIP_CACHE[key] = [sig, polys]
+	for poly in polys: g.poly(poly, col)
 
 # =====================================================================
 # ground frame
@@ -1457,6 +1734,12 @@ static func draw_fire(gm, g: Pen, x: float, y: float, sz: float, k: float, ph: f
 		g.circle(x + (randf() - 0.5) * 8 * sz, y + (randf() - 0.5) * 6 * sz, (5 + randf() * 3) * sz * (0.5 + 0.5 * k), rgba(255, 120 + randf() * 60, 40, 0.8))
 	g.circle(x, y, (2.5 + randf() * 1.5) * sz, rgba(255, 230, 170, 0.85 * k))
 
+## On foot: the part of the site on screen this frame, in world units. Things wholly outside it
+## (by their margin) aren't drawn; sites are much bigger than the screen.
+static var VIEW := Rect2()
+static func on_view(x: float, y: float, m: float) -> bool:
+	return x > VIEW.position.x - m and x < VIEW.end.x + m and y > VIEW.position.y - m and y < VIEW.end.y + m
+
 static func ground_layer(gm, idx: int, g: Pen) -> void:
 	var S: Dictionary = gm.S
 	var gs: float = gm.ground_scale()
@@ -1464,6 +1747,7 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 	var cy: float = S.rcy
 	var W: float = gm.Wv
 	var H: float = gm.Hv
+	VIEW = Rect2(cx - W / 2 / gs, cy - H / 2 / gs, W / gs, H / gs)
 	var T: float = gm.T
 	var p: Dictionary = S.p
 	var view := func(): g.set_view(gs, W / 2 - cx * gs, H / 2 - cy * gs)
@@ -1479,7 +1763,6 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 			if vx1 > vx0 and vy1 > vy0 and S.bg.baked:
 				g.tex_region(S.bg.get_texture(), Rect2(vx0, vy0, vx1 - vx0, vy1 - vy0), Rect2(vx0 * BK, vy0 * BK, (vx1 - vx0) * BK, (vy1 - vy0) * BK))
 			set_view3d(gm, cx, cy, gs)
-			foot_tree_shadows(gm, g, vx0, vy0, vx1, vy1)
 			if S.tanker:
 				var tk: Dictionary = S.tanker
 				g.save(); g.translate(tk.x, tk.y)
@@ -1492,7 +1775,8 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 				g.rect(10, -3, 8, 6, hc("#3a3a3a"))
 				g.restore()
 				if tk.gal > 0 and tk.prog > 0: g.arc(p.x, p.y, 22, -PI / 2, -PI / 2 + tk.prog * TAU, hc("#d9a441"), 4)
-			for k in S.crates: draw_container(gm, g, k)
+			for k in S.crates:
+				if on_view(k.x, k.y, 60): draw_container(gm, g, k)
 			draw_pickups(gm, g)
 			for b in S.thrown:
 				var bz: float = b.get("z", 0.0)   # height while a survivor's lob is in the air
@@ -1512,6 +1796,7 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 				g.rect(-7, -4, 3, 8, hc("#3f4630")); g.rect(4, -4, 3, 8, hc("#3f4630"))
 				g.restore()
 			for d in S.drops:
+				if not on_view(d.x, d.y, 40): continue
 				var pl := 0.5 + 0.5 * sin(T * 5 + d.x)
 				g.rect(d.x - 5, d.y - 3, 14, 10, Color(0, 0, 0, 0.3))
 				if d.k == "gun":
@@ -1529,7 +1814,7 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 					g.rect(d.x - 7, d.y - 4, 14, 8, hc("#5d7d3a")); g.rect(d.x - 2, d.y - 2, 4, 4, hc("#9cc063"))
 				g.ring(d.x, d.y, 12, rgba(240, 220, 140, 0.25 + 0.35 * pl), 1.2)
 			for br in S.barrels:
-				if br.dead: continue
+				if br.dead or not on_view(br.x, br.y, 40): continue
 				g.ellipse(br.x + 4, br.y + 5, 12, 11, 0, Color(0, 0, 0, 0.32))
 				var lit: bool = br.fuse >= 0 and fmod(T, 0.1) < 0.05
 				g.circle(br.x, br.y, 11.5, hc("#ffc070") if lit else hc("#a8301f"))
@@ -1543,6 +1828,7 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 				var hgt := sin(PI * k) * 26.0
 				var dx: float = lerpf(d.sx, d.x, k)
 				var dy: float = lerpf(d.sy, d.y, k)
+				if not on_view(dx, dy, 60): continue
 				var an: float = d.ang + d.spin * minf(d.t, d.fly)
 				var sh := PackedVector2Array()
 				var pc := PackedVector2Array()
@@ -1567,8 +1853,10 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 			g.save(); g.translate(S.plane.x + 10 * pk, S.plane.y + 14 * pk); draw_plane(g, P, 190 * pk, 0, true); g.restore()
 			g.save(); g.translate(S.plane.x, S.plane.y); draw_plane(g, P, 190 * pk, 0, false); g.restore()
 			if S.nearPlane: g.dashed_arc(S.plane.x, S.plane.y, 130, 0, TAU, rgba(212, 90, 157, 0.8), 2, 8, 6)
-			for z in S.zs: draw_zombie(gm, g, z)
+			for z in S.zs:
+				if on_view(z.x, z.y, 60): draw_zombie(gm, g, z)
 			for v in S.sv:
+				if not on_view(v.x, v.y, 60): continue
 				# startled hop on spotting you: up and down, drawn bigger like your jump
 				var sj: float = sin(PI * (1 - float(v.jt) / Survivors.SV_STARTLE_T)) * 3.5 if v.has("jt") else 0.0
 				if sj > 0:
@@ -1576,8 +1864,8 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 				draw_person(g, v.x, v.y, v.ang, {"body": v.shirt, "skin": v.skin, "hair": "#2b2118", "cap": v.cap, "gun": not v.get("unarmed", false), "bare": v.get("unarmed", false), "long": int(v.get("w", 1)) != 0, "vest": float(v.get("armor", 0.0)) > 0, "walk": v.wk, "hit": v.hit > 0, "lower": 1.0 - float(v.get("gup", 0.0))})
 				if sj > 0: g.restore()
 			gm.farm.draw(g)
-			if S.npc:
-				var n: Dictionary = S.npc
+			gm.fields.draw(g)
+			for n in S.npcs:
 				draw_person(g, n.x, n.y, n.ang, {"body": "#3f7a7a", "skin": "#e0b894", "hair": "#5a3a22", "gun": true, "long": int(n.get("w", 0)) != 0, "walk": n.wk, "hit": n.hit > 0})
 				if not n.follow:
 					var pl := 0.5 + 0.5 * sin(T * 5)
@@ -1596,7 +1884,7 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 				var dc := Vector2(p.x - cl.x, p.y - cl.y).length()
 				if dc < cl.r: hid = maxf(hid, float(cl.den) * clampf((cl.r - dc) / (cl.r * 0.3), 0.0, 1.0))
 			g.ga = 1.0 - SMOKE_HIDE * minf(1.0, hid)
-			draw_person(g, p.x, p.y, p.ang, {"body": "#9a3a2a" if S.hurt > 0 else "#6b4a2e", "skin": "#d9b48f", "cap": "#34404c", "gun": gm.G.ammo > 0 and not gm.unarmed_here(), "bare": gm.unarmed_here(), "long": gm.G.weapon > 0, "walk": p.wk, "swing": S.swing > 0})
+			draw_person(g, p.x, p.y, p.ang, {"body": "#9a3a2a" if S.hurt > 0 else "#6b4a2e", "skin": "#d9b48f", "cap": "#34404c", "gun": gm.ammo_left() > 0 and not gm.unarmed_here(), "bare": gm.unarmed_here(), "long": gm.G.weapon > 0, "walk": p.wk, "swing": S.swing > 0})
 			g.restore()
 		1:
 			view.call()
@@ -1676,10 +1964,8 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 			var c1 := mini(S.cols - 1, int(floor((cx + W / 2 / gs + 40) / TS)))
 			var r0 := maxi(0, int(floor((cy - H / 2 / gs - 40) / TS)))
 			var r1 := mini(S.rows - 1, int(floor((cy + H / 2 / gs + 40) / TS)))
-			if Tx.TREES.size():
-				# a darker lower canopy and the top, each leaning out with its height and turned so
-				# the lit side faces the sun (like the trees in flight)
-				var ta := SUN_ANG + PI * 1.75
+			if Tx.FOOT_TREES.size():
+				# the original flat on-foot trees (Greg, 2026-10-15), with their baked shadow in site.gd
 				for r in range(r0, r1 + 1):
 					for c in range(c0, c1 + 1):
 						if S.g[r * S.cols + c] != 5: continue
@@ -1687,16 +1973,8 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 						var y := (r + 0.5) * TS
 						var j := U.hash3(c, r, 3)
 						var sz := 70 + j * 14
-						var tex: Texture2D = Tx.TREES[Tx.tree_pick(j)]
-						var th := FOOT_TREE_H * foot_tree_hf(c, r)
-						var tint := FarmFolk.tree_tint(S, c, r)
 						g.ga = 0.45 if Vector2(p.x - x, p.y - y).length() < 34 else 1.0
-						for lv in 2:
-							var q := lift(x, y, th * (0.5 if lv == 0 else 1.0))
-							var s2: float = sz * (0.84 if lv == 0 else 1.0)
-							g.save(); g.translate(x + q.x, y + q.y); g.rotate(ta)
-							g.tex(tex, -s2 / 2, -s2 / 2, s2, s2, tint * LOWER_TINT if lv == 0 else tint)
-							g.restore()
+						g.tex(Tx.FOOT_TREES[int(j * 3)], x - sz / 2, y - sz / 2, sz, sz, FarmFolk.tree_tint(S, c, r))
 				g.ga = 1.0
 			gm.farm.draw_top(g)   # family farm windmill sails, above roofs and trees
 			g.set_xf(Transform2D.IDENTITY)
@@ -1828,6 +2106,46 @@ static func draw_ads_reticle(gm, g: Pen) -> void:
 const ROOF_H := 16.0     # on foot: roof height for the wall slivers and sun shadows, world units
 const FOOT_TREE_H := 46.0   # on foot: average canopy top height (each tree varies)
 const WALL_FOOT := Color(0.5, 0.46, 0.4)
+## A lintel over each door and window, sticking out past the outside of the wall and the
+## roof edge so openings show from outside. rm.lt caches [x, y, w, h, window?] per opening.
+const LINTEL := Color(0.6, 0.53, 0.42)
+const LINTEL_WIN := Color(0.5, 0.46, 0.4)
+static func draw_lintels(g: Pen, S: Dictionary, rm: Dictionary) -> void:
+	if not rm.has("lt"):
+		var lt := []
+		var at := func(c: int, r: int) -> int: return S.g[r * S.cols + c]
+		for side in 4:   # top, bottom, left, right walls
+			var horiz := side < 2
+			var n: int = rm.w if horiz else rm.h
+			var k := 1
+			while k < n - 1:
+				var c: int = rm.c + k if horiz else (rm.c if side == 2 else rm.c + rm.w - 1)
+				var r: int = (rm.r if side == 0 else rm.r + rm.h - 1) if horiz else rm.r + k
+				var v: int = at.call(c, r)
+				if v != 2 and v != 15:
+					k += 1
+					continue
+				var k1 := k
+				while k1 + 1 < n - 1 and at.call(c + (k1 + 1 - k) if horiz else c, r if horiz else r + (k1 + 1 - k)) == v: k1 += 1
+				var a0 := k * TS - 4.0
+				var a1 := (k1 + 1) * TS + 4.0
+				match side:
+					0: lt.append([rm.c * TS + a0, rm.r * TS + 2.0, a1 - a0, 9.0, v == 15])
+					1: lt.append([rm.c * TS + a0, (rm.r + rm.h) * TS - 11.0, a1 - a0, 9.0, v == 15])
+					2: lt.append([rm.c * TS + 2.0, rm.r * TS + a0, 9.0, a1 - a0, v == 15])
+					3: lt.append([(rm.c + rm.w) * TS - 11.0, rm.r * TS + a0, 9.0, a1 - a0, v == 15])
+				k = k1 + 1
+		rm.lt = lt
+	for l in rm.lt:
+		g.rect(l[0] + 3, l[1] + 4, l[2], l[3], Color(0, 0, 0, 0.35))
+	for l in rm.lt:
+		var col: Color = LINTEL_WIN if l[4] else LINTEL
+		g.rect(l[0], l[1], l[2], l[3], col)
+		g.rect(l[0], l[1], l[2], 2, col.lightened(0.25))
+		g.rect(l[0], l[1], 2, l[3], col.lightened(0.15))
+		g.rect(l[0], l[1] + l[3] - 2, l[2], 2, col.darkened(0.35))
+		g.rect(l[0] + l[2] - 2, l[1], 2, l[3], col.darkened(0.3))
+
 static func draw_roofs(gm, g: Pen) -> void:
 	var S: Dictionary = gm.S
 	var p: Dictionary = S.p
@@ -1857,6 +2175,7 @@ static func draw_roofs(gm, g: Pen) -> void:
 			var apt: Vector2 = rm.get("apt", Vector2.ZERO)
 			centres.append(Vector2(apt.x * gs + ox, apt.y * gs + oy))
 		if rm.ra < 0.02: continue
+		if not Rect2(rm.c * TS, rm.r * TS, rm.w * TS, rm.h * TS).grow(80).intersects(VIEW): continue
 		g.ga = rm.ra
 		draw_box3d(g, 0, rm.c * TS + 10, rm.r * TS + 10, rm.w * TS - 20, rm.h * TS - 20, ROOF_H, cam, SUN, Color.BLACK)
 		shown.append(rm)
@@ -1876,6 +2195,8 @@ static func draw_roofs(gm, g: Pen) -> void:
 		draw_roof(g, rm, sid, w, h)
 		g.restore()
 		g.ga = 1.0
+	for rm in S.rooms:
+		if Rect2(rm.c * TS, rm.r * TS, rm.w * TS, rm.h * TS).grow(40).intersects(VIEW): draw_lintels(g, S, rm)
 	var m: ShaderMaterial = gm.roof_mat
 	m.set_shader_parameter("screen", Vector2(gm.Wv, gm.Hv))
 	m.set_shader_parameter("ppos", Vector2(p.x * gs + ox, p.y * gs + oy))
@@ -1891,7 +2212,7 @@ static func draw_roofs(gm, g: Pen) -> void:
 	m.set_shader_parameter("centres", centres)
 	m.set_shader_parameter("fades", fades)
 	for rm in S.rooms:
-		if rm.sign == null: continue
+		if rm.sign == null or not on_view((rm.door[0] + 1) * TS, rm.door[1] * TS, 120): continue
 		var dc: int = rm.door[0]
 		var dr: int = rm.door[1]
 		var top: bool = rm.door[2]
@@ -2252,8 +2573,9 @@ static func draw_person(g: Pen, x: float, y: float, a: float, o: Dictionary) -> 
 		g.line(10, 5, 30.0 if swing else 22.0, -8.0 if swing else 9.0, hc("#9a9a92"), 2.5)
 	if swing: g.arc(0, 0, 30, -1, 1, rgba(230, 230, 220, 0.35), 10)
 	var capc: String = o.get("cap", "")
-	if capc != "":
-		g.rect(-12, -6, 6, 12, hc("#4a4232"))
+	var pack: String = o.get("pack", "")   # a backpack without the cap (settlers)
+	if capc != "" or pack != "":
+		g.rect(-12, -6, 6, 12, hc(pack if pack != "" else "#4a4232"))
 		g.rect(-12, -6, 2, 12, Color(0, 0, 0, 0.25))
 	g.ellipse(0, 0, 7.5, 11.5, 0, body)
 	if o.get("vest", false) and not hit:
@@ -2436,6 +2758,56 @@ static func draw_pickups(gm, g: Pen) -> void:
 		g.ring(q.x, q.y - q.z + bob, 10, rc, 1.2)
 		draw_item(g, q.k, q.x, q.y - q.z + bob)
 
+## Bottom right: the rounds in the gun in hand as icons (bullets, shells or bolts), spent
+## ones as dim slots, and a bar while reloading. Hidden when you're down to the machete.
+static func draw_mag(gm, g: Pen) -> void:
+	var G: Dictionary = gm.G
+	if gm.ammo_left() <= 0: return
+	var w: Dictionary = D.WEAPONS[G.weapon]
+	var cap: int = int(w.mag)
+	var n: int = gm.mag_of()
+	var k: String = String(w.ammo)
+	var per := 20   # icons per row (the SMG's 40 take two)
+	var iw := 4.0
+	var ih := 12.0
+	match k:
+		"shell": iw = 7.0; ih = 14.0
+		"rifle": iw = 5.0; ih = 17.0
+		"bolt": iw = 6.0; ih = 24.0
+		"smg", "ar": iw = 3.5; ih = 11.0
+	var gap := 3.0
+	var cols := mini(cap, per)
+	var rows := int(ceil(float(cap) / per))
+	var bw := cols * (iw + gap) - gap
+	var pw := maxf(bw, 110.0) + 20.0
+	var ph := 30.0 + rows * (ih + 5.0) + 8.0
+	var x0: float = gm.Wv - pw - 12.0
+	var y0: float = gm.Hv - ph - 12.0
+	g.rr(x0, y0, pw, ph, 6, rgba(12, 16, 14, 0.74))
+	var rl: bool = gm.reloading()
+	g.text("Reloading" if rl else String(w.name), x0 + 10, y0 + 13, 12, hc("#e8c860") if rl else hc("#b9b09a"))
+	for i in cap:
+		var ix := x0 + 10.0 + (i % per) * (iw + gap)
+		var iy := y0 + 24.0 + floorf(float(i) / per) * (ih + 5.0)
+		if i >= n:
+			g.rect(ix, iy, iw, ih, Color(1, 1, 1, 0.12))   # spent
+			continue
+		match k:
+			"shell":   # red hull, brass base
+				g.rect(ix, iy, iw, ih, hc("#b8402e"))
+				g.rect(ix, iy + ih * 0.68, iw, ih * 0.32, hc("#d9b35a"))
+			"bolt":    # steel head, wooden shaft, red fletching
+				g.poly(PackedVector2Array([Vector2(ix + iw / 2, iy), Vector2(ix + iw, iy + 5), Vector2(ix, iy + 5)]), hc("#c9ccd0"))
+				g.rect(ix + iw / 2 - 1, iy + 5, 2, ih - 5, hc("#8a6a44"))
+				g.rect(ix, iy + ih - 6, iw, 5, hc("#b8402e"))
+			_:         # brass case, copper tip
+				g.rect(ix, iy + ih * 0.3, iw, ih * 0.7, hc("#d9b35a"))
+				g.rect(ix + 0.5, iy, iw - 1, ih * 0.32, hc("#b87333"))
+	if rl:
+		var f := 1.0 - float(gm.S.p.rl) / float(w.rl)
+		g.rect(x0 + 10, y0 + ph - 7, (pw - 20), 3, Color(1, 1, 1, 0.12))
+		g.rect(x0 + 10, y0 + ph - 7, (pw - 20) * f, 3, hc("#e8c860"))
+
 static func hud_ground(gm, g: Pen) -> void:
 	var S: Dictionary = gm.S
 	var G: Dictionary = gm.G
@@ -2452,7 +2824,10 @@ static func hud_ground(gm, g: Pen) -> void:
 	g.text("Health", px + 10, py + 17, 12, hc("#b9b09a"))
 	g.rect(px + 54, py + 11, pw - 66, 12, Color(1, 1, 1, 0.12))
 	g.rect(px + 54, py + 11, (pw - 66) * G.hp / 100, 12, hc("#e3644c") if G.hp < 30 else hc("#9cc063"))
-	g.text("%s   %d bomb%s" % [(D.WEAPONS[G.weapon].name + ", " + str(G.ammo) + " rounds") if G.ammo > 0 else "Machete, no rounds", G.bombs, "" if G.bombs == 1 else "s"], px + 10, py + 40, 13, ink)
+	var aunit: String = D.AMMO[gm.ammo_key()].unit
+	var aleft: int = gm.ammo_left()
+	var atxt: String = ("unlimited " + aunit) if gm.unl_ammo else ("%d %s spare" % [gm.reserve_left(), aunit])
+	g.text("%s   %d bomb%s" % [(D.WEAPONS[G.weapon].name + ", " + atxt) if aleft > 0 else ("Machete, no " + aunit), G.bombs, "" if G.bombs == 1 else "s"], px + 10, py + 40, 13, ink)
 	g.text("%d bandage%s   %d medkit%s   %d part%s%s" % [G.band, "" if G.band == 1 else "s", G.med, "" if G.med == 1 else "s", G.parts, "" if G.parts == 1 else "s", ("   armor " + str(int(ceil(G.armor)))) if G.armor > 0 else ""], px + 10, py + 58, 13, ink)
 	var awake := 0
 	for z in S.zs:
@@ -2467,6 +2842,7 @@ static func hud_ground(gm, g: Pen) -> void:
 		var y := fmod(a.y + T * 0.02 * a.s, 1.0) * H
 		g.circle(x, y, 0.8 + a.s * 0.7, rgba(200, 196, 188, 0.2))
 	draw_objective(gm, g, py + 112)
+	draw_mag(gm, g)
 	var nx := 10.0
 	var ny := py + 162
 	var nw := minf(W - 24, 220)
@@ -2481,8 +2857,13 @@ static func hud_ground(gm, g: Pen) -> void:
 	g.rect(nx + 56, ny + 7, (nw - 64) * f, 6, nc)
 	for q in [0.35, 0.65]: g.rect(nx + 56 + (nw - 64) * q - 1, ny + 5, 2, 10, Color(0, 0, 0, 0.5))
 	g.text("HORDE" if f >= 1 else "Noise", nx + 8, ny + 10, 11, hc("#ff8a70") if f >= 1 else ink)
+	# clearing and settling (fields.gd): enemies left to kill, or the settlers' count, under the meter
+	var fl: String = gm.fields.hud_line()
+	if fl != "":
+		g.rr(nx, ny + 24, minf(W - 24, Pen.measure(fl, 12) + 16), 20, 5, rgba(12, 16, 14, 0.74))
+		g.text(fl, nx + 8, ny + 34, 12, hc("#9cc063") if S.get("calm", false) else hc("#f2b64a"), -1, "600")
 	var gs: float = gm.ground_scale()
-	if S.npc == null and G.contracts.size():
+	if S.npcs.is_empty() and G.contracts.size():
 		var sx: float = W / 2 + (S.plane.x - S.cx) * gs
 		var sy: float = H / 2 + (S.plane.y - S.cy) * gs
 		if sx < 20 or sx > W - 20 or sy < 150 or sy > H - 20:
@@ -2496,8 +2877,7 @@ static func hud_ground(gm, g: Pen) -> void:
 			g.polyline(tc, Color(0, 0, 0, 0.6), 2)
 			g.restore()
 			g.text("Plane", ex - cos(a) * 24, ey - sin(a) * 18, 11, hc("#f3d38c"), 0, "700")
-	if S.npc:
-		var n: Dictionary = S.npc
+	for n in S.npcs:
 		var sx: float = W / 2 + (n.x - S.cx) * gs
 		var sy: float = H / 2 + (n.y - S.cy) * gs
 		if sx < 20 or sx > W - 20 or sy < 150 or sy > H - 20:
