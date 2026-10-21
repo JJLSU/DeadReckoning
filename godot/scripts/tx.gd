@@ -16,6 +16,28 @@ static var FOOT_TREES: Array = []
 ## per tree [full, low, middle, top] sprites from res://sprites/trees3d/t<i>_<layer>.png. The full
 ## one is its shadow silhouette; the three height layers stack and lean in flight.
 static var T3D: Array = []
+## Zombie sprites rendered from a Blender model (z_resources/zombie-sprites): per kind three
+## strips of Z_FRAMES walk frames, a = the whole zombie with shirt and skin white, s = shirt
+## only, k = skin only; s and k are drawn tinted with each zombie's colours.
+static var ZSPR := {}
+const Z_KINDS := ["normal", "bloat", "crawler", "scream", "armor", "onearm", "ribs"]
+const Z_FRAMES := 8
+## Survivor/player sprites from a Blender model, in parts drawn on top of each other
+## (sprites/people/<part>_<layer>.png): body_m/body_f (Z_FRAMES walk frames: legs and torso),
+## vest, pack, arms_<pistol|rifle|..>, head_<hair|fem|cap>. Layer a is the whole part with the
+## tintable colours white; s (shirt), k (skin), h (hair or cap), p (pack) are drawn tinted.
+## arms_w<i> holds D.WEAPONS[i] aimed, arms_w<i>_low carried low, arms_w<i>_rl is a strip of
+## PPL_RL frames reloading it.
+static var PPL := {}
+const PPL_RL := 6
+static var PPL_PARTS := _ppl_parts()
+static func _ppl_parts() -> Dictionary:
+	var d := {"body_m": "as", "body_f": "as", "vest": "a", "pack": "ap", "arms_bare": "ask", "arms_melee": "ask", "arms_swing": "ask",
+		"head_hair": "akh", "head_fem": "akh", "head_cap": "akh"}
+	for i in 7:
+		for v in ["", "_low", "_rl"]: d["arms_w%d%s" % [i, v]] = "ask"
+	d["arms_w6_fired"] = "ask"; d["arms_w6_low_fired"] = "ask"   # crossbow just fired: limbs sprung, string straight
+	return d
 const T3D_N := 9
 const T3D_FALL := 6   # trees from this index on are fall colours
 static var PSPR := {}   # "Kestrel" / "Kestrel_s" -> texture
@@ -95,6 +117,14 @@ static func bake_all(baker: Baker) -> void:
 		TREES.append(await baker.bake(Vector2i(128, 128), func(p: Pen): _draw_tree(p, v)))
 	for v in 3:
 		FOOT_TREES.append(await baker.bake(Vector2i(128, 128), func(p: Pen): _draw_foot_tree(p, v)))
+	for part in PPL_PARTS:
+		var pl := {}
+		for n in PPL_PARTS[part]: pl[n] = _png("res://sprites/people/%s_%s.png" % [part, n])
+		if not pl.values().has(null): PPL[part] = pl
+	for k in Z_KINDS:
+		var zl := []
+		for n in ["a", "s", "k"]: zl.append(_png("res://sprites/zombies/%s_%s.png" % [k, n]))
+		if not zl.has(null): ZSPR[k] = zl
 	for i in T3D_N:
 		var t := []
 		for n in ["full", "l0", "l1", "l2"]: t.append(_png("res://sprites/trees3d/t%d_%s.png" % [i, n]))

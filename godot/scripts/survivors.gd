@@ -226,6 +226,16 @@ const NPC_GUNS := [0, 1, 2, 5]    # revolver, pump shotgun, lever rifle, double-
 const NPC_DMG := 0.7              # their shots do this fraction of the gun's normal damage
 const NPC_FIRE_WINDOW := 8.0      # they keep shooting this long after your last loud shot
 const NPC_RANGE := 380.0          # how far they'll engage
+# Rescue and mayday survivors fight like the hostile ones (Greg 2026-10-21): cover, peeking, dodging,
+# reloading, settled aim, leading, fleeing blasts; no throwables. Following you, they keep up and
+# take pot shots on the run (snap spread) while you're more than NPC_LEASH px away or on the move;
+# with you close and standing your ground they fight from cover near you, and only leave it to
+# catch up once you're NPC_LEASH_BREAK px off. They only shoot while cleared to (NPC_FIRE_WINDOW).
+const NPC_LEASH := 150.0
+const NPC_LEASH_BREAK := 260.0
+const NPC_RUN_PV := 40.0          # you moving faster than this (px/s) counts as on the move
+const NPC_NEAR := 44.0            # following, they stop this close to you
+const NPC_CALM := 3.0             # s with no enemy in sight before they stand down
 const SV_GUN_DROP := 0.15     # chance a killed survivor also drops their gun
 # Survivor body armour: chance by danger (index = danger), and how much it holds. Like
 # the player's armour, it soaks up half of each hit until it's used up.
@@ -522,18 +532,53 @@ func sv_dodge(v: Dictionary, p: Dictionary, see: bool, dt: float) -> Variant:
 	elif dir.length() > 0: v.ang = dir.angle()
 	return dir * SV_SUP_SPD
 
+## Survivor v's own side: the hostile garrison, or your rescue survivors (v.fr).
+func sv_team(v: Dictionary) -> Array:
+	return gm.S.npcs if v.get("fr", false) else gm.S.sv
+
+## Everyone a friendly survivor walks round: hostiles, rescues, settlers, farm folk and you.
+func people() -> Array:
+	var a: Array = gm.S.sv + gm.S.npcs
+	a += gm.S.get("setl", [])
+	a += gm.S.get("ff", [])
+	a.append(gm.S.p)
+	return a
+
+## A friendly survivor e (rescue, settler, farm folk) jostling: bodies within 20 px push it
+## gently apart, and you shove it out of your way (you can always push past them). r: its body.
+func fr_jostle(e: Dictionary, dt: float, r: float = 8.0) -> void:
+	var push := Vector2.ZERO
+	for list in [gm.S.sv, gm.S.zs, gm.S.npcs, gm.S.get("setl", []), gm.S.get("ff", [])]:
+		for o in list:
+			if is_same(o, e) or o.get("dead", false): continue
+			var ox: float = e.x - o.x
+			var oy: float = e.y - o.y
+			var dd := ox * ox + oy * oy
+			if dd < 400 and dd > 0.01:
+				var q := sqrt(dd)
+				push += Vector2(ox / q, oy / q) * 0.8
+	if push != Vector2.ZERO: gm.move_c(e, push.x * 85.0 * dt, push.y * 85.0 * dt, r)
+	var p: Dictionary = gm.S.p
+	var off := Vector2(e.x - p.x, e.y - p.y)
+	var od := off.length()
+	if od < gm.Z_BODY:
+		var u := off / od if od > 0.01 else Vector2.RIGHT.rotated(randf() * TAU)
+		gm.move_c(e, p.x + u.x * gm.Z_BODY - e.x, p.y + u.y * gm.Z_BODY - e.y, r)
+
 ## Survivor v about to move along (vx, vy): if another survivor stands in the way within
 ## SV_AVOID_R px ahead, veer off to the side they're not on (the right if dead ahead, so two
 ## walking at each other both pass on the right), more sharply the closer they are. Speed kept.
-func sv_avoid(v: Dictionary, vx: float, vy: float) -> Vector2:
+## Who to steer round: `others`, or by default every armed survivor (hostile and rescue).
+func sv_avoid(v: Dictionary, vx: float, vy: float, others = null) -> Vector2:
 	var vel := Vector2(vx, vy)
 	var spd := vel.length()
 	if spd < 0.05: return vel
 	var dir := vel / spd
 	var side := Vector2(-dir.y, dir.x)   # to their right
 	var steer := Vector2.ZERO
-	for o in gm.S.sv:
-		if o == v or o.dead: continue
+	var lst: Array = others if others is Array else gm.S.sv + gm.S.npcs
+	for o in lst:
+		if is_same(o, v) or o.get("dead", false): continue
 		var rel := Vector2(o.x - v.x, o.y - v.y)
 		var ahead := rel.dot(dir)
 		if ahead <= 0 or ahead > SV_AVOID_R: continue
@@ -810,7 +855,7 @@ func car_unsafe(car) -> bool:
 
 ## Has another survivor already got cover at (or right by) (x, y)?
 func sv_cover_taken(v: Dictionary, x: float, y: float) -> bool:
-	for o in gm.S.sv:
+	for o in sv_team(v):
 		if o == v or o.dead: continue
 		if o.has("cv") and Vector2(o.cv.x - x, o.cv.y - y).length() < gm.TS * 1.5: return true
 		if o.has("fl") and o.fl.has("cv") and Vector2(o.fl.cv.x - x, o.fl.cv.y - y).length() < gm.TS * 1.5: return true
@@ -1137,12 +1182,19 @@ func sv_fire(v: Dictionary, spread: float = 1.0) -> void:
 	var steady := lerpf(1.0, SV_SETTLE_ACC, st)
 	var aim: float = sv_lead(v, float(w.spd)) + (randf() - 0.5) * 0.22 * spread * steady * (1.6 if auto and v.burst > 0 else 1.0)
 	var spr: float = float(w.spr) * (steady if int(w.pel) == 1 else 1.0)
+	var fr: bool = v.get("fr", false)   # a rescue survivor: your side's rounds (hit zombies and hostiles)
+	if fr: dmg = float(w.dmg) * NPC_DMG
+	var bs: float = float(w.spd) * (1.0 if fr else 0.65)
 	for k in int(w.pel):
 		var a: float = aim + (randf() - 0.5) * spr * 2.0
-		gm.S.bul.append({"x": v.x + cos(a) * 14, "y": v.y + sin(a) * 14, "vx": cos(a) * w.spd * 0.65, "vy": sin(a) * w.spd * 0.65,
-			"life": w.life, "dmg": dmg, "pl": false, "kb": 0.0, "bolt": w.bolt, "src": v})
-	gm.sfx("bow" if w.silent else "enemy")
-	if not w.silent: gm.add_noise(float(w.noise) * SV_SHOT_NOISE)
+		gm.S.bul.append({"x": v.x + cos(a) * 14, "y": v.y + sin(a) * 14, "vx": cos(a) * bs, "vy": sin(a) * bs,
+			"life": w.life, "dmg": dmg, "pl": fr, "kb": float(w.kb) * 0.5 if fr else 0.0, "bolt": w.bolt, "src": v})
+	if fr:
+		gm.sfx(w.snd)
+		if not w.silent: gm.add_noise(float(w.noise) * 0.5)
+	else:
+		gm.sfx("bow" if w.silent else "enemy")
+		if not w.silent: gm.add_noise(float(w.noise) * SV_SHOT_NOISE)
 	if not w.silent: gm.muzzle_flash(v.x, v.y, aim)
 	v.mag = int(v.get("mag", sv_mag_cap(v))) - 1
 	if v.mag <= 0:   # empty
@@ -1156,16 +1208,30 @@ func sv_fire(v: Dictionary, spread: float = 1.0) -> void:
 			return
 	v.cd = (0.75 + w.rate) * (1.0 + randf() * 0.6)
 
-## Where survivor v points the gun: v.ang, except that when that's at you and you're moving
-## they aim ahead, at where you'll be when a bullet at speed spd gets there. How much of that
+## Keeps survivor v's estimate of how their target tp is moving (v.tv, px/s): yours is
+## S.plv; anyone else's is measured frame to frame while they stay the target.
+func sv_track(v: Dictionary, tp: Dictionary, dt: float) -> void:
+	if is_same(tp, gm.S.p):
+		v.tv = gm.S.get("plv", Vector2.ZERO)
+	elif is_same(v.get("tle"), tp) and dt > 0.0:
+		var inst := (Vector2(tp.x, tp.y) - (v.tlp as Vector2)) / dt
+		if inst.length() > 600.0: inst = Vector2.ZERO
+		v.tv = (v.get("tv", Vector2.ZERO) as Vector2).lerp(inst, minf(1.0, dt * 8.0))
+	else:
+		v.tv = Vector2.ZERO
+	v.tle = tp
+	v.tlp = Vector2(tp.x, tp.y)
+
+## Where survivor v points the gun: v.ang, except that when that's at their target and it's moving
+## they aim ahead, at where it'll be when a bullet at speed spd gets there. How much of that
 ## lead they get right is SV_LEAD_K x their iq, give or take SV_LEAD_ERR / iq.
 func sv_lead(v: Dictionary, spd: float) -> float:
-	var p: Dictionary = gm.S.p
-	var u: Vector2 = gm.S.get("plv", Vector2.ZERO)
+	var p: Dictionary = v.get("tgt", gm.S.p)
+	var u: Vector2 = v.get("tv", Vector2.ZERO)
 	if u.length() < 5.0: return v.ang
 	var r := Vector2(p.x - v.x, p.y - v.y)
 	var direct := r.angle()
-	if absf(wrapf(v.ang - direct, -PI, PI)) > SV_LEAD_CONE: return v.ang   # not shooting at you
+	if absf(wrapf(v.ang - direct, -PI, PI)) > SV_LEAD_CONE: return v.ang   # not shooting at them
 	# time for the bullet to meet you: |r + u t| = spd t
 	var qa := u.dot(u) - spd * spd
 	var qb := 2.0 * r.dot(u)
@@ -1222,7 +1288,7 @@ func sv_start_reload(v: Dictionary) -> void:
 		if v.cph == 2 and not v.cv.has("sm"):
 			v.cph = 1; v.cpt = 0.0
 			v.hide = randf_range(SV_HIDE_MIN, SV_HIDE_MAX)
-	elif v.alert and not v.get("rush", false):
+	elif v.alert and not v.get("rush", false) and (v.has("tgt") or not v.get("fr", false)):
 		var nc = sv_find_cover(v, v.get("tgt", gm.S.p))
 		if nc is Dictionary:
 			v.cv = nc
@@ -1309,7 +1375,8 @@ func _spawn_one(who: String, where: String, cid: String, used: Array) -> void:
 	# zombies can't walk in, and anything already inside is removed.
 	var safe := Rect2(rm.c * gm.TS, rm.r * gm.TS, rm.w * gm.TS, rm.h * gm.TS)
 	gm.S.npcs.append({"x": x, "y": y, "ang": PI / 2, "hp": 60.0, "voice": randf_range(Synth.VOICE.x, Synth.VOICE.y), "name": who, "where": wh, "cid": cid, "follow": false, "wk": 0.0, "hit": 0.0,
-		"w": NPC_GUNS[randi() % NPC_GUNS.size()], "cd": 0.0, "fire_t": -1.0, "safe": safe})
+		"w": NPC_GUNS[randi() % NPC_GUNS.size()], "cd": 0.0, "fire_t": -1.0, "safe": safe,
+		"fr": true, "alert": false, "iq": randf_range(SV_IQ.x, SV_IQ.y), "spm": 1.0, "burst": 0, "sw": 0.0, "sd": 1.0, "dead": false})
 	gm.S.safes.append(safe)
 	gm.S.zs = gm.S.zs.filter(func(z): return not gm.in_safe(z.x, z.y))
 	gm.S.sv = gm.S.sv.filter(func(v): return not gm.in_safe(v.x, v.y))
@@ -1327,41 +1394,104 @@ func _mayday_done(n: Dictionary) -> void:
 	md.ppl = md.ppl.filter(func(pp): return pp.who != n.name)
 	if md.ppl.is_empty(): gm.G.mayday = null
 
-## The rescue survivor shoots back: only once they're following you, and only for a
-## while after you fire something loud (crossbow shots keep them quiet too).
-func npc_fight(n: Dictionary, dt: float) -> void:
-	if not n.follow or gm.S.t > float(n.get("fire_t", -1.0)): return
-	n.cd = float(n.get("cd", 0.0)) - dt
+## Who rescue survivor n fights: whoever hurt them in the last SV_ATK_MEM s while it's still up
+## and in sight, else the nearest awake zombie or hostile they can see within NPC_RANGE. null if none.
+func npc_target(n: Dictionary) -> Variant:
+	var a = n.get("atk")
+	if a is Dictionary and gm.S.t - float(n.get("atkT", -99.0)) < SV_ATK_MEM and not a.get("dead", false) \
+			and (gm.S.zs.has(a) or gm.S.sv.has(a)) and Vector2(a.x - n.x, a.y - n.y).length() < NPC_RANGE * 1.3 and gm.los(n.x, n.y, a.x, a.y):
+		return a
+	n.erase("atk")
 	var best = null
 	var bd := NPC_RANGE
 	for e in gm.S.zs + gm.S.sv:
 		if e.dead or e.get("dormant", false) or e.get("rise", 0.0) > 0: continue
 		var d := Vector2(e.x - n.x, e.y - n.y).length()
-		if d < bd and gm.los(n.x, n.y, e.x, e.y):
+		if d < bd and gm.los(n.x, n.y, e.x, e.y) and not smoke_blocks(n.x, n.y, e.x, e.y):
 			bd = d
 			best = e
-	if best == null: return
-	var aim := atan2(best.y - n.y, best.x - n.x)
-	n.ang = aim
-	if n.cd > 0: return
-	var w: Dictionary = D.WEAPONS[int(n.w)]
-	var a0: float = aim + (randf() - 0.5) * 0.16
-	for k in int(w.pel):
-		var a: float = a0 + (randf() - 0.5) * float(w.spr) * 2.0
-		gm.S.bul.append({"x": n.x + cos(a) * 14, "y": n.y + sin(a) * 14, "vx": cos(a) * w.spd, "vy": sin(a) * w.spd, "life": w.life,
-			"dmg": float(w.dmg) * NPC_DMG, "pl": true, "kb": float(w.kb) * 0.5, "bolt": false, "src": n})
-	gm.sfx(w.snd)
-	if not w.silent: gm.muzzle_flash(n.x, n.y, a0)
-	gm.add_noise(float(w.noise) * 0.5)
-	n.cd = (0.75 + float(w.rate)) * (1.0 + randf() * 0.4)
+	return best
 
-func npc_hurt(n: Dictionary, d: float, dir: Vector2 = Vector2.ZERO) -> void:
+## Hostile fire at (bx, by) moving (bvx, bvy): rescue survivors in a fight close enough to feel it duck or dodge.
+func npc_near_miss(bx: float, by: float, bvx: float, bvy: float) -> void:
+	for n in gm.S.npcs:
+		if n.get("alert", false) and Vector2(n.x - bx, n.y - by).length() < SV_SUP_R:
+			sv_suppress(n, bx, by, bvx, bvy)
+
+## A rescue survivor out of hiding, following you: the hostile survivors' tactics (see NPC_LEASH).
+## Returns their steer vector (fractions of 85 px/s, before avoidance).
+func npc_fight(n: Dictionary, p: Dictionary, d: float, dt: float) -> Vector2:
+	n.cd = float(n.get("cd", 0.0)) - dt
+	if n.has("rl"):   # reloading
+		n.rl -= dt
+		if n.rl <= 0:
+			n.erase("rl")
+			n.mag = sv_mag_cap(n)
+	if n.has("supW"): sv_dodge_wait(n, dt)
+	var tg = npc_target(n)
+	if tg is Dictionary:
+		n.tgt = tg
+		sv_track(n, tg, dt)
+		sv_hear(n, tg.x, tg.y)
+		n.calm = 0.0
+	else:
+		n.erase("tgt")
+		n.calm = float(n.get("calm", 0.0)) + dt
+		if n.calm > NPC_CALM and n.alert:
+			n.alert = false
+			n.erase("cv"); n.erase("sup"); n.erase("supW")
+	var shoot: bool = tg is Dictionary and gm.S.t <= float(n.get("fire_t", -1.0))   # cleared to shoot (your loud shots)
+	var foe: Dictionary = tg if tg is Dictionary else p
+	var pv: Vector2 = gm.S.get("plv", Vector2.ZERO)
+	var on_run: bool = d > NPC_LEASH or pv.length() > NPC_RUN_PV
+	var fv = sv_flee(n, blast_dangers(), shoot, dt)
+	if fv is Vector2: return fv
+	if n.has("sup"):
+		var dg = sv_dodge(n, foe, shoot, dt)
+		if dg is Vector2: return dg
+	if shoot and ((n.has("cv") and d < NPC_LEASH_BREAK) or not on_run):
+		var cvs = sv_cover_fight(n, foe, true, dt)
+		if cvs is Vector2: return cvs
+		# no cover: hold here beside you, strafing a little, and shoot
+		n.ang = atan2(foe.y - n.y, foe.x - n.x)
+		var out := Vector2.ZERO
+		var fd := Vector2(foe.x - n.x, foe.y - n.y)
+		var fl := maxf(1.0, fd.length())
+		n.sw = float(n.get("sw", 0.0)) - dt
+		if n.sw <= 0:
+			n.sps = not n.get("sps", false)
+			n.sw = randf_range(SV_STRAFE_PAUSE.x, SV_STRAFE_PAUSE.y) if n.sps else 1.0 + randf() * 1.5
+			n.sd = 1.0 if randf() < 0.5 else -1.0
+		if not n.get("sps", false): out = Vector2(-fd.y, fd.x) / fl * float(n.sd) * SV_STRAFE
+		if d > NPC_NEAR * 2.0: out += sv_nav(n, p.x, p.y) * 0.6   # don't drift off from you
+		if n.cd <= 0: sv_fire(n)
+		return out
+	# following you: keep up, pot shots on the way if cleared
+	if n.has("cv"): sv_drop_cover(n, 0.5)
+	var mv := Vector2.ZERO
+	if d > NPC_NEAR:
+		mv = sv_nav(n, p.x, p.y) * ((175.0 if d > 160 else 140.0) / 85.0)
+	if shoot:
+		n.ang = atan2(foe.y - n.y, foe.x - n.x)
+		if n.cd <= 0: sv_fire(n, SV_SNAP_SPREAD if mv != Vector2.ZERO else 1.0)
+	elif mv != Vector2.ZERO:
+		n.ang = mv.angle()
+	elif tg is Dictionary:
+		n.ang = atan2(foe.y - n.y, foe.x - n.x)
+	return mv
+
+## by: whoever did it (a zombie or hostile), who becomes their target.
+func npc_hurt(n: Dictionary, d: float, dir: Vector2 = Vector2.ZERO, by = null) -> void:
 	n.hp -= d
 	n.hit = 0.15
+	if by is Dictionary:
+		n.atk = by; n.atkT = gm.S.t
+		sv_hear(n, by.x, by.y)
 	gm.hurt_cry(n)
 	gm.blood(n.x, n.y, 2)
 	if n.hp > 0: gm.blood_spray(n.x, n.y, dir)
 	if n.hp <= 0:
+		n.dead = true
 		gm.blood(n.x, n.y, 8)
 		gm.stamp_corpse({"x": n.x, "y": n.y, "a": randf() * TAU, "shirt": "#3f7a7a", "skin": "#e0b894"})
 		if n.cid == "":
@@ -1388,20 +1518,18 @@ func _upd_one(n: Dictionary, dt: float) -> void:
 		n.follow = true
 		gm.toast("%s: \"%s\"" % [gm.cap(n.name), D.FOUND[randi() % D.FOUND.size()]], "mag")
 		gm.sfx("loot")
-	if n.follow and d > 44:
-		var vx := dx / d
-		var vy := dy / d
-		if d > 120 and not gm.los(n.x, n.y, p.x, p.y):
-			var fd = gm.flow_dir(n.x, n.y)
-			if fd:
-				vx = fd.x; vy = fd.y
-		var ox: float = n.x
-		var oy: float = n.y
-		var sp := 175.0 if d > 160 else 140.0
-		gm.move_c(n, vx * sp * dt, vy * sp * dt, 9)
-		n.wk += Vector2(n.x - ox, n.y - oy).length() * 0.22
-		n.ang = atan2(vy, vx)
-	npc_fight(n, dt)
+	if not n.follow:   # still hiding
+		fr_jostle(n, dt, 9)
+		return
+	var stv := npc_fight(n, p, d, dt)
+	stv = sv_avoid(n, stv.x, stv.y, people())   # round people in the way
+	var ox: float = n.x
+	var oy: float = n.y
+	var own: float = gm.blasts.knock_tick(n, dt)
+	gm.move_c(n, stv.x * 85.0 * dt * own, stv.y * 85.0 * dt * own, 9)
+	fr_jostle(n, dt, 9)   # pushes past others; you push past them
+	n.still = float(n.get("still", 0.0)) + dt if Vector2(n.x - ox, n.y - oy).length() < 20.0 * dt else 0.0
+	n.wk += Vector2(n.x - ox, n.y - oy).length() * 0.22
 	if n.follow and (Vector2(n.x - gm.S.plane.x, n.y - gm.S.plane.y).length() < 160 or (gm.S.nearPlane and d < 120)):
 		if n.cid == "":
 			# a mayday survivor rides along and pays their share at a family farm (Greg, 2026-10-20)
@@ -1855,8 +1983,8 @@ func sv_refuge(v: Dictionary, dg: Dictionary, dangers: Array) -> Variant:
 				break
 			if not ok or gm.hit_box(x, y, 10): continue
 			var taken := false
-			for o in gm.S.sv:
-				if o != v and not o.dead and o.has("rfg") and Vector2(o.rfg.x - x, o.rfg.y - y).length() < 20.0:
+			for o in sv_team(v):
+				if o != v and not o.get("dead", false) and o.has("rfg") and Vector2(o.rfg.x - x, o.rfg.y - y).length() < 20.0:
 					taken = true
 					break
 			if taken: continue
@@ -1897,6 +2025,7 @@ func upd_survivors(p: Dictionary, dt: float) -> void:
 			if v.jt <= 0: v.erase("jt")
 		var tp := sv_target(v, p)   # who they're fighting: you, a rescue survivor, or whoever's attacking them
 		v.tgt = tp
+		sv_track(v, tp, dt)
 		var isp := is_same(tp, p)
 		var dx: float = tp.x - v.x
 		var dy: float = tp.y - v.y
@@ -2041,9 +2170,9 @@ func upd_survivors(p: Dictionary, dt: float) -> void:
 		vx = av.x; vy = av.y
 		# keep clear of other survivors and of zombies: the same soft push zombies use
 		# on each other (bodies within 20 px steer apart)
-		for others in [gm.S.sv, gm.S.zs]:
+		for others in [gm.S.sv, gm.S.zs, gm.S.npcs]:
 			for o in others:
-				if o == v or o.dead: continue
+				if is_same(o, v) or o.get("dead", false): continue
 				var ox2: float = v.x - o.x
 				var oy2: float = v.y - o.y
 				var dd := ox2 * ox2 + oy2 * oy2

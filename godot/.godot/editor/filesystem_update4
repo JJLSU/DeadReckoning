@@ -1,4 +1,6 @@
+res://scripts/render.gd
+res://scripts/tx.gd
+res://scripts/farm.gd
+res://scripts/fields.gd
 res://scripts/game.gd
 res://scripts/survivors.gd
-res://scripts/fields.gd
-res://scripts/render.gd

@@ -546,7 +546,9 @@ func _step_to(e: Dictionary, tx: float, ty: float, spd: float, stop: float, paus
 	var st := minf(d - stop, spd * dt)
 	var ox: float = e.x
 	var oy: float = e.y
-	gm.move_c(e, dv.x / d * st, dv.y / d * st, 8)
+	var u := dv / d
+	if not e.has("dog"): u = gm.survivors.sv_avoid(e, u.x, u.y, gm.survivors.people())   # folk walk round people
+	gm.move_c(e, u.x * st, u.y * st, 8)
 	var moved := Vector2(e.x - ox, e.y - oy).length()
 	e.ang = lerp_angle(float(e.ang), dv.angle(), minf(1.0, dt * 10))
 	if moved < st * 0.3:   # stuck on something: stop and think again
@@ -563,7 +565,11 @@ func update(p: Dictionary, dt: float) -> void:
 	S.greetT -= dt
 	for v in S.ff:
 		var dp := Vector2(p.x - v.x, p.y - v.y)
-		var moved := _wander(v, v.spd, FOLK_PAUSE, dt)
+		var ox: float = v.x
+		var oy: float = v.y
+		_wander(v, v.spd, FOLK_PAUSE, dt)
+		gm.survivors.fr_jostle(v, dt)   # pushes past others; you push past them
+		var moved := Vector2(v.x - ox, v.y - oy).length()
 		v.wk += moved * 0.22
 		if not v.go and dp.length() < 90: v.ang = lerp_angle(float(v.ang), dp.angle(), minf(1.0, dt * 6))
 		if dp.length() < GREET_R and S.greetT <= 0 and S.t - float(v.greetT) > GREET_AGAIN and gm.los(v.x, v.y, p.x, p.y):

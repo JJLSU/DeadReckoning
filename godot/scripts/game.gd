@@ -25,6 +25,8 @@ const REGEN_RATE := 3.0   # health per second
 
 # aim down sights — on foot, hold right mouse
 const ADS_MOVE := 0.5     # walk speed multiplier while aiming
+const PLAYER_MOVE_K := 2.0 / 3.0   # on-foot speed, walking and running (Greg 2026-10-21: a third slower)
+const PLAYER_LEG_K := 0.75   # leg swing per distance: with the slower speed the legs cycle half as fast as before
 const ADS_SENS := 0.45     # mouse sensitivity multiplier while aiming
 # Flashlight (F toggles it, off by default). Lit at night it gives you away: zombies and
 # hostile survivors spot you from TORCH_SEEN times as far (scaled by how dark it is).
@@ -841,8 +843,11 @@ func flow_dir(x: float, y: float):
 	if m == 0: m = 1
 	return Vector2(bx / m, by / m)
 
-func add_noise(v: float) -> void:
+## heard: the noise is the player's own (a shot, running, siphoning), so it gives away where
+## they are: reinforcement waves search there (S.heard).
+func add_noise(v: float, heard: bool = false) -> void:
 	if S: S.noise = minf(100.0, S.noise + v * DF().noise)
+	if S and heard: S.heard = Vector2(S.p.x, S.p.y)
 
 func blood(x: float, y: float, n: int) -> void:
 	var recs: Array = []
@@ -946,8 +951,8 @@ func spawn_edge(run: bool) -> void:
 				z.spd = maxf(z.spd, 112)
 		return
 
-func spawn_z(initial: bool) -> void:
-	if not initial and S.has("pool"):   # a field you're clearing has only so many dead (fields.gd)
+func spawn_z(initial: bool, extra: bool = false) -> void:
+	if not initial and not extra and S.has("pool"):   # a field you're clearing has only so many dead (fields.gd); waves are extra
 		if int(S.pool) <= 0: return
 		S.pool = int(S.pool) - 1
 	for t in 40:
@@ -1193,7 +1198,7 @@ func shoot() -> void:
 		S.bul.append({"x": p.x + cos(p.ang) * 16, "y": p.y + sin(p.ang) * 16, "vx": cos(a) * w.spd, "vy": sin(a) * w.spd, "life": w.life, "dmg": base_dmg * scope_k, "zdmg": zdmg, "aim": aimed, "pl": true, "kb": w.kb, "bolt": w.bolt, "src": p})
 	if not w.bolt:   # spent casing — guns only, the crossbow has none
 		S.fx.append({"x": p.x + cos(p.ang) * 8, "y": p.y + sin(p.ang) * 8, "vx": cos(p.ang + 1.6) * 110 + (randf() - 0.5) * 40, "vy": sin(p.ang + 1.6) * 110 + (randf() - 0.5) * 40, "life": 0.7, "c": "#d9b35a", "sz": 2.2, "drag": true})
-	add_noise(w.noise)
+	add_noise(w.noise, true)
 	if not w.silent:
 		S.flash = 0.06
 		S.shake = minf(8, S.shake + (7.0 if w.pel > 6 else (5.0 if w.pel > 1 else (1.2 if w.rate < 0.15 else 2.0))))
@@ -1541,14 +1546,14 @@ func upd_player(p: Dictionary, dt: float) -> float:
 	p.sprint = sprint
 	var ox: float = p.x
 	var oy: float = p.y
-	var ps := (168.0 if has("shoes") else 150.0) * (1.55 if sprint else 1.0) * (1.1 if p.jt > 0 else 1.0) * (ADS_MOVE if ads else 1.0)
+	var ps := (168.0 if has("shoes") else 150.0) * PLAYER_MOVE_K * (1.55 if sprint else 1.0) * (1.1 if p.jt > 0 else 1.0) * (ADS_MOVE if ads else 1.0)
 	var pown := blasts.knock_tick(p, dt)   # thrown by a blast? (you can't run against it)
 	S.air = p.jt > 0
 	move_c(p, mx * ps * dt * pown, my * ps * dt * pown, 10)
 	S.air = false
-	p.wk += Vector2(p.x - ox, p.y - oy).length() * (0.3 if sprint else 0.22)
+	p.wk += Vector2(p.x - ox, p.y - oy).length() * (0.3 if sprint else 0.22) * PLAYER_LEG_K
 	if sprint:
-		add_noise(2.2 * dt)
+		add_noise(2.2 * dt, true)
 		p.stam = maxf(0, p.stam - 30 * dt)
 		if randf() < dt * 2.5:
 			for z in S.zs:
@@ -1600,6 +1605,7 @@ func upd_bullets(p: Dictionary, dt: float) -> bool:
 			b.x += b.vx * dt / ns
 			b.y += b.vy * dt / ns
 			if b.pl: survivors.sv_near_miss(b.x, b.y, b.vx, b.vy)   # too close for comfort
+			else: survivors.npc_near_miss(b.x, b.y, b.vx, b.vy)
 			if solid_b(b.x, b.y):
 				for n in 3: S.fx.append({"x": b.x, "y": b.y, "vx": (randf() - 0.5) * 120, "vy": (randf() - 0.5) * 120, "life": 0.25, "c": "#e8c77a", "sz": 3.0, "drag": false})
 				var car = blasts.car_at(b.x, b.y)
@@ -1701,7 +1707,8 @@ func sv_bullet_hits(b: Dictionary) -> bool:
 				return true
 	for n in S.npcs:
 		if pow(n.x - b.x, 2) + pow(n.y - b.y, 2) < 144 and not in_safe(n.x, n.y):
-			survivors.npc_hurt(n, b.dmg, Vector2(b.vx, b.vy))
+			survivors.npc_hurt(n, b.dmg, Vector2(b.vx, b.vy), src if src is Dictionary else null)
+			if S != null: survivors.sv_suppress(n, b.x, b.y, b.vx, b.vy)
 			return true
 	return false
 
@@ -1798,6 +1805,15 @@ func upd_zombies(p: Dictionary, nk: float, dt: float) -> bool:
 				var py: float = vx * z.ds
 				vx = vx * 0.3 + px
 				vy = vy * 0.3 + py
+		elif z.has("srch"):   # a wave zombie heading for where you were heard (upd_spawns)
+			var st: Vector2 = z.srch
+			if Vector2(st.x - z.x, st.y - z.y).length() < 60:
+				z.erase("srch")   # got there: shambles about looking
+				z.wt = 0.0
+				vx = 0.0; vy = 0.0; sp = 0.0
+			else:
+				var nv: Vector2 = survivors.sv_nav(z, st.x, st.y)
+				vx = nv.x; vy = nv.y; sp = z.spd * WAVE_SEARCH
 		else:
 			z.wt -= dt
 			if z.wt <= 0:
@@ -1870,7 +1886,7 @@ func upd_zombies(p: Dictionary, nk: float, dt: float) -> bool:
 			if nd < 250 and not z.alert and los(z.x, z.y, n.x, n.y): z.alert = true
 			if nd < 22 and z.cd <= 0 and not in_safe(n.x, n.y):
 				z.cd = 0.85
-				survivors.npc_hurt(n, z.dmg, Vector2(n.x - z.x, n.y - z.y))
+				survivors.npc_hurt(n, z.dmg, Vector2(n.x - z.x, n.y - z.y), z)
 				if S == null: return true
 		if z.alert and z.cd <= 0:
 			for v in S.sv:
@@ -1922,16 +1938,20 @@ func upd_spawns(dt: float) -> void:
 	if S.arch == "family" or S.get("calm", false): return   # nothing comes for you at a family farm or a field you cleared
 	var held: bool = S.get("hostile", false)
 	# At survivor-held strips the noise waves are armed reinforcements, not the dead.
-	var waves := [[35, 0, "Doors bang open. Everyone inside is coming out to look for you."], [65, 3, "Engines on the road. They are bringing friends."], [100, 4, "Everyone they have is coming. Get to the plane."]] if held \
-		else [[35, 5, "They know you are here."], [65, 9, "A crowd is gathering at the fence line."], [100, 14, "The horde is here. Get to the plane."]]
+	# The first two marks call a reinforcement wave in from the fence line (Greg, 2026-10-21;
+	# queue_wave()); the full meter still brings the horde / everyone they have.
+	var waves := [[35, -1, "Doors bang open. Everyone inside is coming out, and more are coming over the fence."], [65, -2, "Engines on the road. They are bringing friends."], [100, 4, "Everyone they have is coming. Get to the plane."]] if held \
+		else [[35, -1, "They know you are here. More are coming in over the fence."], [65, -2, "A crowd is gathering at the fence line."], [100, 14, "The horde is here. Get to the plane."]]
+	upd_waves(dt)
 	for wv in waves:
 		if S.noise >= wv[0] and not S.waves.has(wv[0]):
 			S.waves.append(wv[0])
 			toast(wv[2], "bad")
 			sfx("horde")
 			S.shake = maxf(S.shake, 5)
-			if held and wv[1] == 0:   # first mark at a held strip: everyone indoors comes out looking for you
-				survivors.call_out(S.p.x, S.p.y)
+			if wv[1] < 0:
+				if held and wv[1] == -1: survivors.call_out(S.p.x, S.p.y)   # first mark at a held strip: everyone indoors comes out too
+				queue_wave(-int(wv[1]))
 				continue
 			for k in maxi(1, int(round(wv[1] * DF().count))):
 				if held: S.svq = S.get("svq", 0) + 1   # they arrive one by one (Survivors.upd_garrison())
@@ -1951,6 +1971,79 @@ func upd_spawns(dt: float) -> void:
 				spawn_edge(randf() < 0.5)
 			else:
 				spawn_z(false)
+
+## Reinforcement waves (Greg, 2026-10-21): crossing the first noise mark brings WAVE_1 more in
+## over the fence, the second WAVE_2 (x = danger 1, y = danger 5), zombies or armed survivors to
+## suit the field. They come in groups of 3-4, a few seconds apart, from spots on the fence line
+## off screen, and head for where the player was last heard (S.heard) to search for them. They're
+## on top of a field's remaining count (fields.gd pool), so each group adds to it as it arrives.
+const WAVE_1 := Vector2i(5, 10)
+const WAVE_2 := Vector2i(7, 12)
+const WAVE_GROUP := Vector2i(3, 4)
+const WAVE_GAP := Vector2(1.5, 3.5)   # s between groups
+const WAVE_SEARCH := 0.75             # zombies on their way to search walk at this share of their speed
+
+func queue_wave(mark: int) -> void:
+	var r: Vector2i = WAVE_1 if mark == 1 else WAVE_2
+	var n := r.x + int(round((clampi(int(S.danger), 1, 5) - 1) / 4.0 * (r.y - r.x)))
+	var groups := int(ceil(n / float(WAVE_GROUP.y)))
+	if not S.has("rq"): S.rq = []
+	var t := 0.5
+	for i in groups:
+		var g := n / groups + (1 if i < n % groups else 0)   # as even as it goes: 9 -> 3+3+3, 10 -> 4+3+3
+		S.rq.append({"n": g, "t": float(S.t) + t})
+		t += randf_range(WAVE_GAP.x, WAVE_GAP.y)
+
+func upd_waves(_dt: float) -> void:
+	var rq: Array = S.get("rq", [])
+	while rq.size() and float(rq[0].t) <= float(S.t):
+		var g: Dictionary = rq.pop_front()
+		spawn_wave_group(int(g.n))
+		if S == null: return
+
+## Is (x, y) off the screen (with a margin), for the camera as it is and as drawn (aiming shifts it)?
+func off_screen(x: float, y: float, m: float = 40.0) -> bool:
+	var gs := ground_scale()
+	var hw := Wv / 2 / gs + m
+	var hh := Hv / 2 / gs + m
+	for c in [Vector2(S.cx, S.cy), Vector2(S.get("rcx", S.cx), S.get("rcy", S.cy))]:
+		if absf(x - c.x) < hw and absf(y - c.y) < hh: return false
+	return true
+
+## One group of n off screen on the fence line, sent to search where you were last heard.
+func spawn_wave_group(n: int) -> void:
+	var held: bool = S.get("hostile", false)
+	var tgt: Vector2 = S.get("heard", Vector2(S.p.x, S.p.y))
+	var at = null
+	for t2 in 80:
+		var side := randi() % 4
+		var c: int = 1 if side == 0 else (S.cols - 2 if side == 1 else 1 + int(randf() * (S.cols - 2)))
+		var r: int = 1 if side == 2 else (S.ry - 2 if side == 3 else 1 + int(randf() * (S.rows - 2)))
+		var x: float = (c + 0.5) * TS
+		var y: float = (r + 0.5) * TS
+		if solid(x, y) or in_safe(x, y) or not off_screen(x, y, 80.0): continue
+		at = Vector2(x, y)
+		break
+	if at == null: return
+	var made := 0
+	for k in 30:
+		if made >= n: break
+		var x: float = at.x + (0.0 if made == 0 else (randf() - 0.5) * 3.0 * TS)
+		var y: float = at.y + (0.0 if made == 0 else (randf() - 0.5) * 3.0 * TS)
+		if hit_box(x, y, 10) or not off_screen(x, y): continue
+		if held:
+			var v: Dictionary = survivors.new_sv(x, y)
+			survivors.sv_patrol_init(v)
+			survivors.sv_sweep(v, tgt.x, tgt.y)   # heads for roughly where you were heard and searches there
+			S.sv.append(v)
+		else:
+			var n0: int = S.zs.size()
+			spawn_z(false, true)
+			if S.zs.size() == n0: continue
+			var z: Dictionary = S.zs[S.zs.size() - 1]
+			z.x = x; z.y = y
+			z.srch = tgt + Vector2(randf() - 0.5, randf() - 0.5) * 4.0 * TS
+		made += 1
 
 ## Particles, thrown bombs (bouncing, fuse), smoke and floating text.
 ## Returns true when a bomb going off ended the frame (site gone or you died).
@@ -2044,7 +2137,7 @@ func upd_tanker(p: Dictionary, ml: float, dt: float) -> void:
 		var d := Vector2(p.x - tk.x, p.y - tk.y).length()
 		if d < 70 and ml < 0.1:
 			tk.prog += dt / 4.0
-			add_noise(5 * dt)
+			add_noise(5 * dt, true)
 			if S.t - S.sipT > 0.5:
 				S.sipT = S.t
 				sfx("siphon")

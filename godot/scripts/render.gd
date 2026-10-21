@@ -1861,12 +1861,14 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 				var sj: float = sin(PI * (1 - float(v.jt) / Survivors.SV_STARTLE_T)) * 3.5 if v.has("jt") else 0.0
 				if sj > 0:
 					g.save(); g.translate(v.x, v.y - sj * 0.5); g.scale(1 + sj / 45, 1 + sj / 45); g.translate(-v.x, -v.y)
-				draw_person(g, v.x, v.y, v.ang, {"body": v.shirt, "skin": v.skin, "hair": "#2b2118", "cap": v.cap, "gun": not v.get("unarmed", false), "bare": v.get("unarmed", false), "long": int(v.get("w", 1)) != 0, "vest": float(v.get("armor", 0.0)) > 0, "walk": v.wk, "hit": v.hit > 0, "lower": 1.0 - float(v.get("gup", 0.0))})
+				draw_person(g, v.x, v.y, v.ang, {"body": v.shirt, "skin": v.skin, "hair": "#2b2118", "cap": v.cap, "gun": not v.get("unarmed", false), "bare": v.get("unarmed", false), "long": int(v.get("w", 1)) != 0, "vest": float(v.get("armor", 0.0)) > 0, "walk": v.wk, "hit": v.hit > 0, "lower": 1.0 - float(v.get("gup", 0.0)),
+					"wi": int(v.get("w", 1)), "rl": rl_frac(v, int(v.get("w", 1))), "empty": int(v.get("mag", 1)) <= 0})
 				if sj > 0: g.restore()
 			gm.farm.draw(g)
 			gm.fields.draw(g)
 			for n in S.npcs:
-				draw_person(g, n.x, n.y, n.ang, {"body": "#3f7a7a", "skin": "#e0b894", "hair": "#5a3a22", "gun": true, "long": int(n.get("w", 0)) != 0, "walk": n.wk, "hit": n.hit > 0})
+				draw_person(g, n.x, n.y, n.ang, {"body": "#3f7a7a", "skin": "#e0b894", "hair": "#5a3a22", "gun": true, "long": int(n.get("w", 0)) != 0, "walk": n.wk, "hit": n.hit > 0,
+					"wi": int(n.get("w", 0)), "rl": rl_frac(n, int(n.get("w", 0))), "empty": int(n.get("mag", 1)) <= 0})
 				if not n.follow:
 					var pl := 0.5 + 0.5 * sin(T * 5)
 					g.ring(n.x, n.y, 22 + pl * 6, rgba(240, 160, 210, 0.3 + 0.5 * pl), 2)
@@ -1884,7 +1886,9 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 				var dc := Vector2(p.x - cl.x, p.y - cl.y).length()
 				if dc < cl.r: hid = maxf(hid, float(cl.den) * clampf((cl.r - dc) / (cl.r * 0.3), 0.0, 1.0))
 			g.ga = 1.0 - SMOKE_HIDE * minf(1.0, hid)
-			draw_person(g, p.x, p.y, p.ang, {"body": "#9a3a2a" if S.hurt > 0 else "#6b4a2e", "skin": "#d9b48f", "cap": "#34404c", "gun": gm.ammo_left() > 0 and not gm.unarmed_here(), "bare": gm.unarmed_here(), "long": gm.G.weapon > 0, "walk": p.wk, "swing": S.swing > 0})
+			draw_person(g, p.x, p.y, p.ang, {"body": "#9a3a2a" if S.hurt > 0 else "#6b4a2e", "skin": PLAYER_SKIN, "cap": "#34404c", "gun": gm.ammo_left() > 0 and not gm.unarmed_here(), "bare": gm.unarmed_here(), "long": gm.G.weapon > 0, "walk": p.wk, "swing": S.swing > 0,
+				"wi": gm.G.weapon, "rl": rl_frac(p, int(p.get("rlw", gm.G.weapon))) if float(p.get("rl", 0.0)) > 0 else -1.0,
+				"empty": gm.mag_of() <= 0})
 			g.restore()
 		1:
 			view.call()
@@ -2107,15 +2111,19 @@ const ROOF_H := 16.0     # on foot: roof height for the wall slivers and sun sha
 const FOOT_TREE_H := 46.0   # on foot: average canopy top height (each tree varies)
 const WALL_FOOT := Color(0.5, 0.46, 0.4)
 ## A lintel over each door and window, sticking out past the outside of the wall and the
-## roof edge so openings show from outside. rm.lt caches [x, y, w, h, window?] per opening.
+## roof edge so openings show from outside. rm.lt caches [x, y, w, h, window?, side, a0, a1, gable?]
+## per opening. On a pitched roof, an opening in a wall that runs along the ridge gets a small
+## cross gable instead (draw_gable): as wide as the lintel and sticking out just as far.
 const LINTEL := Color(0.6, 0.53, 0.42)
 const LINTEL_WIN := Color(0.5, 0.46, 0.4)
 static func draw_lintels(g: Pen, S: Dictionary, rm: Dictionary) -> void:
 	if not rm.has("lt"):
 		var lt := []
 		var at := func(c: int, r: int) -> int: return S.g[r * S.cols + c]
+		var ridge_x: bool = rm.w >= rm.h   # same test as draw_roof
 		for side in 4:   # top, bottom, left, right walls
 			var horiz := side < 2
+			var gable: bool = not rm.flat and horiz == ridge_x
 			var n: int = rm.w if horiz else rm.h
 			var k := 1
 			while k < n - 1:
@@ -2129,22 +2137,81 @@ static func draw_lintels(g: Pen, S: Dictionary, rm: Dictionary) -> void:
 				while k1 + 1 < n - 1 and at.call(c + (k1 + 1 - k) if horiz else c, r if horiz else r + (k1 + 1 - k)) == v: k1 += 1
 				var a0 := k * TS - 4.0
 				var a1 := (k1 + 1) * TS + 4.0
+				var e := [0.0, 0.0, 0.0, 0.0, v == 15, side, a0, a1, gable]
 				match side:
-					0: lt.append([rm.c * TS + a0, rm.r * TS + 2.0, a1 - a0, 9.0, v == 15])
-					1: lt.append([rm.c * TS + a0, (rm.r + rm.h) * TS - 11.0, a1 - a0, 9.0, v == 15])
-					2: lt.append([rm.c * TS + 2.0, rm.r * TS + a0, 9.0, a1 - a0, v == 15])
-					3: lt.append([(rm.c + rm.w) * TS - 11.0, rm.r * TS + a0, 9.0, a1 - a0, v == 15])
+					0: e[0] = rm.c * TS + a0; e[1] = rm.r * TS + 2.0; e[2] = a1 - a0; e[3] = 9.0
+					1: e[0] = rm.c * TS + a0; e[1] = (rm.r + rm.h) * TS - 11.0; e[2] = a1 - a0; e[3] = 9.0
+					2: e[0] = rm.c * TS + 2.0; e[1] = rm.r * TS + a0; e[2] = 9.0; e[3] = a1 - a0
+					3: e[0] = (rm.c + rm.w) * TS - 11.0; e[1] = rm.r * TS + a0; e[2] = 9.0; e[3] = a1 - a0
+				lt.append(e)
 				k = k1 + 1
 		rm.lt = lt
 	for l in rm.lt:
+		if l[8]: continue
 		g.rect(l[0] + 3, l[1] + 4, l[2], l[3], Color(0, 0, 0, 0.35))
 	for l in rm.lt:
+		if l[8]: continue
 		var col: Color = LINTEL_WIN if l[4] else LINTEL
 		g.rect(l[0], l[1], l[2], l[3], col)
 		g.rect(l[0], l[1], l[2], 2, col.lightened(0.25))
 		g.rect(l[0], l[1], 2, l[3], col.lightened(0.15))
 		g.rect(l[0], l[1] + l[3] - 2, l[2], 2, col.darkened(0.35))
 		g.rect(l[0] + l[2] - 2, l[1], 2, l[3], col.darkened(0.3))
+	var ga0 := g.ga
+	g.ga = ga0 * rm.get("ra", 1.0)   # gables are part of the roof, so they fade with it
+	for l in rm.lt:
+		if l[8]: draw_gable(g, rm, l)
+	g.ga = ga0
+
+## A cross gable over an opening, in the roof's own colours. Local frame: u runs along the wall,
+## v runs in from the building edge. Outer end at v = 2 like the lintel, the eaves at v = 10;
+## its valleys meet the main roof slope half its width further in (same pitch).
+static func draw_gable(g: Pen, rm: Dictionary, l: Array) -> void:
+	var side: int = l[5]
+	var u0: float = l[6]
+	var u1: float = l[7]
+	var um := (u0 + u1) / 2
+	var half_depth: float = ((rm.h if side < 2 else rm.w) * TS - 20) / 2
+	var d := minf((u1 - u0) / 2, half_depth - 3)
+	var P := func(u: float, v: float) -> Vector2:
+		match side:
+			0: return Vector2(rm.c * TS + u, rm.r * TS + v)
+			1: return Vector2(rm.c * TS + u, (rm.r + rm.h) * TS - v)
+			2: return Vector2(rm.c * TS + v, rm.r * TS + u)
+		return Vector2((rm.c + rm.w) * TS - v, rm.r * TS + u)
+	var vo := 2.0
+	var ve := 10.0
+	var tip: Vector2 = P.call(um, ve + d)
+	var outline := PackedVector2Array([P.call(u0, vo), P.call(u1, vo), P.call(u1, ve), tip, P.call(u0, ve)])
+	var sh := PackedVector2Array()
+	for q in outline: sh.append(q + Vector2(3, 4))
+	g.poly(sh, Color(0, 0, 0, 0.3))
+	var col := hc(rm.roof if rm.roof else "#6b5a4a")
+	# the half nearer the top/left of the screen catches the light, as on the main roofs
+	g.poly_grad(PackedVector2Array([P.call(u0, vo), P.call(um, vo), tip, P.call(u0, ve)]), PackedColorArray([U.shade(col, 1.28), U.shade(col, 1.12), U.shade(col, 1.12), U.shade(col, 1.28)]))
+	g.poly_grad(PackedVector2Array([P.call(um, vo), P.call(u1, vo), P.call(u1, ve), tip]), PackedColorArray([U.shade(col, 0.72), U.shade(col, 0.6), U.shade(col, 0.6), U.shade(col, 0.72)]))
+	# shingles as on the main roof, turned 90°: courses every 6 px along the gable's ridge, out
+	# from each valley to the outer end, with staggered joints every 10 px
+	var hw := (u1 - u0) / 2
+	var ln := PackedVector2Array()
+	var tk := PackedVector2Array()
+	var t := 5.0
+	var row := 0
+	while t < hw:
+		var vv := ve + d * t / hw
+		ln.append_array([P.call(u0 + t, vo), P.call(u0 + t, vv), P.call(u1 - t, vo), P.call(u1 - t, vv)])
+		var s2 := vo + float((row % 2) * 5)
+		while s2 < vv:
+			var a := maxf(t - 6, (s2 - ve) * hw / d if d > 0 else 0.0)   # stop at the valley
+			tk.append_array([P.call(u0 + a, s2), P.call(u0 + t, s2), P.call(u1 - a, s2), P.call(u1 - t, s2)])
+			s2 += 10
+		t += 6
+		row += 1
+	g.lines(ln, Color(0, 0, 0, 0.16), 1)
+	g.lines(tk, Color(0, 0, 0, 0.14), 1)
+	g.lines(PackedVector2Array([P.call(um, vo), tip]), U.shade(col, 1.4), 3)   # ridge cap
+	var ol := outline.duplicate(); ol.append(outline[0])
+	g.polyline(ol, Color(0, 0, 0, 0.3), 2)   # dark edge (and valleys), like the main roof's
 
 static func draw_roofs(gm, g: Pen) -> void:
 	var S: Dictionary = gm.S
@@ -2471,9 +2538,36 @@ static func z_sprite(g: Pen, z: Dictionary) -> void:
 	g.rect(hx + 5.3, -1, 0.6, 0.7, rgba(230, 225, 200, 0.7))
 	g.rect(hx + 5.3, 0.4, 0.6, 0.7, rgba(230, 225, 200, 0.7))
 
+## Size of one zombie sprite frame in world units, and how much the tint colours are brightened
+## (the sprite layers are shaded white, so a flat multiply would come out darker than the old look).
+const Z_FW := 74.0
+const Z_TINT := 1.35
+
+## The sprite set for this zombie (a/s/k layers), or [] to draw it the old way.
+static func z_layers(z: Dictionary) -> Array:
+	var kind: String = z.kind
+	var k: String = kind if kind != "" else ("armor" if z.arm else ("ribs" if z["var"] == 2 else ("onearm" if z["var"] == 3 else "normal")))
+	return Tx.ZSPR.get(k, [])
+
+static func draw_zspr(g: Pen, z: Dictionary, zl: Array, hit: bool) -> void:
+	var kind: String = z.kind
+	var n: float = zl[0].get_height()
+	var f := int(fposmod(float(z.wk), TAU) / TAU * Tx.Z_FRAMES) % Tx.Z_FRAMES
+	var src := Rect2(f * n, 0, n, n)
+	var w := Z_FW * (1.12 if z.lng > 0 else 1.0)   # lunging: stretched out ahead
+	var dst := Rect2(-w / 2, -Z_FW / 2, w, Z_FW)
+	var tint := func(h: String) -> Color:
+		if hit: return Color(2, 2, 2)
+		var c := hc(h)
+		return Color(c.r * Z_TINT, c.g * Z_TINT, c.b * Z_TINT)
+	g.tex_region(zl[0], dst, src)
+	g.tex_region(zl[1], dst, src, tint.call("#5d6b3e" if kind == "bloat" else ("#2e2e30" if kind == "scream" else z.shirt)))
+	g.tex_region(zl[2], dst, src, tint.call("#9fb07a" if kind == "bloat" else ("#d4d2c4" if kind == "scream" else z.skin)))
+
 static func draw_zombie(gm, g: Pen, z: Dictionary) -> void:
 	var kind: String = z.kind
-	var sc := 1.4 if kind == "bloat" else (0.95 if kind == "crawler" else 1.0)
+	var zl := z_layers(z)
+	var sc := (1.15 if not zl.is_empty() else 1.4) if kind == "bloat" else (0.95 if kind == "crawler" else 1.0)
 	g.save()
 	g.translate(z.x, z.y)
 	if z.dormant:
@@ -2496,6 +2590,11 @@ static func draw_zombie(gm, g: Pen, z: Dictionary) -> void:
 		g.scale(0.65 + 0.35 * k, 0.65 + 0.35 * k)
 	if z.wind > 0: g.translate(-3, 0)
 	var hit: bool = z.hit > 0
+	if not zl.is_empty():
+		draw_zspr(g, z, zl, hit)
+		if hit: g.ellipse(0, 0, 8, 12, 0, Color(1, 1, 1, 0.35))
+		g.restore()
+		return
 	var skin := Color.WHITE if hit else hc("#9fb07a" if kind == "bloat" else ("#d4d2c4" if kind == "scream" else z.skin))
 	if kind != "crawler":
 		var w := sin(wk)
@@ -2535,11 +2634,72 @@ static func draw_cloud(g: Pen, cl: Dictionary, T: float) -> void:
 		g.circle(cl.x + cos(a) * rr, cl.y + sin(a) * rr, pr, Color(shade, shade, shade * 0.98, 0.42 * den))
 	g.circle(cl.x, cl.y, R * 0.55, Color(0.74, 0.74, 0.72, 0.5 * den))
 
+## How far through a reload someone is (their "rl" seconds left, out of gun wi's D.WEAPONS "rl"),
+## 0..1, or -1 when they aren't reloading.
+static func rl_frac(v: Dictionary, wi: int) -> float:
+	if float(v.get("rl", 0.0)) <= 0: return -1.0
+	return clampf(1.0 - float(v.rl) / float(D.WEAPONS[wi].get("rl", 2.0)), 0.0, 1.0)
+
+## Size of one person sprite frame in world units (a touch bigger than the zombies' Z_FW, so the
+## slimmer 3D bodies come out about as wide as the old drawn ones).
+const P_FW := 80.0
+const PPL_WALK_K := 0.5
+const PLAYER_SKIN := "#b07a4c"   # your skin: tanned from a life outdoors (was #d9b48f)
+
+## One sprite part of a person: layer a as it is, the others tinted (cols: layer -> colour).
+static func ppl_part(g: Pen, part: String, f: int, cols: Dictionary, alpha: float = 1.0) -> void:
+	var pl: Dictionary = Tx.PPL[part]
+	var n: float = pl.a.get_height()
+	var src := Rect2((f if pl.a.get_width() > n * 1.5 else 0) * n, 0, n, n)
+	var dst := Rect2(-P_FW / 2, -P_FW / 2, P_FW, P_FW)
+	g.tex_region(pl.a, dst, src, Color(1, 1, 1, alpha))
+	for l in cols:
+		var c: Color = cols[l]
+		g.tex_region(pl[l], dst, src, Color(c.r * Z_TINT, c.g * Z_TINT, c.b * Z_TINT, alpha))
+
+## A person from the Blender sprites (Tx.PPL); false if they are not loaded.
+static func draw_person_spr(g: Pen, o: Dictionary) -> bool:
+	if Tx.PPL.size() < Tx.PPL_PARTS.size(): return false
+	# hit: a quick flash halfway to white (not all white)
+	var hit: bool = o.get("hit", false)
+	var skin := hc(o.skin).lerp(Color.WHITE, 0.5) if hit else hc(o.skin)
+	var body := hc(o.body).lerp(Color.WHITE, 0.5) if hit else hc(o.body)
+	# one stride every two of "walk"'s cycles (at the old drawing's rate the legs looked frantic)
+	var f := int(fposmod(float(o.get("walk", 0.0)) * PPL_WALK_K, TAU) / TAU * Tx.Z_FRAMES) % Tx.Z_FRAMES
+	var fem: bool = o.get("fem", false)
+	ppl_part(g, "body_f" if fem else "body_m", f, {"s": body})
+	if o.get("vest", false): ppl_part(g, "vest", 0, {})
+	var capc: String = o.get("cap", "")
+	var pack: String = o.get("pack", "")
+	if capc != "" or pack != "": ppl_part(g, "pack", 0, {"p": hc(pack if pack != "" else "#4a4232")})
+	var arm := {"s": body, "k": skin}
+	if o.get("gun", false):
+		# "wi": the gun (D.WEAPONS index; without it a long gun is the lever rifle, else the revolver),
+		# "rl": how far through a reload, 0..1 (< 0 or missing: not reloading)
+		var gun := "arms_w%d" % int(o.get("wi", 2 if o.get("long", false) else 0))
+		var rl: float = float(o.get("rl", -1.0))
+		var low: float = clampf(float(o.get("lower", 0.0)), 0.0, 1.0)
+		# "empty": nothing loaded; an empty crossbow shows its limbs sprung and the string straight
+		var fired := "_fired" if o.get("empty", false) and Tx.PPL.has(gun + "_fired") else ""
+		if rl >= 0: ppl_part(g, gun + "_rl", clampi(int(rl * Tx.PPL_RL), 0, Tx.PPL_RL - 1), arm)
+		else:
+			if low < 1: ppl_part(g, gun + fired, 0, arm, 1.0 - low)
+			if low > 0: ppl_part(g, gun + "_low" + fired, 0, arm, low)
+	elif o.get("bare", false): ppl_part(g, "arms_bare", 0, arm)
+	else: ppl_part(g, "arms_swing" if o.get("swing", false) else "arms_melee", 0, arm)
+	if o.get("swing", false): g.arc(0, 0, 30, -1, 1, rgba(230, 230, 220, 0.35), 10)
+	var hair := hc(capc if capc != "" else o.get("hair", "#2a2620"))
+	ppl_part(g, "head_cap" if capc != "" else ("head_fem" if fem else "head_hair"), 0, {"k": skin, "h": hair})
+	return true
+
 static func draw_person(g: Pen, x: float, y: float, a: float, o: Dictionary) -> void:
 	g.save()
 	g.translate(x, y)
 	g.ellipse(3, 5, 12, 9, 0, Color(0, 0, 0, 0.3))
 	g.rotate(a)
+	if draw_person_spr(g, o):
+		g.restore()
+		return
 	var w := sin(o.get("walk", 0.0))
 	var hit: bool = o.get("hit", false)
 	var skin := Color.WHITE if hit else hc(o.skin)

@@ -201,8 +201,10 @@ func update(p: Dictionary, dt: float) -> void:
 					first = false
 	for v in S.setl.duplicate():
 		_upd_settler(S, v, p, dt)
+		if S.setl.has(v) and v.st != "gather": gm.survivors.fr_jostle(v, dt)   # (everyone at the bell stands together)
 
 func _check_clear(S: Dictionary) -> void:
+	if not S.get("rq", []).is_empty(): return   # a reinforcement wave is still on its way in
 	var held: bool = S.get("hostile", false)
 	if held:
 		var alive := 0
@@ -306,6 +308,7 @@ func _walk(v: Dictionary, tx: float, ty: float, near: float, dt: float) -> bool:
 	var d := Vector2(tx - v.x, ty - v.y).length()
 	if d <= near: return true
 	var dir: Vector2 = gm.survivors.sv_nav(v, tx, ty)
+	dir = gm.survivors.sv_avoid(v, dir.x, dir.y, gm.survivors.people())   # round people in the way
 	var st := minf(d, 85.0 * WALK * float(v.spm) * dt)
 	var ox: float = v.x
 	var oy: float = v.y
@@ -335,6 +338,7 @@ func _upd_settler(S: Dictionary, v: Dictionary, p: Dictionary, dt: float) -> voi
 		"patrol":
 			var o := Vector2(v.x, v.y)
 			var stv: Vector2 = gm.survivors.sv_patrol(v, dt)
+			stv = gm.survivors.sv_avoid(v, stv.x, stv.y, gm.survivors.people())
 			if stv != Vector2.ZERO: gm.move_c(v, stv.x * 85.0 * float(v.spm) * dt, stv.y * 85.0 * float(v.spm) * dt, 8)
 			v.wk += o.distance_to(Vector2(v.x, v.y)) * 0.22
 			var dp := Vector2(p.x - v.x, p.y - v.y)
