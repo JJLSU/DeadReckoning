@@ -27,6 +27,11 @@ const REGEN_RATE := 3.0   # health per second
 const ADS_MOVE := 0.5     # walk speed multiplier while aiming
 const PLAYER_MOVE_K := 2.0 / 3.0   # on-foot speed, walking and running (Greg 2026-10-21: a third slower)
 const PLAYER_LEG_K := 0.75   # leg swing per distance: with the slower speed the legs cycle half as fast as before
+const PLAYER_TURN := 200.0   # your max turn rate on foot, degrees per second; you swing round to catch up with the cursor (Greg 2026-10-22)
+const TURN_EASE := 30.0   # degrees: inside this of the cursor the turn slows down, the closer the slower
+const TURN_MIN := 0.15   # slowest turn near the cursor, as a share of PLAYER_TURN (so you still settle on it)
+const BOLT_KEEP := 0.75   # chance a crossbow bolt stays whole in what it hits; whole bolts stick out of the body until you walk over it to pull them (Greg 2026-10-23)
+const AIM_FACE_TOL := 1.0   # degrees: the red aim dot only shows once you face the cursor this closely (not while still turning)
 const ADS_SENS := 0.45     # mouse sensitivity multiplier while aiming
 # Flashlight (F toggles it, off by default). Lit at night it gives you away: zombies and
 # hostile survivors spot you from TORCH_SEEN times as far (scaled by how dark it is).
@@ -624,7 +629,7 @@ func enter_ground(s: Dictionary) -> void:
 	F = null
 	if Fields.calm(s): pass   # fields.on_enter says how it stands
 	elif s.get("hostile", false):
-		toast("Armed survivors hold this strip. No fuel, no trade, no jobs. Keep your head down.", "bad")
+		toast("Armed survivors hold this strip. No fuel, no trade. Keep your head down.", "bad")
 	elif s.get("arch", "") == "family":
 		toast("Friendly folks live here. You put your weapons away. Fuel and medicine for sale.", "good")
 	elif dark() > 0.5: toast("It is dark. The dead move faster at night.", "bad")
@@ -752,12 +757,14 @@ func in_safe(x: float, y: float) -> bool:
 ## exploration cursor. Mirrors shoot() and the bullet loop: same muzzle point
 ## (16px out from the player), same range (spd x life), same walls/cars (solid_b)
 ## and red barrels. Spread is ignored. Pointing straight at a wall or barrel counts
-## as reaching it. Out of ammo it uses the machete's 44px reach instead.
+## as reaching it. Out of ammo it uses the machete's 44px reach instead. No dot while you're
+## still turning to face the cursor (PLAYER_TURN), since the shot goes where you face.
 func shot_reaches(tx: float, ty: float) -> bool:
 	var p: Dictionary = S.p
 	var to := Vector2(tx - p.x, ty - p.y)
 	var d := to.length()
-	if ammo_left() <= 0: return d < 44.0
+	if d > 16.0 and absf(U.ang_diff(atan2(to.y, to.x), p.ang)) > deg_to_rad(AIM_FACE_TOL): return false
+	if melee_now(): return d < 44.0
 	if reloading() or mag_of() <= 0: return false   # nothing in the gun to fire
 	var w: Dictionary = D.WEAPONS[G.weapon]
 	var travel := d - 16.0   # distance from the muzzle to the cursor
@@ -1032,6 +1039,17 @@ func death_ugh(e: Dictionary) -> void:
 	var d := Vector2(e.x - S.p.x, e.y - S.p.y).length()
 	sfx("ugh", 0.14 * (1.0 - 0.6 * minf(1.0, d / 900.0)), e.get("voice", 1.0))
 
+## Your crossbow bolt b hits e: BOLT_KEEP of the time it stays whole and sticks in, kept in
+## e's own frame ("a" angle off e.ang, "o" offset) so it turns with the body. Otherwise it snaps.
+func stick_bolt(e: Dictionary, b: Dictionary) -> void:
+	if not is_same(b.get("src"), S.p): return   # only your own bolts
+	if randf() >= BOLT_KEEP:
+		for n in 3: S.fx.append({"x": b.x, "y": b.y, "vx": (randf() - 0.5) * 80, "vy": (randf() - 0.5) * 80, "life": 0.3, "c": "#8a6a44", "sz": 2.0, "drag": true})
+		return
+	var o := Vector2(b.x - e.x, b.y - e.y).limit_length(7.0).rotated(-float(e.get("ang", 0.0)))
+	if not e.has("bolts"): e.bolts = []
+	e.bolts.append({"a": atan2(b.vy, b.vx) - float(e.get("ang", 0.0)), "ox": o.x, "oy": o.y})
+
 func killed(e: Dictionary, isZ: bool) -> void:
 	if e.get("kind", "") == "bloat": toxic(e)
 	if S == null: return
@@ -1043,6 +1061,13 @@ func killed(e: Dictionary, isZ: bool) -> void:
 	S.bg.stamp(["streaks", st])
 	var k: String = e.get("kind", "")
 	stamp_corpse({"x": e.x, "y": e.y, "a": randf() * TAU, "shirt": "#5d6b3e" if k == "bloat" else ("#2e2e30" if k == "scream" else e.shirt), "skin": e.skin})
+	if not e.get("bolts", []).is_empty():   # whole bolts stay in the body until you walk over it
+		var ea := float(e.get("ang", 0.0))
+		var bl: Array = []
+		for q in e.bolts:
+			var o := Vector2(q.ox, q.oy).rotated(ea)
+			bl.append({"a": float(q.a) + ea, "ox": o.x, "oy": o.y})
+		S.drops.append({"x": e.x, "y": e.y, "k": "bolt", "t": "bolt", "n": bl.size(), "bl": bl})
 	for n in 10:
 		var a := randf() * TAU
 		var v := 40 + randf() * 120
@@ -1063,6 +1088,11 @@ func ammo_key(wi: int = -1) -> String:
 	return String(D.WEAPONS[G.weapon if wi < 0 else wi].ammo)
 
 ## Rounds left for a gun, loaded plus spare (the one in hand by default). Unlimited Ammo counts as plenty.
+## Out of rounds for the gun in hand, so a click swings the machete. Not with the crossbow:
+## out of bolts you keep it in hand and clicks do nothing (Greg 2026-10-23).
+func melee_now() -> bool:
+	return ammo_left() <= 0 and not D.WEAPONS[G.weapon].bolt
+
 func ammo_left(wi: int = -1) -> int:
 	if unl_ammo: return 9999
 	return mag_of(wi) + int(ammo_pool().get(ammo_key(wi), 0))
@@ -1139,6 +1169,13 @@ func shoot() -> void:
 	var p: Dictionary = S.p
 	p.cd = w.rate
 	regen_reset()
+	if w.bolt and ammo_left() <= 0:
+		p.cd = 0.3   # out of bolts: dry trigger, the crossbow stays in hand
+		sfx("empty")
+		if S.t - S.noAmmoT > 4:
+			S.noAmmoT = S.t
+			floater(p.x, p.y - 24, "Out of crossbow bolts.", "#e3644c")
+		return
 	if ammo_left() <= 0:
 		p.cd = 0.42
 		S.swing = 0.18
@@ -1195,7 +1232,7 @@ func shoot() -> void:
 	var zdmg: float = (float(w.hip_zdmg) if w.has("hip_zdmg") and not aimed and not mid_ease else base_dmg) * scope_k
 	for i in w.pel:
 		var a: float = p.ang + (randf() - 0.5) * spr * 2
-		S.bul.append({"x": p.x + cos(p.ang) * 16, "y": p.y + sin(p.ang) * 16, "vx": cos(a) * w.spd, "vy": sin(a) * w.spd, "life": w.life, "dmg": base_dmg * scope_k, "zdmg": zdmg, "aim": aimed, "pl": true, "kb": w.kb, "bolt": w.bolt, "src": p})
+		S.bul.append({"x": p.x + cos(p.ang) * 16, "y": p.y + sin(p.ang) * 16, "vx": cos(a) * w.spd, "vy": sin(a) * w.spd, "life": w.life, "dmg": base_dmg * scope_k, "zdmg": zdmg, "aim": aimed, "pl": true, "kb": w.kb, "bolt": w.bolt, "sg": int(w.pel) > 1, "src": p})
 	if not w.bolt:   # spent casing — guns only, the crossbow has none
 		S.fx.append({"x": p.x + cos(p.ang) * 8, "y": p.y + sin(p.ang) * 8, "vx": cos(p.ang + 1.6) * 110 + (randf() - 0.5) * 40, "vy": sin(p.ang + 1.6) * 110 + (randf() - 0.5) * 40, "life": 0.7, "c": "#d9b35a", "sz": 2.2, "drag": true})
 	add_noise(w.noise, true)
@@ -1581,8 +1618,11 @@ func upd_player(p: Dictionary, dt: float) -> float:
 		var w := s2w_g(mouse.x, mouse.y)
 		aim = atan2(w.y - p.y, w.x - p.x)
 		fire = mouse.down or pad.fire()
-	if aim != null: p.ang = aim
-	elif Vector2(mx, my).length() > 0.1: p.ang = atan2(my, mx)
+	if aim == null and Vector2(mx, my).length() > 0.1: aim = atan2(my, mx)
+	if aim != null:   # turn toward the aim at most PLAYER_TURN deg/s, so a fast mouse flick doesn't spin you instantly
+		var da := U.ang_diff(aim, p.ang)
+		var mt := deg_to_rad(PLAYER_TURN) * clampf(absf(da) / deg_to_rad(TURN_EASE), TURN_MIN, 1.0) * dt   # eases off as you come round
+		p.ang = wrapf(p.ang + clampf(da, -mt, mt), -PI, PI)
 	upd_reload(p, dt)
 	p.cd -= dt
 	if fire and p.cd <= 0 and not unarmed_here():
@@ -1628,6 +1668,7 @@ func upd_bullets(p: Dictionary, dt: float) -> bool:
 				for z in S.zs:
 					if not z.dead and pow(z.x - b.x, 2) + pow(z.y - b.y, 2) < 144:
 						z.hp -= float(b.get("zdmg", b.dmg))   # the crossbow hip-fires weaker at the dead
+						if b.bolt: stick_bolt(z, b)
 						z.hit = 0.1
 						sfx("hit")
 						if z.dormant:
@@ -1649,6 +1690,7 @@ func upd_bullets(p: Dictionary, dt: float) -> bool:
 							var was_alert: bool = v.alert
 							# an aimed (ADS) crossbow bolt into a survivor who hasn't spotted you yet hits harder
 							dmg_enemy(v, b.dmg * (BOLT_SNEAK_MULT if b.bolt and b.get("aim", false) and not v.alert else 1.0))
+							if b.bolt: stick_bolt(v, b)
 							hurt_cry(v)
 							v.hit = 0.1
 							var src: Dictionary = b.get("src", p)   # you or a rescue survivor: they'll go for whoever it was
@@ -1744,10 +1786,122 @@ func zombie_bites_sv(z: Dictionary, v: Dictionary) -> void:
 		blood(v.x, v.y, 6)
 		sv_drop_loot(v)
 
+# Zombie packs surround you (Greg 2026-10-23, like the survivors' flanking): while Z_PACK_MIN or
+# more zombies are chasing you, about half of them peel off and circle round to your left and
+# right (and behind, when there are many), then close in from there. Roles are handed out
+# every Z_PACK_T seconds by z_pack(); z_flank() steers a flanker. No call-outs, they're dead.
+const Z_PACK_MIN := 3            # chasing zombies needed before any flank
+const Z_PACK_T := 0.5            # seconds between pack checks
+const Z_PACK_R := 480.0          # only zombies this close (px) count as part of the pack
+const Z_FLANK_SHARE := 0.5       # share of the pack sent round the sides
+const Z_FLANK_MAX := 8           # most flankers at once
+const Z_FLANK_ANG := 75.0        # first flanker on a side goes this far round from the pack's side, degrees
+const Z_FLANK_STEP := 35.0       # each further one on that side goes this much further round (up to Z_FLANK_ANG_MAX)
+const Z_FLANK_ANG_MAX := 165.0
+const Z_FLANK_CLOSE := 110.0     # a flanker this close (px), or round to its angle, stops circling and comes straight in
+const Z_FLANK_ARC := 30.0        # "round to its angle": within this many degrees of its spot
+const Z_FLANK_MAXT := 8.0        # give up circling after this many seconds
+const Z_FLANK_REST := 6.0        # then not picked again for this long
+
+## Once every Z_PACK_T seconds: if Z_PACK_MIN or more zombies are chasing you, make a share of
+## them flankers, split left and right of the line from the pack to you. Those already furthest
+## round to each side are picked first, and existing flankers keep the job (and their side).
+func z_pack(p: Dictionary, dt: float) -> void:
+	S.zpT = S.get("zpT", 0.0) - dt
+	if S.zpT > 0: return
+	S.zpT = Z_PACK_T
+	var pack: Array = []
+	for z in S.zs:
+		if z.dead or z.dormant or z.rise > 0 or not z.alert or not z.get("onp", false) \
+			or z.kind == "crawler" or z.kind == "scream" \
+			or Vector2(z.x - p.x, z.y - p.y).length() > Z_PACK_R:
+			z.erase("fk")
+			continue
+		pack.append(z)
+	if pack.size() < Z_PACK_MIN:
+		for z in pack: z.erase("fk")
+		return
+	var cen := Vector2.ZERO
+	for z in pack: cen += Vector2(z.x, z.y)
+	cen /= pack.size()
+	var back := cen - Vector2(p.x, p.y)   # from you toward the pack
+	if back.length() < 1: back = Vector2.RIGHT
+	back = back.normalized()
+	var side_n := Vector2(-back.y, back.x)
+	var need: int = mini(Z_FLANK_MAX, int(pack.size() * Z_FLANK_SHARE))
+	var side_cap: int = int(ceil(need / 2.0))
+	var sides := [[], []]   # flankers on the left (-1) and right (+1)
+	var cand: Array = []
+	for z in pack:
+		var off := side_n.dot(Vector2(z.x - p.x, z.y - p.y))
+		if z.has("fk") and z.fk.get("close", false) and Vector2(z.x - p.x, z.y - p.y).length() > Z_FLANK_CLOSE * 2.5:
+			z.erase("fk")   # came in from the side but you got away: free to be sent round again
+		if z.has("fk"):
+			var si: int = 0 if z.fk.side < 0 else 1
+			if sides[si].size() < side_cap and need > 0:
+				sides[si].append(z)
+				need -= 1
+				continue
+			z.erase("fk")
+		if z.get("fkno", -1.0) > S.t: continue
+		if Vector2(z.x - p.x, z.y - p.y).length() < Z_FLANK_CLOSE * 1.5: continue   # already on you
+		cand.append([absf(off), signf(off) if off != 0 else 1.0, z])
+	cand.sort_custom(func(a, b): return a[0] > b[0])
+	for c in cand:
+		if need <= 0: break
+		var si: int = 0 if c[1] < 0 else 1
+		if sides[si].size() >= side_cap: si = 1 - si   # balance the two sides
+		var z: Dictionary = c[2]
+		z.fk = {"side": -1.0 if si == 0 else 1.0, "t": 0.0}
+		sides[si].append(z)
+		need -= 1
+	# spots round you: the one already furthest round on a side gets the widest angle
+	for si in 2:
+		var sd := -1.0 if si == 0 else 1.0
+		var lst: Array = sides[si]
+		lst.sort_custom(func(a, b): return absf(side_n.dot(Vector2(a.x - p.x, a.y - p.y))) < absf(side_n.dot(Vector2(b.x - p.x, b.y - p.y))))
+		for k in lst.size():
+			var z: Dictionary = lst[k]
+			z.fk.ang = atan2(back.y, back.x) + deg_to_rad(minf(Z_FLANK_ANG_MAX, Z_FLANK_ANG + Z_FLANK_STEP * k)) * sd
+			if not z.fk.get("close", false) and not z_flank_spot(z, p): z_flank_quit(z)
+
+## Where flanker z circles to: round to its angle from you, a little nearer than it is now, on
+## ground it can stand on (pulled in towards you if that spot is in a wall). False if none.
+func z_flank_spot(z: Dictionary, p: Dictionary) -> bool:
+	var d := Vector2(z.x - p.x, z.y - p.y).length()
+	var r := clampf(d * 0.9, 100.0, 280.0)
+	var dir := Vector2.from_angle(float(z.fk.ang))
+	for f: float in [1.0, 0.75, 0.5]:
+		var q: Vector2 = Vector2(p.x, p.y) + dir * r * f
+		if not hit_box(q.x, q.y, 10):
+			z.fk.x = q.x; z.fk.y = q.y
+			return true
+	return false
+
+## A flanker's steer, or null once it's round to its side or close (it then just comes for you).
+func z_flank(z: Dictionary, p: Dictionary, d: float, dt: float) -> Variant:
+	var fk: Dictionary = z.fk
+	if fk.get("close", false) or not fk.has("x"): return null
+	fk.t += dt
+	if fk.t > Z_FLANK_MAXT:
+		z_flank_quit(z)
+		return null
+	var a := atan2(z.y - p.y, z.x - p.x)
+	if d < Z_FLANK_CLOSE or absf(U.ang_diff(a, float(fk.ang))) < deg_to_rad(Z_FLANK_ARC) \
+		or Vector2(fk.x - z.x, fk.y - z.y).length() < 40.0:
+		fk.close = true
+		return null
+	return survivors.sv_nav(z, fk.x, fk.y)
+
+func z_flank_quit(z: Dictionary) -> void:
+	z.erase("fk")
+	z.fkno = S.t + Z_FLANK_REST
+
 ## Zombies: waking, chasing (flow field), lunging, screamers, biting you and the
 ## rescue survivor. nk is the night speed-up. Returns true when the frame should stop.
 func upd_zombies(p: Dictionary, nk: float, dt: float) -> bool:
 	S.nd = 1e9
+	z_pack(p, dt)
 	var zs: Array = S.zs
 	for z in zs:
 		var dx: float = p.x - z.x
@@ -1777,13 +1931,14 @@ func upd_zombies(p: Dictionary, nk: float, dt: float) -> bool:
 		var vy: float
 		var sp: float
 		if z.alert:
-			vx = dx / d; vy = dy / d; sp = z.spd
+			vx = dx / d; vy = dy / d; sp = z.spd * Z_CHASE_K
 			# straight at you only if the body fits along the line too (walk_clear()); the thin
 			# sight line that grazes a corner made them flick between this and the flow field
 			if d > 150 and not (d < 420 and los(z.x, z.y, p.x, p.y) and walk_clear(z.x, z.y, p.x, p.y)):
 				var fd = flow_dir(z.x, z.y)
 				if fd:
 					vx = fd.x; vy = fd.y
+			z.onp = true   # going for you (z_pack() only sends these round the side)
 			for n in S.npcs:
 				if in_safe(n.x, n.y): continue   # don't mob the hiding place
 				var nx: float = n.x - z.x
@@ -1792,6 +1947,7 @@ func upd_zombies(p: Dictionary, nk: float, dt: float) -> bool:
 				if nd == 0: nd = 1
 				if nd < d * 0.7 and nd < 300:
 					vx = nx / nd; vy = ny / nd
+					z.onp = false
 					break
 			var tv = zombie_sv_target(z, d)
 			if tv is Dictionary:   # after a hostile survivor instead
@@ -1799,6 +1955,12 @@ func upd_zombies(p: Dictionary, nk: float, dt: float) -> bool:
 				var sy: float = tv.y - z.y
 				var sdd := maxf(1.0, Vector2(sx, sy).length())
 				vx = sx / sdd; vy = sy / sdd
+				z.onp = false
+			if not z.onp: z.erase("fk")
+			elif z.has("fk"):
+				var fv = z_flank(z, p, d, dt)
+				if fv is Vector2:
+					vx = fv.x; vy = fv.y
 			if z.det > 0:
 				z.det -= dt
 				var px: float = -vy * z.ds
@@ -1813,7 +1975,7 @@ func upd_zombies(p: Dictionary, nk: float, dt: float) -> bool:
 				vx = 0.0; vy = 0.0; sp = 0.0
 			else:
 				var nv: Vector2 = survivors.sv_nav(z, st.x, st.y)
-				vx = nv.x; vy = nv.y; sp = z.spd * WAVE_SEARCH
+				vx = nv.x; vy = nv.y; sp = z.spd * WAVE_SEARCH * Z_CHASE_K
 		else:
 			z.wt -= dt
 			if z.wt <= 0:
@@ -1909,7 +2071,9 @@ func upd_drops(p: Dictionary) -> void:
 	while i >= 0:
 		var d: Dictionary = S.drops[i]
 		if Vector2(d.x - p.x, d.y - p.y).length() < 22:
-			if d.k == "ammo":
+			if d.k == "bolt":
+				floater(d.x, d.y - 16, add_ammo("bolt", d.n))
+			elif d.k == "ammo":
 				d.n = int(round(d.n * (1.3 if has("bandolier") else 1.0)))
 				floater(d.x, d.y - 16, add_ammo(String(d.get("t", "rev")), d.n))
 			elif d.k == "gun":
@@ -1982,6 +2146,7 @@ const WAVE_2 := Vector2i(7, 12)
 const WAVE_GROUP := Vector2i(3, 4)
 const WAVE_GAP := Vector2(1.5, 3.5)   # s between groups
 const WAVE_SEARCH := 0.75             # zombies on their way to search walk at this share of their speed
+const Z_CHASE_K := 2.0 / 3.0         # zombies chasing (and heading to search) move a third slower, matching your slower pace on foot (Greg 2026-10-22)
 
 func queue_wave(mark: int) -> void:
 	var r: Vector2i = WAVE_1 if mark == 1 else WAVE_2

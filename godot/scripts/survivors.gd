@@ -1188,7 +1188,7 @@ func sv_fire(v: Dictionary, spread: float = 1.0) -> void:
 	for k in int(w.pel):
 		var a: float = aim + (randf() - 0.5) * spr * 2.0
 		gm.S.bul.append({"x": v.x + cos(a) * 14, "y": v.y + sin(a) * 14, "vx": cos(a) * bs, "vy": sin(a) * bs,
-			"life": w.life, "dmg": dmg, "pl": fr, "kb": float(w.kb) * 0.5 if fr else 0.0, "bolt": w.bolt, "src": v})
+			"life": w.life, "dmg": dmg, "pl": fr, "kb": float(w.kb) * 0.5 if fr else 0.0, "bolt": w.bolt, "sg": int(w.pel) > 1, "src": v})
 	if fr:
 		gm.sfx(w.snd)
 		if not w.silent: gm.add_noise(float(w.noise) * 0.5)
@@ -1547,6 +1547,7 @@ func _upd_one(n: Dictionary, dt: float) -> void:
 			for c in gm.G.contracts:
 				if c.id == n.cid:
 					c.stage = "aboard"
+					if not Fields.friendly(gm.strip(int(c.dest))): c.dest = int(gm.menu.friendly_near(gm.strip(int(c.dest))).id)   # jobs taken before they only wanted friendly fields
 					gm.G.nav = int(c.dest)
 					gm.toast("%s climbs into the back. Fly them to %s." % [gm.cap(n.name), gm.strip(int(c.dest)).name], "good")
 					gm.sfx("cash")

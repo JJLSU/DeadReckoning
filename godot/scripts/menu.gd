@@ -108,7 +108,7 @@ func normalize(st: Dictionary) -> Dictionary:
 # contracts
 # ======================================================================
 func gen_offers(s: Dictionary) -> Array:
-	if not Fields.friendly(s): return []   # job boards only at friendly fields: farms, Failsafe and settled fields (Greg)
+	# every airfield can scan the radio for jobs (Greg, 2026-10-23)
 	var R := gm.range_full()
 	var n := 2 if s.type == "dirt" else (3 if s.type == "regional" else 4)
 	var c: Array = []
@@ -117,6 +117,10 @@ func gen_offers(s: Dictionary) -> Array:
 			if o.id == s.id or o.type == "haven" or o.type == "road" or o.get("hostile", false): return false
 			var d := Vector2(o.x - s.x, o.y - s.y).length()
 			return d > 1400 and d < R * 0.95)
+		if c.size() < n:   # out on the edge: the radio still reaches the nearest fields, even past your fuel
+			var far: Array = gm.wd.strips.filter(func(o): return o.id != s.id and o.type != "haven" and o.type != "road" and not o.get("hostile", false) and not c.has(o))
+			far.sort_custom(func(a, b): return Vector2(a.x - s.x, a.y - s.y).length() < Vector2(b.x - s.x, b.y - s.y).length())
+			c.append_array(far.slice(0, n - c.size()))
 	c.shuffle()
 	var out: Array = []
 	for o in c.slice(0, n):
@@ -130,9 +134,20 @@ func gen_offers(s: Dictionary) -> Array:
 		var who: String = D.RNAMES[randi() % D.RNAMES.size()]
 		var wk: Array = D.WHERE.keys()
 		var where: String = wk[randi() % wk.size()]
-		out.append({"id": U.rid(), "type": "rescue", "stage": "pickup", "pickup": o.id, "dest": s.id, "who": who, "where": where, "icon": "🆘", "what": who,
+		var home: Dictionary = s if Fields.friendly(s) else friendly_near(o)   # rescued survivors only want to go somewhere friendly (Greg)
+		out.append({"id": U.rid(), "type": "rescue", "stage": "pickup", "pickup": o.id, "dest": home.id, "who": who, "where": where, "icon": "🆘", "what": who,
 			"reward": int(round((120 + d * 2 / 100 * 6) * (1 + 0.15 * o.danger) * (1.25 if gm.has("radio") else 1.0) / 5.0)) * 5})
 	return out
+
+## The friendly field (farm, Failsafe or one your settlers hold) nearest to strip o.
+func friendly_near(o: Dictionary) -> Dictionary:
+	var best: Dictionary = {}
+	var bd := INF
+	for f in gm.wd.strips:
+		if f.id == o.id or not Fields.friendly(f): continue
+		var d := Vector2(f.x - o.x, f.y - o.y).length()
+		if d < bd: bd = d; best = f
+	return best
 
 func contract_target(c: Dictionary) -> int:
 	return int(c.pickup) if (c.get("type", "") == "rescue" and c.get("stage", "") == "pickup") else int(c.dest)
@@ -141,7 +156,7 @@ func objective() -> String:
 	if gm.S and gm.S.npcs.is_empty():
 		if gm.G.pax.size(): return "Board the plane and fly %s to a family farm." % " and ".join(gm.G.pax.map(func(x): return x.who))
 		if gm.G.contracts.size(): return "Board the plane and fly to %s." % gm.strip(contract_target(gm.G.contracts[0])).name
-		return "No job yet. Board the plane to see the job board."
+		return "No job yet. Board the plane and scan the radio for jobs."
 	if gm.S and gm.S.npcs.size():
 		var hid: Array = gm.S.npcs.filter(func(n): return not n.follow)
 		if hid.is_empty(): return "Lead %s back to the plane." % " and ".join(gm.S.npcs.map(func(n): return n.name))
@@ -485,6 +500,7 @@ func resume_from(st: Dictionary) -> void:
 	for k in gm.G.get("known", []): gm.known[int(k)] = true
 	gm.known[gm.G.strip] = true
 	gm.fields.apply()
+	if gm.G.offers.is_empty(): gm.G.offers = gen_offers(gm.strip(gm.G.strip))   # saves from when only friendly fields had jobs
 	gm.enter_ground(gm.strip(gm.G.strip))
 	checkpoint()
 

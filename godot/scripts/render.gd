@@ -1416,7 +1416,14 @@ static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 		var dy: float = (s.y - F.y) * k
 		if dx * dx + dy * dy > mr * mr * 0.9: continue
 		var isnt: bool = nt != null and nt.id == s.id
-		g.ring(mx + dx, my + dy, 4.5 if isnt else 3.0, hc("#9cc063") if s.type == "haven" else (hc("#8fbf88") if Fields.friendly(s) else (hc("#f0802a") if s.get("cleared", false) else hc("#e07ab3"))), 2.5 if isnt else 1.5)
+		var mcol := hc("#9cc063") if s.type == "haven" else (hc("#8fbf88") if Fields.friendly(s) else (hc("#f0802a") if s.get("cleared", false) else hc("#e07ab3")))
+		var mrr := 4.5 if isnt else 3.0
+		g.ring(mx + dx, my + dy, mrr, mcol, 2.5 if isnt else 1.5)
+		if s.type != "road":   # two ticks outside the ring along the runway (Greg, 2026-10-23)
+			var ca := cos(s.ang)
+			var sa := sin(s.ang)
+			for sg in [-1.0, 1.0]:
+				g.line(mx + dx + ca * sg * (mrr + 1.0), my + dy + sa * sg * (mrr + 1.0), mx + dx + ca * sg * (mrr + 4.0), my + dy + sa * sg * (mrr + 4.0), mcol, 1.5)
 		if mdt2 != null and mdt2.id == s.id:
 			g.ring(mx + dx, my + dy, 7.0, hc("#ff2a1e"), 2.5)
 	g.save(); g.translate(mx, my); g.rotate(F.hdg)
@@ -1798,6 +1805,10 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 			for d in S.drops:
 				if not on_view(d.x, d.y, 40): continue
 				var pl := 0.5 + 0.5 * sin(T * 5 + d.x)
+				if d.k == "bolt":   # bolts still stuck in a body, waiting to be pulled out
+					draw_bolts(g, d.x, d.y, 0.0, d.bl)
+					g.ring(d.x, d.y, 14, rgba(240, 220, 140, 0.12 + 0.2 * pl), 1.0)
+					continue
 				g.rect(d.x - 5, d.y - 3, 14, 10, Color(0, 0, 0, 0.3))
 				if d.k == "gun":
 					# a dropped gun: barrel and stock (short for the revolver), gold glow
@@ -1854,7 +1865,9 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 			g.save(); g.translate(S.plane.x, S.plane.y); draw_plane(g, P, 190 * pk, 0, false); g.restore()
 			if S.nearPlane: g.dashed_arc(S.plane.x, S.plane.y, 130, 0, TAU, rgba(212, 90, 157, 0.8), 2, 8, 6)
 			for z in S.zs:
-				if on_view(z.x, z.y, 60): draw_zombie(gm, g, z)
+				if on_view(z.x, z.y, 60):
+					draw_zombie(gm, g, z)
+					if z.has("bolts"): draw_bolts(g, z.x, z.y, z.ang, z.bolts)
 			for v in S.sv:
 				if not on_view(v.x, v.y, 60): continue
 				# startled hop on spotting you: up and down, drawn bigger like your jump
@@ -1863,6 +1876,7 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 					g.save(); g.translate(v.x, v.y - sj * 0.5); g.scale(1 + sj / 45, 1 + sj / 45); g.translate(-v.x, -v.y)
 				draw_person(g, v.x, v.y, v.ang, {"body": v.shirt, "skin": v.skin, "hair": "#2b2118", "cap": v.cap, "gun": not v.get("unarmed", false), "bare": v.get("unarmed", false), "long": int(v.get("w", 1)) != 0, "vest": float(v.get("armor", 0.0)) > 0, "walk": v.wk, "hit": v.hit > 0, "lower": 1.0 - float(v.get("gup", 0.0)),
 					"wi": int(v.get("w", 1)), "rl": rl_frac(v, int(v.get("w", 1))), "empty": int(v.get("mag", 1)) <= 0})
+				if v.has("bolts"): draw_bolts(g, v.x, v.y, v.ang, v.bolts)
 				if sj > 0: g.restore()
 			gm.farm.draw(g)
 			gm.fields.draw(g)
@@ -1886,7 +1900,7 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 				var dc := Vector2(p.x - cl.x, p.y - cl.y).length()
 				if dc < cl.r: hid = maxf(hid, float(cl.den) * clampf((cl.r - dc) / (cl.r * 0.3), 0.0, 1.0))
 			g.ga = 1.0 - SMOKE_HIDE * minf(1.0, hid)
-			draw_person(g, p.x, p.y, p.ang, {"body": "#9a3a2a" if S.hurt > 0 else "#6b4a2e", "skin": PLAYER_SKIN, "cap": "#34404c", "gun": gm.ammo_left() > 0 and not gm.unarmed_here(), "bare": gm.unarmed_here(), "long": gm.G.weapon > 0, "walk": p.wk, "swing": S.swing > 0,
+			draw_person(g, p.x, p.y, p.ang, {"body": "#9a3a2a" if S.hurt > 0 else "#6b4a2e", "skin": PLAYER_SKIN, "cap": "#34404c", "gun": not gm.melee_now() and not gm.unarmed_here(), "bare": gm.unarmed_here(), "long": gm.G.weapon > 0, "walk": p.wk, "swing": S.swing > 0,
 				"wi": gm.G.weapon, "rl": rl_frac(p, int(p.get("rlw", gm.G.weapon))) if float(p.get("rl", 0.0)) > 0 else -1.0,
 				"empty": gm.mag_of() <= 0})
 			g.restore()
@@ -1905,8 +1919,9 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 				if b.bolt:
 					g.line(b.x, b.y, b.x - b.vx * 0.02, b.y - b.vy * 0.02, hc("#6a4a2a"), 1)
 					continue
-				var tx: float = b.x - b.vx * 0.025
-				var ty: float = b.y - b.vy * 0.025
+				var tl: float = 0.0125 if b.get("sg", false) else 0.025   # shotgun pellets: half-length streaks
+				var tx: float = b.x - b.vx * tl
+				var ty: float = b.y - b.vy * tl
 				g.line(b.x, b.y, tx, ty, rgba(255, 200, 110, 0.35) if b.pl else rgba(255, 110, 80, 0.35), 2.5)
 				g.line(b.x, b.y, tx, ty, rgba(255, 245, 210, 0.95) if b.pl else rgba(255, 190, 170, 0.95), 0.9)
 		2:
@@ -2920,9 +2935,24 @@ static func draw_pickups(gm, g: Pen) -> void:
 
 ## Bottom right: the rounds in the gun in hand as icons (bullets, shells or bolts), spent
 ## ones as dim slots, and a bar while reloading. Hidden when you're down to the machete.
+## Crossbow bolts stuck in a body at (x, y) facing ang: each {"a", "ox", "oy"} in the body's
+## frame. The shaft trails back out of the wound along its flight line, fletching at the end.
+static func draw_bolts(g: Pen, x: float, y: float, ang: float, bl: Array) -> void:
+	for q in bl:
+		var tip := Vector2(x, y) + Vector2(q.ox, q.oy).rotated(ang)
+		var dir := Vector2.from_angle(float(q.a) + ang)
+		var tail := tip - dir * 14.0
+		g.line(tip.x, tip.y, tail.x, tail.y, hc("#4a3424"), 1.0)
+		# two vanes, one each side: small parallelograms swept back off the shaft's last 4px
+		for sd in [1.0, -1.0]:
+			var out: Vector2 = dir.orthogonal() * 1.32 * float(sd)
+			var f0 := tail + dir * 4.0
+			var f1 := tail
+			g.poly(PackedVector2Array([f0, f1, f1 + out - dir * 1.5, f0 + out - dir * 1.5]), hc("#c9c2b0"))
+
 static func draw_mag(gm, g: Pen) -> void:
 	var G: Dictionary = gm.G
-	if gm.ammo_left() <= 0: return
+	if gm.melee_now(): return
 	var w: Dictionary = D.WEAPONS[G.weapon]
 	var cap: int = int(w.mag)
 	var n: int = gm.mag_of()
@@ -2987,7 +3017,7 @@ static func hud_ground(gm, g: Pen) -> void:
 	var aunit: String = D.AMMO[gm.ammo_key()].unit
 	var aleft: int = gm.ammo_left()
 	var atxt: String = ("unlimited " + aunit) if gm.unl_ammo else ("%d %s spare" % [gm.reserve_left(), aunit])
-	g.text("%s   %d bomb%s" % [(D.WEAPONS[G.weapon].name + ", " + atxt) if aleft > 0 else ("Machete, no " + aunit), G.bombs, "" if G.bombs == 1 else "s"], px + 10, py + 40, 13, ink)
+	g.text("%s   %d bomb%s" % [(D.WEAPONS[G.weapon].name + ", " + atxt) if aleft > 0 or not gm.melee_now() else ("Machete, no " + aunit), G.bombs, "" if G.bombs == 1 else "s"], px + 10, py + 40, 13, ink)
 	g.text("%d bandage%s   %d medkit%s   %d part%s%s" % [G.band, "" if G.band == 1 else "s", G.med, "" if G.med == 1 else "s", G.parts, "" if G.parts == 1 else "s", ("   armor " + str(int(ceil(G.armor)))) if G.armor > 0 else ""], px + 10, py + 58, 13, ink)
 	var awake := 0
 	for z in S.zs:

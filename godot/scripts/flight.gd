@@ -12,6 +12,7 @@ var gm: Game   # the game: run state, site, shared helpers
 # Greg 2026-10-19: wider turns and slower climbs and descents for every plane.
 const AIR_TURN := 0.67   # share of the plane's turn rate it gets in the air (turns 1.5x as wide); taxiing is unchanged
 const VS_TIME := 1.5     # climbs and descents take this many times as long
+const CLIMB_BANK := 0.5  # share of full bank allowed while climbing out after takeoff, until the climb levels off (Greg 2026-10-22)
 
 func _init(game: Game) -> void:
 	gm = game
@@ -103,11 +104,12 @@ func upd_flight(dt: float) -> void:
 		if target > gm.F.spd: gm.F.spd += (target - gm.F.spd) * 0.25 * dt
 		else: gm.F.spd = maxf(target, gm.F.spd - (38.0 if eff < 0.08 else 14.0) * dt)
 	else:
-		gm.F.spd += (target - gm.F.spd) * (0.28 if target > gm.F.spd else 0.3) * dt
+		gm.F.spd = maxf(P.stall, gm.F.spd + (target - gm.F.spd) * (0.28 if target > gm.F.spd else 0.3) * dt)   # glides at stall speed at slowest
 	var turnK: float = clampf(gm.F.spd / 30.0, 0, 1) * 0.7 if gm.F.onGround else AIR_TURN
 	# Bank follows the stick on a critically damped spring, so it eases in and out instead of snapping.
 	# Rolling back toward level is a little slower than rolling into a turn.
 	var bt: float = 0.0 if gm.F.onGround else steer
+	if gm.F.get("climbOut", false): bt = clampf(bt, -CLIMB_BANK, CLIMB_BANK)
 	var w: float = 3.5 if absf(bt) > absf(gm.F.bank) and bt * gm.F.bank >= 0 else 2.6
 	var bv: float = gm.F.get("bankV", 0.0)
 	bv += (w * w * (bt - gm.F.bank) - 2 * w * bv) * dt
@@ -120,12 +122,13 @@ func upd_flight(dt: float) -> void:
 	if gm.F.onGround:
 		gm.F.alt = 0.0; gm.F.vs = 0.0
 		if altT > 3:
-			gm.F.onGround = false; gm.F.alt = 0.3; gm.F.rollStrip = null; gm.F.departing = false
+			gm.F.onGround = false; gm.F.alt = 0.3; gm.F.rollStrip = null; gm.F.departing = false; gm.F.climbOut = true
 			gm.G.stats.flights += 1
 			gm.toast("Airborne.")
 	else:
-		gm.F.vs = climb_vs(P, altT, gm.F.alt)
+		gm.F.vs = climb_vs(P, altT, gm.F.alt, gm.F.spd)
 		gm.F.alt += gm.F.vs * dt
+		if gm.F.vs < 0.5: gm.F.climbOut = false   # levelled off (or coming down): full bank again
 	# Nose comes up while climbing (full pitch at a climb rate of 18 / VS_TIME and above) and eases back down.
 	var pitch_t: float = 0.0 if gm.F.onGround else clampf(gm.F.vs * VS_TIME / 18.0, 0, 1)
 	gm.F["pitch"] = lerpf(gm.F.get("pitch", 0.0), pitch_t, minf(1, dt * 1.5))
@@ -303,12 +306,15 @@ func approach_info():
 	return best
 
 ## Vertical speed toward the altitude the airspeed supports, scaled by the plane's "climb_k" when
-## climbing and "descend_k" when descending (D.PLANES; Greg 2026-10-14: the Albatross takes about
-## twice as long to climb out and 1.5x as long to come down), and slowed for every plane by VS_TIME.
-static func climb_vs(P: Dictionary, altT: float, alt: float) -> float:
+## climbing (D.PLANES; the Albatross climbs slowest) and slowed for every plane by VS_TIME.
+## Coming down, the sink is capped at the plane's "glide" slope (altitude per unit of ground), set so
+## a throttle-to-idle descent from cruise covers the same ground as the full-throttle climb did
+## (Greg 2026-10-23). At stall speed (the slowest it flies) it wants the ground.
+static func climb_vs(P: Dictionary, altT: float, alt: float, spd: float) -> float:
+	if altT < 0.5: altT = -40.0
 	var v := clampf((altT - alt) * 1.3, -48, 22)
 	if v > 0: return v * P.get("climb_k", 1.0) / VS_TIME
-	return maxf(v, -(5 + alt * 0.55)) * P.get("descend_k", 1.0) / VS_TIME
+	return maxf(maxf(v, -(5 + alt * 0.55)) / VS_TIME, -spd * P.get("glide", 1.0))
 
 func predict_touchdown(thrO: float = -1.0):
 	var P := gm.PS()
@@ -326,9 +332,9 @@ func predict_touchdown(thrO: float = -1.0):
 	var cr: float = P.cruise
 	for i in 450:
 		var dt := 0.1
-		spd += (tg - spd) * (0.28 if tg > spd else 0.3) * dt
+		spd = maxf(st, spd + (tg - spd) * (0.28 if tg > spd else 0.3) * dt)
 		var altT := clampf((spd - st) / (cr - st) * 100, -80, 120)
-		vs = climb_vs(P, altT, alt)
+		vs = climb_vs(P, altT, alt, spd)
 		alt += vs * dt
 		x += c * spd * dt + wx * dt
 		y += n * spd * dt + wy * dt

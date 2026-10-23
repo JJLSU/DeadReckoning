@@ -5,7 +5,7 @@ extends RefCounted
 ## and as many settlers as the plane seats come out of the houses, gather at the bell and
 ## board. Fly them in: they get off and patrol, and once the field's NEED have arrived before
 ## the time is up it is settled for good: friendly, green on the map, with fuel, the farm
-## store and a job board. If time runs out first the enemy takes it back.
+## store. If time runs out first the enemy takes it back.
 ## Run state: G.fields {str(strip id): {"st": "cleared"/"settled", "until", "have", "need"}}
 ## and G.crew (settlers aboard). apply() lays it over the freshly generated strips.
 
@@ -152,7 +152,6 @@ func on_enter(site: Dictionary) -> void:
 		for i in mini(crew, maxi(0, SETTLERS_SHOWN - site.setl.size())): _disembark(site, i)
 		if int(e.have) >= int(e.need):
 			settle(s)
-			gm.G.offers = gm.menu.gen_offers(s)   # a job board now (arrive() made the offers before they landed)
 			gm.toast_later(0.4, "%d settlers climb out. %s is settled: %d/%d. It's ours now, with fuel and medicine for sale." % [crew, s.name, int(e.have), int(e.need)], "good")
 			gm.sfx("rare")
 		else:

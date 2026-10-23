@@ -104,7 +104,7 @@ int terr(float x, float y, out float TE, out float TM) {
 	if (rv < 0.0125 && e < 0.62 && dh > 1700.0) return 14;
 	if (e < 0.408) return 2;
 	if (e > 0.70) return e > 0.75 ? 8 : 7;
-	if (dh > 1700.0) {
+	if (dh > 1700.0 && gen < 4) {   // gen 4: no painted town blocks
 		float tn = vnoise(x / 2200.0 + 5.0, y / 2200.0 + 5.0, seed + 55);
 		if (tn > (gen >= 3 ? 0.8 : 0.86) && e < 0.62) {
 			int gx = int(floor(x / 70.0)), gy = int(floor(y / 70.0));

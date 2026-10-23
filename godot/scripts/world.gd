@@ -6,8 +6,9 @@ const WORLD := D.WORLD   # land size: set in data.gd
 const AIRFIELDS := 180     # airfields generated, not counting Haven (one name each in D.NAMES)
 const ROAD_COUNT := 64     # roads generated (must not exceed baker.ROAD_SLOTS / road_p[] in the shader)
 const DEADZONE := 13500.0
-const WORLD_GEN := 3          # map layout version; 2 keeps airfields out of forests, 3 adds bridges,
-							  # dirt-track road ends, no long lake crossings and towns that thin out
+const WORLD_GEN := 4          # map layout version; 2 keeps airfields out of forests, 3 adds bridges,
+							  # dirt-track road ends, no long lake crossings and towns that thin out,
+							  # 4 drops the painted town blocks from the ground (Greg 2026-10-23)
 const ROAD_TRACK := 380.0     # gen 3: last stretch of each road end that is a narrow dirt track
 const BRIDGE_MAX := 280.0     # gen 3: longest water crossing a new road may bridge
 const FOREST_MAX := 0.25      # most of an airfield's surroundings that may be forest
@@ -40,6 +41,7 @@ var STORMS: Array = []
 var strips: Array = []
 var START := 0
 var GEN := WORLD_GEN   # layout version of the current world
+var _town_probe := false   # gen 4: terr() still sees the old town blocks (for picking town airfields)
 var TE := 0.5
 var TM := 0.5
 var game  # Game node, for G.time
@@ -103,7 +105,7 @@ func terr(x: float, y: float) -> int:
 	if rv < 0.0125 and e < 0.62 and dh > 1700: return 14
 	if e < 0.408: return 2
 	if e > 0.70: return 8 if e > 0.75 else 7
-	if dh > 1700:
+	if dh > 1700 and (GEN < 4 or _town_probe):
 		var tn := U.vnoise(x / 2200.0 + 5, y / 2200.0 + 5, SEED + 55)
 		if tn > (0.8 if GEN >= 3 else 0.86) and e < 0.62:
 			var gx := int(floor(x / 70.0))
@@ -441,11 +443,13 @@ func gen_world(seed_v: int, gen: int = WORLD_GEN) -> void:
 		var d := Vector2(s.x - st.x, s.y - st.y).length()
 		var town := 0
 		var wat := 0
+		_town_probe = true   # gen 4 has no painted towns, but airfield towns still go where they were
 		for k2 in 8:
 			var a := k2 / 8.0 * TAU
 			var tt := terr(s.x + cos(a) * 900, s.y + sin(a) * 900)
 			if tt == 9 or tt == 10: town = 1
 			if tt <= 1: wat = 1
+		_town_probe = false
 		s.danger = clampi(int(round(1 + d / 9000.0 + town + R.call() * 0.8 - 0.4)), 1, 5)
 		var qq: float = R.call()
 		if s.type == "dirt":
