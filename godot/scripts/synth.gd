@@ -40,6 +40,7 @@ const DEAF_FADE := 2.0
 const DEAF_RING_DELAY := 0.5
 const DEAF_RING_IN := 0.8
 const DEAF_RING_VOL := 0.025  # loudness of the ringing at its peak
+const ENGINE_VOL := 0.25     # engine loudness (Greg 2026-10-24: halved twice, so the radio can be heard)
 const FX_BUS := "Fx"         # every sound but the ringing and the booms plays on this bus, so it can be turned down
 const UNDUCKED := ["boom", "bigboom"]   # played on Master instead, at full volume while deafened
 var deaf_on := false
@@ -429,7 +430,7 @@ func engine(thr: float, alt: float, active: bool) -> void:
 	var base := 38.0 + thr * 62.0
 	t_freq = base
 	t_cut = 250.0 + thr * 900.0
-	t_gain = (0.05 + thr * 0.09) if active else 0.0
+	t_gain = (0.05 + thr * 0.09) * ENGINE_VOL if active else 0.0
 	t_w = (0.008 + minf(1.0, alt / 100.0) * 0.022) if active else 0.0
 
 func rain(k: float) -> void:

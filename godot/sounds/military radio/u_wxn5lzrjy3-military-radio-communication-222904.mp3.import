@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://dlmgg2jeie85p"
+path="res://.godot/imported/u_wxn5lzrjy3-military-radio-communication-222904.mp3-73ba0e7a2a44d5a8adebe76e7541f1e3.mp3str"
+
+[deps]
+
+source_file="res://sounds/military radio/u_wxn5lzrjy3-military-radio-communication-222904.mp3"
+dest_files=["res://.godot/imported/u_wxn5lzrjy3-military-radio-communication-222904.mp3-73ba0e7a2a44d5a8adebe76e7541f1e3.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

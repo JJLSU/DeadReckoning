@@ -25,6 +25,10 @@ static var SUN_ANG := 1.0              # shadow direction
 static var SUN_A := 1.0                # shadow strength (fades out at night)
 static var MEMO := {}                  # per-frame results shared by the layers (see memo())
 static var MEMO_F := -1
+static var MM_C := Vector2.ZERO   # flight minimap centre, radius and scale as last drawn
+static var MM_R := 0.0
+static var MM_K := 0.0
+static var MM_GROW := 0.0       # 0..1 hover growth
 static var HOUSES := {}                # (strip id, world seed) -> its town's houses (draw_strip)
 
 static func hc(s: String) -> Color:
@@ -765,6 +769,10 @@ const GRADES := [
 	[24.0, Color(0.92, 0.96, 1.1), Color(0.9, 0.95, 1.08), 0.72, 1.0, 1.0],
 ]
 static var GRADE_MAT: ShaderMaterial
+const CLOUD_SHADE := 0.5        # how dark the cloud shadows get in flight (0..1)
+const CLOUD_DRIFT_K := 2.5       # clouds blow at this many times the wind's speed
+const CLOUD_DRIFT_MIN := 12.0    # on a calm day they still drift, world units a second
+static var CLOUD_POS := Vector2.ZERO
 static func update_grade(gm) -> void:
 	var l2 = gm.layers[2]
 	var rc: ColorRect = l2.get_node_or_null("Grade")
@@ -792,6 +800,19 @@ static func update_grade(gm) -> void:
 	GRADE_MAT.set_shader_parameter("sat", lerpf(a[3], b[3], t) * (1.0 - wet * 0.3))
 	GRADE_MAT.set_shader_parameter("con", lerpf(a[4], b[4], t))
 	GRADE_MAT.set_shader_parameter("expo", lerpf(a[5], b[5], t))
+	# cloud shadows: flight only, by day, fading at dawn and dusk and under storm cover
+	var ca := 0.0
+	if gm.mode == "flight" and gm.F:
+		var F: Dictionary = gm.F
+		ca = CLOUD_SHADE * smoothstep(6.0, 8.0, h) * (1.0 - smoothstep(17.5, 19.5, h)) * (1.0 - wet * 0.8)
+		var wv: Vector2 = F.wind
+		var dv: Vector2 = wv * CLOUD_DRIFT_K if wv.length() > 1.0 else Vector2(CLOUD_DRIFT_MIN, CLOUD_DRIFT_MIN * 0.4)
+		CLOUD_POS += dv * minf(gm.get_process_delta_time(), 0.1)
+		GRADE_MAT.set_shader_parameter("cam", Vector2(gm.camX, gm.camY))
+		GRADE_MAT.set_shader_parameter("scl", flight_scale(gm, F.alt))
+		GRADE_MAT.set_shader_parameter("drift", CLOUD_POS)
+		GRADE_MAT.set_shader_parameter("t", gm.T)
+	GRADE_MAT.set_shader_parameter("cloud_amt", ca)
 
 static func draw_objective(gm, g: Pen, y: float) -> void:
 	var txt: String = gm.menu.objective()
@@ -886,6 +907,8 @@ static func draw_world(gm, g: Pen, cx: float, cy: float, sc: float, t: float) ->
 	var sf := clampf((sc - 0.5) / 0.22, 0, 1)
 	if gm.mode == "flight" and gm.F:   # trees at every zoom, their alpha set by altitude
 		draw_scatter(gm, g, x0, y0, x1, y1, sf, t, tree_fade(gm.F.alt))
+	elif gm.mode == "title" and not gm.title.fl.is_empty():   # the title flyover: trees as in flight
+		draw_scatter(gm, g, x0, y0, x1, y1, sf, t, tree_fade(gm.title.fl.alt))
 	elif sc > 0.512:
 		draw_scatter(gm, g, x0, y0, x1, y1, sf, t, sf)
 	var tgt = gm.flight.nav_target() if (gm.mode == "flight" and gm.G and gm.F) else null
@@ -1357,80 +1380,15 @@ static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 	g.text("%.1f of %d gal, %d km left, hull %d%%" % [G.fuel, int(P.fuelCap), U.km(memo(gm, "range")), int(ceil(G.hull))], px + 10, py + 38, 13, ink)
 	var hdg := int(round(fmod(rad_to_deg(F.hdg) + 90 + 360 * 4, 360)))
 	g.text("%d kt   %d ft   %s%d fpm   %s°" % [int(round(F.spd * 0.75)), int(round(maxf(0, F.alt) * 45)), "▲" if F.vs >= 0 else "▼", absi(int(round(F.vs * 27))) * 100, ("00" + str(hdg)).right(3)], px + 10, py + 57, 13, ink)
-	# minimap
-	var mr := minf(58, W * 0.15)
+	# minimap: hovering doubles it at the same scale, so it shows more of the map
+	var mr0 := minf(58, W * 0.15)
+	var hov: bool = MM_R > 0 and gm.get_viewport().get_mouse_position().distance_to(MM_C) < MM_R
+	MM_GROW = move_toward(MM_GROW, 1.0 if hov else 0.0, gm.get_process_delta_time() * 6.0)
+	var mr := mr0 * (1.0 + smoothstep(0.0, 1.0, MM_GROW))
 	var mx := W - mr - 12
 	var my := mr + 12
-	var R := 6000.0
-	var k := mr / R
-	# open sea beyond the map edge: same colour the main flight view uses there
-	g.circle(mx, my, mr, hc(SEA))
-	var ovw: Texture2D = gm.baker.overview_wide
-	var ov: Texture2D = gm.baker.overview
-	if ovw:
-		# real terrain and sea all the way out (the wide overview covers the ocean margin)
-		var o: float = gm.baker.wide_origin
-		var span: float = gm.baker.wide_span
-		var pts := PackedVector2Array()
-		var uvs := PackedVector2Array()
-		for i in 40:
-			var a := TAU * i / 40.0
-			var sp := Vector2(mx + cos(a) * mr, my + sin(a) * mr)
-			pts.append(sp)
-			uvs.append(Vector2((F.x + (sp.x - mx) / k - o) / span, (F.y + (sp.y - my) / k - o) / span))
-		g.ci.draw_colored_polygon(pts, Color.WHITE, uvs, ovw)
-	elif ov:
-		# Draw the overview inside the circle, but only where it actually covers the
-		# world. Past the map edge the texture's UVs would run outside 0..1 and smear
-		# its edge pixels into streaks, so clip the circle to the world's rectangle.
-		var circ := PackedVector2Array()
-		for i in 40:
-			var a := TAU * i / 40.0
-			circ.append(Vector2(mx + cos(a) * mr, my + sin(a) * mr))
-		var wx0: float = mx + (0.0 - F.x) * k
-		var wy0: float = my + (0.0 - F.y) * k
-		var wx1: float = mx + (D.WORLD - F.x) * k
-		var wy1: float = my + (D.WORLD - F.y) * k
-		var wrect := PackedVector2Array([Vector2(wx0, wy0), Vector2(wx1, wy0), Vector2(wx1, wy1), Vector2(wx0, wy1)])
-		for pts in Geometry2D.intersect_polygons(circ, wrect):
-			var uvs := PackedVector2Array()
-			for sp in pts:
-				uvs.append(Vector2((F.x + (sp.x - mx) / k) / D.WORLD, (F.y + (sp.y - my) / k) / D.WORLD))
-			g.ci.draw_colored_polygon(pts, Color.WHITE, uvs, ov)
-	g.circle(mx, my, mr, rgba(10, 14, 12, 0.25))
-	var sps := storms_now(wd)
-	var scol := rgba(120, 140, 190, 0.35)
-	for si in sps.size():
-		var q: Vector2 = sps[si]
-		var sxp: float = mx + (q.x - F.x) * k
-		var syp: float = my + (q.y - F.y) * k
-		var sr: float = STORM_R[si] * k
-		if Vector2(sxp - mx, syp - my).length() - sr > mr: continue
-		_clipped_disc(g, sxp, syp, sr, mx, my, mr, scol, si)
-	var rn: float = memo(gm, "range") * k
-	if rn < mr: g.dashed_arc(mx, my, rn, 0, TAU, rgba(212, 90, 157, 0.9), 1, 3, 3)
+	draw_minimap(gm, g, mx, my, mr, ink, mr0 / 6000.0)
 	var nt = gm.flight.nav_target()
-	var mdt2 = gm.flight.mayday_target()
-	for s in known_strips(gm):
-		var dx: float = (s.x - F.x) * k
-		var dy: float = (s.y - F.y) * k
-		if dx * dx + dy * dy > mr * mr * 0.9: continue
-		var isnt: bool = nt != null and nt.id == s.id
-		var mcol := hc("#9cc063") if s.type == "haven" else (hc("#8fbf88") if Fields.friendly(s) else (hc("#f0802a") if s.get("cleared", false) else hc("#e07ab3")))
-		var mrr := 4.5 if isnt else 3.0
-		g.ring(mx + dx, my + dy, mrr, mcol, 2.5 if isnt else 1.5)
-		if s.type != "road":   # two ticks outside the ring along the runway (Greg, 2026-10-23)
-			var ca := cos(s.ang)
-			var sa := sin(s.ang)
-			for sg in [-1.0, 1.0]:
-				g.line(mx + dx + ca * sg * (mrr + 1.0), my + dy + sa * sg * (mrr + 1.0), mx + dx + ca * sg * (mrr + 4.0), my + dy + sa * sg * (mrr + 4.0), mcol, 1.5)
-		if mdt2 != null and mdt2.id == s.id:
-			g.ring(mx + dx, my + dy, 7.0, hc("#ff2a1e"), 2.5)
-	g.save(); g.translate(mx, my); g.rotate(F.hdg)
-	g.poly(PackedVector2Array([Vector2(6, 0), Vector2(-4, -4), Vector2(-4, 4)]), Color.WHITE)
-	g.restore()
-	g.ring(mx, my, mr, rgba(239, 230, 207, 0.5), 1.5)
-	g.text("N", mx, my - mr + 9, 11, ink, 0, "700")
 	draw_objective(gm, g, py + 120)
 	var wv: float = F.wind.length()
 	var wy := py + 92
@@ -1586,8 +1544,13 @@ static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 			c = hc("#f0c4dd")
 	if msg != "":
 		var w := minf(W - 20, Pen.measure(msg, 15) + 24)
-		g.rr(W / 2 - w / 2, H - 100, w, 30, 5, rgba(12, 16, 14, 0.74))
-		g.text(msg, W / 2, H - 85, 15, c, 0, "600", 0, Color.BLACK, w - 16)
+		var rx: float = gm.radio.hud_left() - 10   # keep clear of the radio's NAV/COMM panels
+		var cx := W / 2
+		if cx + w / 2 > rx and rx < W - 20:
+			w = minf(w, rx - 10)
+			cx = rx - w / 2
+		g.rr(cx - w / 2, H - 100, w, 30, 5, rgba(12, 16, 14, 0.74))
+		g.text(msg, cx, H - 85, 15, c, 0, "600", 0, Color.BLACK, w - 16)
 	for p in gm.ptrs.values():
 		if p.role == "steer":
 			g.line(p.sx - 70, p.sy, p.sx + 70, p.sy, rgba(239, 230, 207, 0.35), 2)
@@ -1596,6 +1559,157 @@ static func hud_flight(gm, g: Pen, P: Dictionary, sc: float) -> void:
 ## key: the clipped outline is kept under it and reused while the disc and circle move less
 ## than a quarter pixel (clipping polygons every frame is slow).
 static var CLIP_CACHE := {}
+## The flight minimap: a round window onto the chart (ui.gd MapView), centred on the plane
+## and north up, at about the chart's own scale (Greg, 2026-10-24).
+static func draw_minimap(gm, g: Pen, mx: float, my: float, mr: float, ink: Color, k: float) -> void:
+	var F: Dictionary = gm.F
+	var G: Dictionary = gm.G
+	var wd = gm.wd
+	MM_C = Vector2(mx, my); MM_R = mr; MM_K = k
+	# open sea beyond the map edge: same colour the main flight view uses there
+	g.circle(mx, my, mr, hc(SEA))
+	var ovw: Texture2D = gm.baker.overview_wide
+	var ov: Texture2D = gm.baker.overview
+	if ovw:
+		# real terrain and sea all the way out (the wide overview covers the ocean margin)
+		var o: float = gm.baker.wide_origin
+		var span: float = gm.baker.wide_span
+		var pts := PackedVector2Array()
+		var uvs := PackedVector2Array()
+		for i in 40:
+			var a := TAU * i / 40.0
+			var sp := Vector2(mx + cos(a) * mr, my + sin(a) * mr)
+			pts.append(sp)
+			uvs.append(Vector2((F.x + (sp.x - mx) / k - o) / span, (F.y + (sp.y - my) / k - o) / span))
+		g.ci.draw_colored_polygon(pts, Color.WHITE, uvs, ovw)
+	elif ov:
+		# Draw the overview inside the circle, but only where it actually covers the
+		# world. Past the map edge the texture's UVs would run outside 0..1 and smear
+		# its edge pixels into streaks, so clip the circle to the world's rectangle.
+		var circ := PackedVector2Array()
+		for i in 40:
+			var a := TAU * i / 40.0
+			circ.append(Vector2(mx + cos(a) * mr, my + sin(a) * mr))
+		var wx0: float = mx + (0.0 - F.x) * k
+		var wy0: float = my + (0.0 - F.y) * k
+		var wx1: float = mx + (D.WORLD - F.x) * k
+		var wy1: float = my + (D.WORLD - F.y) * k
+		var wrect := PackedVector2Array([Vector2(wx0, wy0), Vector2(wx1, wy0), Vector2(wx1, wy1), Vector2(wx0, wy1)])
+		for pts in Geometry2D.intersect_polygons(circ, wrect):
+			var uvs := PackedVector2Array()
+			for sp in pts:
+				uvs.append(Vector2((F.x + (sp.x - mx) / k) / D.WORLD, (F.y + (sp.y - my) / k) / D.WORLD))
+			g.ci.draw_colored_polygon(pts, Color.WHITE, uvs, ov)
+	g.circle(mx, my, mr, Color(235 / 255.0, 227 / 255.0, 203 / 255.0, 0.18))
+	var gl := PackedVector2Array()
+	for i in range(1, 6):
+		var gq: float = i * D.WORLD / 6.0
+		var gx: float = (gq - F.x) * k
+		var gy: float = (gq - F.y) * k
+		if absf(gx) < mr:
+			var hh := sqrt(mr * mr - gx * gx)
+			gl.append_array([Vector2(mx + gx, my - hh), Vector2(mx + gx, my + hh)])
+		if absf(gy) < mr:
+			var hw := sqrt(mr * mr - gy * gy)
+			gl.append_array([Vector2(mx - hw, my + gy), Vector2(mx + hw, my + gy)])
+	if gl.size(): g.lines(gl, Color(20 / 255.0, 30 / 255.0, 34 / 255.0, 0.25), 1)
+	var hm: Dictionary = gm.strip(wd.START)
+	for dr in UI.MapView.DANGER_RINGS:
+		_mini_dashed_ring(g, mx + (hm.x - F.x) * k, my + (hm.y - F.y) * k, dr * k, mx, my, mr, Color(1, 1, 1, 0.45), 4.0, 10, 6)
+		_mini_dashed_ring(g, mx + (hm.x - F.x) * k, my + (hm.y - F.y) * k, dr * k, mx, my, mr, hc("#6a2a0a"), 2.0, 10, 6)
+	_mini_dashed_ring(g, mx, my, memo(gm, "range") * k, mx, my, mr, Color(155 / 255.0, 42 / 255.0, 104 / 255.0, 0.9), 1.5, 5, 4)
+	var sps := storms_now(wd)
+	var scol := Color(50 / 255.0, 60 / 255.0, 80 / 255.0, 0.28)
+	for si in sps.size():
+		var q: Vector2 = sps[si]
+		var sxp: float = mx + (q.x - F.x) * k
+		var syp: float = my + (q.y - F.y) * k
+		var sr: float = STORM_R[si] * k
+		if Vector2(sxp - mx, syp - my).length() - sr > mr: continue
+		_clipped_disc(g, sxp, syp, sr, mx, my, mr, scol, si)
+		_mini_dashed_ring(g, sxp, syp, sr, mx, my, mr, Color(50 / 255.0, 60 / 255.0, 80 / 255.0, 0.5), 1, 1000, 0)
+	if not gm.known.has(0):
+		var rings: Array = G.get("rings", [])
+		for i in mini(rings.size(), wd.RUMORS.size()):
+			var rr: float = float(rings[i])
+			var rc: Vector2 = wd.ring_center(i, rr)
+			_mini_dashed_ring(g, mx + (rc.x - F.x) * k, my + (rc.y - F.y) * k, rr * k, mx, my, mr, Color(20 / 255.0, 30 / 255.0, 34 / 255.0, 0.8), 1.5, 5, 4)
+	var dests := {}
+	for c in G.contracts: dests[gm.menu.contract_target(c)] = true
+	var nt = gm.flight.nav_target()
+	var ct = gm.radio.comm_target()
+	if nt != null:
+		# course line out to the nav target, cut at the minimap's edge
+		var nv := Vector2(nt.x - F.x, nt.y - F.y) * k
+		if nv.length() > mr - 2: nv = nv.normalized() * (mr - 2)
+		g.line(mx, my, mx + nv.x, my + nv.y, Color.WHITE, 1.5)
+	for s in known_strips(gm):
+		var dx: float = (s.x - F.x) * k
+		var dy: float = (s.y - F.y) * k
+		if dx * dx + dy * dy > (mr - 8) * (mr - 8): continue
+		var ir := UI.MapView.strip_icon(g, gm, s, mx + dx, my + dy, dests)
+		if is_same(s, ct): _mini_dashed_ring(g, mx + dx, my + dy, ir + 8, mx, my, mr, Radio.RING, 2, 4, 3)   # the radio's tuned here
+	var mink := hc("#1f2a2e")
+	g.save(); g.translate(mx, my); g.rotate(F.hdg)
+	var arr := PackedVector2Array([Vector2(9, 0), Vector2(-6, -6), Vector2(-3, 0), Vector2(-6, 6)])
+	g.poly(arr, Color.WHITE)
+	var ac := arr.duplicate(); ac.append(arr[0])
+	g.polyline(ac, mink, 1.5)
+	g.restore()
+	g.ring(mx, my, mr, rgba(239, 230, 207, 0.5), 1.5)
+	g.text("N", mx, my - mr + 9, 11, ink, 0, "700")
+
+## A click at p on the flight minimap: an airfield icon there becomes the course (or clears
+## it if it already was). True when the click landed on the minimap, so it doesn't steer.
+static func minimap_click(gm, p: Vector2, comm: bool = false) -> bool:
+	if MM_R <= 0 or p.distance_to(MM_C) > MM_R or gm.F == null: return false
+	var best = null
+	var bd := 12.0
+	for s in known_strips(gm):
+		var q: Vector2 = MM_C + Vector2(s.x - gm.F.x, s.y - gm.F.y) * MM_K
+		var d := q.distance_to(p)
+		if d < bd and q.distance_to(MM_C) < MM_R - 4:
+			bd = d
+			best = s
+	if best != null:
+		if comm: gm.radio.set_comm(best)   # right-click: tune the radio to it
+		else: UI.MapView.set_course(gm, best)
+	return true
+
+## A dashed (or, with gap 0, solid) circle, keeping only the pieces inside the minimap
+## circle (cx, cy, cr).
+static func _mini_dashed_ring(g: Pen, x: float, y: float, r: float, cx: float, cy: float, cr: float, col: Color, lw: float, dash: float, gap: float) -> void:
+	var d := Vector2(cx - x, cy - y).length()
+	if r <= 0 or d > r + cr or d + cr < r: return
+	# only walk the part of the circle that can fall inside the window
+	var a0 := 0.0
+	var a1 := TAU
+	if d > 0.001:
+		var cs := (r * r + d * d - cr * cr) / (2.0 * r * d)
+		if cs > -1.0:
+			var ac := atan2(cy - y, cx - x)
+			var half := acos(clampf(cs, -1.0, 1.0)) + 0.02
+			a0 = ac - half
+			a1 = ac + half
+	var st := 3.0 / r   # about 3 px per piece
+	var per := dash + gap
+	var pts := PackedVector2Array()
+	var cr2 := (cr - 1.0) * (cr - 1.0)
+	var c := Vector2(cx, cy)
+	var a := a0
+	var prev := Vector2(x + cos(a) * r, y + sin(a) * r)
+	var guard := 0
+	while a < a1 and guard < 2400:
+		guard += 1
+		var an := minf(a1, a + st)
+		var pn := Vector2(x + cos(an) * r, y + sin(an) * r)
+		var along := fposmod(r * (a + an) * 0.5, per) if gap > 0 else 0.0
+		if along < dash and (prev - c).length_squared() < cr2 and (pn - c).length_squared() < cr2:
+			pts.append(prev); pts.append(pn)
+		prev = pn
+		a = an
+	if pts.size(): g.lines(pts, col, lw)
+
 static func _clipped_disc(g: Pen, x: float, y: float, r: float, cx: float, cy: float, cr: float, col: Color, key = null) -> void:
 	if Vector2(x - cx, y - cy).length() + r <= cr:
 		g.circle(x, y, r, col)   # wholly inside: nothing to clip
@@ -1907,8 +2021,9 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 		1:
 			view.call()
 			if S.flash > 0:
-				var mx: float = p.x + cos(p.ang) * 26
-				var my: float = p.y + sin(p.ang) * 26
+				var mzl: Vector2 = gm.muzzle(p.x, p.y, p.ang, gm.G.weapon)   # at your gun's muzzle
+				var mx: float = mzl.x
+				var my: float = mzl.y
 				g.radial(mx, my, [[0.0, rgba(255, 220, 150, 0.9)], [48 * 0.3, rgba(255, 160, 70, 0.4)], [48.0, rgba(255, 120, 40, 0)]], 24)
 			for f in S.get("mf", []):
 				g.radial(f.x, f.y, [[0.0, rgba(255, 220, 150, 0.9)], [48 * 0.3, rgba(255, 160, 70, 0.4)], [48.0, rgba(255, 120, 40, 0)]], 24)
@@ -2021,12 +2136,9 @@ static func ground_layer(gm, idx: int, g: Pen) -> void:
 					var sx: float = W / 2 + (z.x - cx) * gs
 					var sy: float = H / 2 + (z.y - cy) * gs
 					if sx < -20 or sx > W + 20 or sy < -20 or sy > H + 20: continue
-					var a: float = z.ang
-					var hx := (7.0 if z.kind == "crawler" else 3.2) + 3
-					var s := (1.4 if z.kind == "bloat" else 1.0) * gs
-					for e in [-2.1, 2.1]:
-						var ex = sx + (cos(a) * hx - sin(a) * e) * s
-						var ey = sy + (sin(a) * hx + cos(a) * e) * s
+					for e in z_eyes(z):   # on the sprite's face
+						var ex: float = W / 2 + (e.x - cx) * gs
+						var ey: float = H / 2 + (e.y - cy) * gs
 						g.ga = dk * 0.85
 						g.tex(Tx.glow("255,60,30"), ex - 4.5, ey - 4.5, 9, 9)
 						g.ga = 1.0
@@ -2557,6 +2669,33 @@ static func z_sprite(g: Pen, z: Dictionary) -> void:
 ## (the sprite layers are shaded white, so a flat multiply would come out darker than the old look).
 const Z_FW := 74.0
 const Z_TINT := 1.35
+## Where the eyes are in each walk frame of the zombie sprites, in metres from the frame centre
+## (x ahead, y to the right; Z_FW world units = 2.2 m), measured from the Blender model
+## (zombie.py). The upright kinds share a head; the crawler's sits low and still.
+const Z_EYES := [
+	[[0.4914, 0.0818], [0.4975, -0.015]], [[0.4825, 0.1425], [0.4958, 0.0471]], [[0.4772, 0.1673], [0.4935, 0.0727]], [[0.4825, 0.1425], [0.4958, 0.0471]],
+	[[0.4914, 0.0818], [0.4975, -0.015]], [[0.4948, 0.0207], [0.4936, -0.0771]], [[0.4945, -0.0047], [0.4903, -0.1026]], [[0.4948, 0.0207], [0.4936, -0.0771]]]
+const Z_EYES_CRAWL := [[0.6302, 0.05], [0.6302, -0.05]]
+
+## The world positions of a zombie's two eyes, following its sprite (frame, sway, size, lunge),
+## for the red glow at night. Without the sprites: the old drawing's eyes.
+static func z_eyes(z: Dictionary) -> Array:
+	var kind: String = z.kind
+	if z_layers(z).is_empty():
+		var hx := (7.0 if kind == "crawler" else 3.2) + 3
+		var s0 := 1.4 if kind == "bloat" else 1.0
+		var a0: float = z.ang
+		return [Vector2(z.x, z.y) + Vector2(hx, -2.1).rotated(a0) * s0, Vector2(z.x, z.y) + Vector2(hx, 2.1).rotated(a0) * s0]
+	var f := int(fposmod(float(z.wk), TAU) / TAU * Tx.Z_FRAMES) % Tx.Z_FRAMES
+	var pts: Array = Z_EYES_CRAWL if kind == "crawler" else Z_EYES[f % Z_EYES.size()]
+	var sc := 1.15 if kind == "bloat" else (0.95 if kind == "crawler" else 1.0)
+	var a: float = z.ang + (0.0 if kind == "crawler" else sin(float(z.wk) * 0.45) * 0.14)   # same sway as draw_zombie
+	var k := Z_FW / 2.2
+	var out := []
+	for p in pts:
+		var v := Vector2(p[0] * k * (1.12 if z.lng > 0 else 1.0) - (3.0 if z.wind > 0 else 0.0), p[1] * k)
+		out.append(Vector2(z.x, z.y) + v.rotated(a) * sc)
+	return out
 
 ## The sprite set for this zombie (a/s/k layers), or [] to draw it the old way.
 static func z_layers(z: Dictionary) -> Array:

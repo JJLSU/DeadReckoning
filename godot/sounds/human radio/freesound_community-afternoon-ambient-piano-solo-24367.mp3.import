@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://jbf8qtojxmin"
+path="res://.godot/imported/freesound_community-afternoon-ambient-piano-solo-24367.mp3-79dade125ca93f5fa867f613443c8781.mp3str"
+
+[deps]
+
+source_file="res://sounds/human radio/freesound_community-afternoon-ambient-piano-solo-24367.mp3"
+dest_files=["res://.godot/imported/freesound_community-afternoon-ambient-piano-solo-24367.mp3-79dade125ca93f5fa867f613443c8781.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

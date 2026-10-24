@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://d301h2n15c7eb"
+path="res://.godot/imported/freesound_community-electric-cello_demo-33445.mp3-3d164697a4179c0243d64b5fc21f1715.mp3str"
+
+[deps]
+
+source_file="res://sounds/human radio/freesound_community-electric-cello_demo-33445.mp3"
+dest_files=["res://.godot/imported/freesound_community-electric-cello_demo-33445.mp3-3d164697a4179c0243d64b5fc21f1715.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

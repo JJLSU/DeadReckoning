@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://cx5l0si5yq1uf"
+path="res://.godot/imported/ondrosik-short-piano-jingle-262586.mp3-036c202f90c78dc311cbc1f172656bec.mp3str"
+
+[deps]
+
+source_file="res://sounds/human radio/ondrosik-short-piano-jingle-262586.mp3"
+dest_files=["res://.godot/imported/ondrosik-short-piano-jingle-262586.mp3-036c202f90c78dc311cbc1f172656bec.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

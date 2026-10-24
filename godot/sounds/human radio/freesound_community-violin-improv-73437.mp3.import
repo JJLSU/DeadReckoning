@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://c8dvwehbydtvh"
+path="res://.godot/imported/freesound_community-violin-improv-73437.mp3-04d95566e3c105bd083695e0116f30c1.mp3str"
+
+[deps]
+
+source_file="res://sounds/human radio/freesound_community-violin-improv-73437.mp3"
+dest_files=["res://.godot/imported/freesound_community-violin-improv-73437.mp3-04d95566e3c105bd083695e0116f30c1.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

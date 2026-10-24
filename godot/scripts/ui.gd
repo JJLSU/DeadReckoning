@@ -15,6 +15,7 @@ var map_cv: MapView
 var map_note: Label
 var btns := {}
 var pal := {}
+var side := false   # the title menu: a narrower panel at the left, over the undimmed flyover
 
 const LIGHT := {"paper": "#ebe3cb", "panel": "#f4eedd", "panel2": "#e3d9bd", "ink": "#1f2a2e", "dim": "#5f665f", "line": "#c8bb95", "magenta": "#9b2a68", "chart": "#2f5d7c", "good": "#4d6b2a", "bad": "#a3301f", "btn": "#1f2a2e", "btnink": "#f4eedd"}
 const DARK := {"paper": "#141a1c", "panel": "#1b2326", "panel2": "#243034", "ink": "#e8e1cc", "dim": "#9aa39a", "line": "#34443f", "magenta": "#d45a9d", "chart": "#79a9c9", "good": "#9cc063", "bad": "#e3644c", "btn": "#e8e1cc", "btnink": "#141a1c"}
@@ -134,7 +135,8 @@ func _ready() -> void:
 
 func _process(_dt: float) -> void:
 	var vs := get_viewport().get_visible_rect().size
-	var w := minf(560.0, vs.x - 24.0)
+	var w := minf(420.0 if side else 560.0, vs.x - 24.0)
+	dim.color.a = 0.0 if side else 0.5
 	var inner := w - 40.0
 	box.custom_minimum_size.x = inner
 	var ch := box.get_combined_minimum_size().y
@@ -144,6 +146,7 @@ func _process(_dt: float) -> void:
 	panel.size = Vector2(w, 0)
 	panel.reset_size()
 	panel.position = ((vs - panel.size) / 2.0).floor()
+	if side and vs.x > 900.0: panel.position.x = floorf(vs.x * 0.06)
 	if map_ov.visible:
 		map_panel.reset_size()
 		map_panel.position = ((vs - map_panel.size) / 2.0).floor()
@@ -199,6 +202,7 @@ func _btn(text: String, kind: String, disabled: bool = false) -> Button:
 
 # ---------------------------------------------------------------- content builders
 func _clear() -> void:
+	side = false
 	for c in box.get_children():
 		box.remove_child(c)
 		c.queue_free()
@@ -387,10 +391,11 @@ func close_ui() -> void:
 
 func show_title(has_save: bool) -> void:
 	_clear()
+	side = true
 	var logo := VBoxContainer.new()
 	logo.add_theme_constant_override("separation", -14)
 	var vs := get_viewport().get_visible_rect().size
-	var fs := int(clampf(vs.x * 0.15, 54, 92))
+	var fs := int(clampf(vs.x * 0.15, 54, 70))
 	logo.add_child(_label("Dead", "900d", fs, P("ink"), false))
 	logo.add_child(_label("Reckoning", "900d", fs, P("magenta"), false))
 	box.add_child(logo)
@@ -765,7 +770,7 @@ func toggle_map() -> void:
 	var ms := maxf(220, minf(minf(vs.x - 48, vs.y - 170), 760))
 	map_cv.custom_minimum_size = Vector2(ms, ms)
 	map_note.custom_minimum_size.x = ms
-	map_note.text = "Click a charted field to set your course. Magenta discs are fields, with the white bar showing which way the runway runs; ticks round the rim mean fuel. Amber rings are delivery stops. Red discs with a cross are held by armed survivors: no fuel, no trade. Green discs are family farms and fields your settlers hold: friendly folk, fuel and medicine. Orange discs with a count like 3/8 are fields you cleared and the settlers there so far: ring the bell at Failsafe and fly in enough to hold them before the enemy comes back. Brown dashed rings mark rough danger zones around home. Gray squares are road landings you made. Blue patches are storms, which drift. The dashed circle is how far your fuel reaches now."
+	map_note.text = "Click a charted field to set your course; right-click one to tune the radio to it (teal dashed circle). Magenta discs are fields, with the white bar showing which way the runway runs; ticks round the rim mean fuel. Amber rings are delivery stops. Red discs with a cross are held by armed survivors: no fuel, no trade. Green discs are family farms and fields your settlers hold: friendly folk, fuel and medicine. Orange discs with a count like 3/8 are fields you cleared and the settlers there so far: ring the bell at Failsafe and fly in enough to hold them before the enemy comes back. Brown dashed rings mark rough danger zones around home. Gray squares are road landings you made. Blue patches are storms, which drift. The dashed circle is how far your fuel reaches now."
 	map_cv.queue_redraw()
 
 
@@ -773,7 +778,7 @@ class MapView extends Control:
 	var ui: UI
 
 	func _gui_input(e: InputEvent) -> void:
-		if e is InputEventMouseButton and e.pressed and e.button_index == MOUSE_BUTTON_LEFT:
+		if e is InputEventMouseButton and e.pressed and (e.button_index == MOUSE_BUTTON_LEFT or e.button_index == MOUSE_BUTTON_RIGHT):
 			var gm: Game = ui.game
 			var ms := size.x
 			var k := ms / D.WORLD
@@ -785,10 +790,18 @@ class MapView extends Control:
 				if d < bd:
 					bd = d
 					best = s
-			if best:
+			if best and e.button_index == MOUSE_BUTTON_RIGHT:   # right-click: tune the radio to it
+				gm.radio.set_comm(best)
+				queue_redraw()
+			elif best:
 				gm.G.nav = -1 if gm.G.nav == best.id else best.id
 				queue_redraw()
 				gm.toast(("Course set to %s." % best.name) if gm.G.nav >= 0 else "Course cleared.", "mag")
+
+	## Set (or, clicking the same field again, clear) the course to strip s, as a chart click does.
+	static func set_course(gm, s: Dictionary) -> void:
+		gm.G.nav = -1 if gm.G.nav == s.id else s.id
+		gm.toast(("Course set to %s." % s.name) if gm.G.nav >= 0 else "Course cleared.", "mag")
 
 	func _process(_dt: float) -> void:
 		if visible and ui.map_ov.visible: queue_redraw()
@@ -797,19 +810,58 @@ class MapView extends Control:
 
 	## Sectional-chart airfield symbol: a filled disc with a white runway bar turned to the
 	## real runway heading. Fuel fields get four service ticks round the rim.
-	func field_symbol(g: Pen, x: float, y: float, r: float, ang: float, col: Color, ticks: bool) -> void:
+	## The whole icon gets one very thin black outline round its outside (Greg, 2026-10-24):
+	## every black part is drawn first, then the coloured parts over it. cross adds the
+	## survivor-held X, whose arms stick out past the disc.
+	static func field_symbol(g: Pen, x: float, y: float, r: float, ang: float, col: Color, ticks: bool, cross: bool = false) -> void:
+		var segs: Array = []
 		if ticks:
 			for i in 4:
 				var a := i * PI / 2
-				g.line(x + cos(a) * (r - 1), y + sin(a) * (r - 1), x + cos(a) * (r + 3), y + sin(a) * (r + 3), col, 2.0)
+				segs.append([x + cos(a) * (r - 1), y + sin(a) * (r - 1), x + cos(a) * (r + 3), y + sin(a) * (r + 3)])
+		if cross:
+			var xr := (r + 7.0) * 0.7
+			segs.append([x - xr, y - xr, x + xr, y + xr])
+			segs.append([x - xr, y + xr, x + xr, y - xr])
+		for sg in segs:
+			var d := Vector2(sg[2] - sg[0], sg[3] - sg[1]).normalized() * OUTLINE
+			g.line(sg[0] - d.x, sg[1] - d.y, sg[2] + d.x, sg[3] + d.y, Color.BLACK, 2.0 + OUTLINE * 2)
+		g.circle(x, y, r + OUTLINE, Color.BLACK)
+		for sg in segs: g.line(sg[0], sg[1], sg[2], sg[3], col, 2.0)
 		g.circle(x, y, r, col)
 		g.save()
 		g.translate(x, y)
 		g.rotate(ang)
 		var hl := r * 0.72
-		var hw := maxf(1.2, r * 0.22)
+		var hw := maxf(0.7, r * 0.11)
 		g.rect(-hl, -hw, hl * 2, hw * 2, Color.WHITE)
 		g.restore()
+
+	const OUTLINE := 0.8
+
+	## One airfield's chart icon at x, y (no label or course line); returns its disc radius.
+	## The flight minimap draws the same icons (render.gd hud_flight).
+	static func strip_icon(g: Pen, gm, s: Dictionary, x: float, y: float, dests: Dictionary) -> float:
+		var G: Dictionary = gm.G
+		if s.type == "road":
+			g.rect(x - 3 - OUTLINE, y - 3 - OUTLINE, 6 + OUTLINE * 2, 6 + OUTLINE * 2, Color.BLACK)
+			g.rect(x - 3, y - 3, 6, 6, Color.html("#5f665f"))
+			return 3.0
+		if s.type == "haven":
+			g.circle(x, y, 8 + OUTLINE, Color.BLACK)
+			g.circle(x, y, 8, Color.html("#4d6b2a"))
+			return 8.0
+		var r := 7.5 if s.type == "airport" else (6.5 if s.type == "regional" else 5.5)
+		if G.mayday and int(G.mayday.id) == s.id:
+			g.ring(x, y, r + 8, Color.html("#ff2a1e"), 2.5)   # active mayday
+		if s.get("hostile", false):
+			field_symbol(g, x, y, r, s.ang, Color.html("#a3301f"), false, true)   # survivor-held: red with a cross
+			return r
+		# family farms and settled fields in green, cleared fields waiting for settlers in orange
+		var sc: Color = Color.html("#4a7a4c") if Fields.friendly(s) else (Color.html("#d8641a") if s.get("cleared", false) else Color.html("#9b2a68"))
+		field_symbol(g, x, y, r, s.ang, sc, s.fuel)
+		if dests.has(s.id): g.ring(x, y, r + 6, Color.html("#d9a441"), 2.5)
+		return r
 
 	func _draw() -> void:
 		var gm: Game = ui.game
@@ -832,8 +884,10 @@ class MapView extends Control:
 			me = Vector3(gm.F.x, gm.F.y, gm.F.hdg)
 			has_h = true
 		else:
+			# on the ground: the same arrow, lined up with the runway the plane sits on
 			var st: Dictionary = gm.strip(G.strip)
-			me = Vector3(st.x, st.y, 0)
+			me = Vector3(st.x, st.y, st.get("ang", 0.0))
+			has_h = true
 		# rough danger zones: rings round the home field where danger steps up (world.gd:
 		# danger = 1 + distance / 9000, rounded, +1 near a town, give or take a little)
 		var hm: Dictionary = gm.strip(wd.START)
@@ -868,37 +922,22 @@ class MapView extends Control:
 				g.text_base("Haven?", rc.x * k, rc.y * k + 4, 13, ink, 0, "700")
 		var dests := {}
 		for c in G.contracts: dests[gm.menu.contract_target(c)] = true
-		var mag := Color.html("#9b2a68")
+		var ct = gm.radio.comm_target()
 		for s in wd.strips:
 			if not gm.known.has(s.id): continue
 			var x: float = s.x * k
 			var y: float = s.y * k
-			if s.type == "road":
-				g.rect(x - 3, y - 3, 6, 6, Color.html("#5f665f"))
-				continue
+			var r := strip_icon(g, gm, s, x, y, dests)
+			if is_same(s, ct): g.dashed_arc(x, y, r + 10, 0, TAU, Radio.RING, 2, 4, 3)   # the radio's tuned here
+			if s.type == "road": continue
 			if s.type == "haven":
-				g.circle(x, y, 8, Color.html("#4d6b2a"))
 				g.text_base("Haven", x, y - 12, 12, Color.WHITE, 0, "700")
 				continue
-			var r := 7.5 if s.type == "airport" else (6.5 if s.type == "regional" else 5.5)
-			if G.mayday and int(G.mayday.id) == s.id:
-				g.ring(x, y, r + 8, Color.html("#ff2a1e"), 2.5)   # active mayday
+			if G.nav == s.id: g.line(me.x * k, me.y * k, x, y, Color.WHITE, 1.5)
 			if s.get("hostile", false):
-				# survivor-held: red ring with a cross
-				var red := Color.html("#a3301f")
-				var xr := r + 7.0   # the cross's arms stick out past the disc
-				g.line(x - xr * 0.7, y - xr * 0.7, x + xr * 0.7, y + xr * 0.7, red, 2.0)
-				g.line(x - xr * 0.7, y + xr * 0.7, x + xr * 0.7, y - xr * 0.7, red, 2.0)
-				field_symbol(g, x, y, r, s.ang, red, false)
-				if G.nav == s.id: g.line(me.x * k, me.y * k, x, y, Color.WHITE, 1.5)
 				if ms > 420 or G.nav == s.id or s.id == G.strip:
 					g.text_base(s.name, x + r + 4, y + 4, 11, Color(20 / 255.0, 26 / 255.0, 28 / 255.0, 0.85), -1, "600")
 				continue
-			# family farms and settled fields in green, cleared fields waiting for settlers in orange
-			var sc: Color = Color.html("#4a7a4c") if Fields.friendly(s) else (Color.html("#d8641a") if s.get("cleared", false) else mag)
-			field_symbol(g, x, y, r, s.ang, sc, s.fuel)
-			if dests.has(s.id): g.ring(x, y, r + 6, Color.html("#d9a441"), 2.5)
-			if G.nav == s.id: g.line(me.x * k, me.y * k, x, y, Color.WHITE, 1.5)
 			if ms > 420 or dests.has(s.id) or G.nav == s.id or s.id == G.strip or s.get("cleared", false):
 				g.text_base(s.name + gm.fields.map_count(s), x + r + 4, y + 4, 11, Color(20 / 255.0, 26 / 255.0, 28 / 255.0, 0.85), -1, "600")
 		g.save()

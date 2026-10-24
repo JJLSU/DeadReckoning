@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://cnw7qniilrvvc"
+path="res://.godot/imported/freesound_community-fountain-swell-79725.mp3-05ab02cf784fe673deb47006826ece91.mp3str"
+
+[deps]
+
+source_file="res://sounds/human radio/freesound_community-fountain-swell-79725.mp3"
+dest_files=["res://.godot/imported/freesound_community-fountain-swell-79725.mp3-05ab02cf784fe673deb47006826ece91.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

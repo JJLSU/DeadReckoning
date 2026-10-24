@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://dfpxxcvqvwemn"
+path="res://.godot/imported/freesound_community-static-poppy-light-107792.mp3-d91878073e4aa949af12ccbb84b8cba1.mp3str"
+
+[deps]
+
+source_file="res://sounds/static radio/freesound_community-static-poppy-light-107792.mp3"
+dest_files=["res://.godot/imported/freesound_community-static-poppy-light-107792.mp3-d91878073e4aa949af12ccbb84b8cba1.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

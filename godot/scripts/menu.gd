@@ -449,6 +449,7 @@ func show_title() -> void:
 	gm._free_site()
 	gm.sat = 0.84; gm.con = 1.07
 	gm.ui.show_title(load_save() != null)
+	gm.title.enter()
 	if old_save_exists() and not gm.old_save_warned:
 		gm.old_save_warned = true
 		gm.toast_later(0.6, "Your saved run is from the old, smaller map and can't be continued. Start a new run to play on the new map.", "bad")
@@ -461,6 +462,7 @@ func _regen_world(seed_v: int, gen: int = World.WORLD_GEN) -> void:
 	gm.baker.build_overview(gm.OCEAN_PAD)
 
 func start_new() -> void:
+	gm.title.leave()
 	var seed_v := randi() % 1000000000
 	_regen_world(seed_v)
 	gm.G = gm.new_state(seed_v)
@@ -478,6 +480,7 @@ func start_new() -> void:
 	gm.toast_later(1.6, "Loot the hangars, then board the plane.", "mag")
 
 func resume_from(st: Dictionary) -> void:
+	gm.title.leave()
 	st = normalize(st)
 	# runs saved before airfields avoided forest have no wgen and keep the old layout
 	var wg := int(st.get("wgen", 1))

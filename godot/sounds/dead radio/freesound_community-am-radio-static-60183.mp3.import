@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://b43sw170wmmae"
+path="res://.godot/imported/freesound_community-am-radio-static-60183.mp3-2eb151d33e68d2ff599ce5d7d64afebb.mp3str"
+
+[deps]
+
+source_file="res://sounds/dead radio/freesound_community-am-radio-static-60183.mp3"
+dest_files=["res://.godot/imported/freesound_community-am-radio-static-60183.mp3-2eb151d33e68d2ff599ce5d7d64afebb.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

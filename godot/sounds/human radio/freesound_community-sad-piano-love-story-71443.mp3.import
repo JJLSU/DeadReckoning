@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://dybsld34wt28s"
+path="res://.godot/imported/freesound_community-sad-piano-love-story-71443.mp3-e272f75bd2b62760580c5110cef9eb53.mp3str"
+
+[deps]
+
+source_file="res://sounds/human radio/freesound_community-sad-piano-love-story-71443.mp3"
+dest_files=["res://.godot/imported/freesound_community-sad-piano-love-story-71443.mp3-e272f75bd2b62760580c5110cef9eb53.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

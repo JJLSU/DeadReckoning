@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://dcjs0035kfprf"
+path="res://.godot/imported/lucadialessandro-ethereal-piano-melody-572885.mp3-8d0e22a2a3b593ee1b46b894183de009.mp3str"
+
+[deps]
+
+source_file="res://sounds/human radio/lucadialessandro-ethereal-piano-melody-572885.mp3"
+dest_files=["res://.godot/imported/lucadialessandro-ethereal-piano-melody-572885.mp3-8d0e22a2a3b593ee1b46b894183de009.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

@@ -506,4 +506,52 @@ func gen_world(seed_v: int, gen: int = WORLD_GEN) -> void:
 		s.shop = fs
 		s.dealer = fs
 	# what each strip is before any clearing or settling (Fields.apply puts the run's on top)
+	stretch_runways()
 	Fields.record_base(self)
+	assign_freqs()
+
+## Every runway, as flown, is 1.5x to 2x its laid-out length, a fixed share per strip from its
+## seed (Greg, 2026-10-24). Runs after placement, so the map layout and old saves stay the same.
+## Where the longer runway would run into water, a river, mountains or a town, it is shortened
+## in steps until it doesn't.
+const RUN_STRETCH := Vector2(1.5, 2.0)
+func stretch_runways() -> void:
+	for s in strips:
+		if s.type == "road": continue
+		var base: float = s.len
+		var k: float = lerpf(RUN_STRETCH.x, RUN_STRETCH.y, U.hash3(int(s.seed), s.id, SEED + 77))
+		while k > 1.0:
+			var ok := true
+			var e := 0.5
+			while ok and e <= 1.0:   # the new length at each end; roads, tracks and shore are fine to cross
+				for sg in [-1.0, 1.0]:
+					var t := terr(s.x + cos(s.ang) * base * k / 2 * e * sg, s.y + sin(s.ang) * base * k / 2 * e * sg)
+					if t <= 1 or (t >= 7 and t <= 10): ok = false
+				e += 0.05
+			if ok: break
+			k -= 0.1
+		s.len = base * maxf(k, 1.0)
+
+## Radio frequencies (Greg, 2026-10-24): every airfield, Haven too, gets its own, 118.0-137.0 MHz
+## in 0.1 steps, never 121.5 (the emergency frequency). Kept as tenths of a MHz in s.freq
+## (1234 = 123.4). Own random stream, so the rest of the world is unaffected. Road landings
+## made later have none.
+func assign_freqs() -> void:
+	var pool := []
+	for f in range(1180, 1371):
+		if f != 1215: pool.append(f)
+	var frng := U.Mulberry.new(SEED * 29 + 7)
+	for i in range(pool.size() - 1, 0, -1):   # shuffle
+		var j := int(frng.next() * (i + 1))
+		var t = pool[i]; pool[i] = pool[j]; pool[j] = t
+	var n := 0
+	for s in strips:
+		if s.type == "road": continue
+		s.freq = pool[n % pool.size()]   # more fields than frequencies would repeat some (190 to go round)
+		n += 1
+
+## "123.4" for a strip's frequency, or "" if it has none.
+static func freq_text(s) -> String:
+	if s == null or not s.has("freq"): return ""
+	var f := int(s.freq)
+	return "%d.%d" % [f / 10, f % 10]

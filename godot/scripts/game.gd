@@ -17,6 +17,8 @@ const MAX_WIND := 22.0      # strongest wind rolled at takeoff
 var OCEAN_PAD := 0.0
 var old_save_warned := false
 const TS := 32.0
+const BOARD_R := 130.0   # on foot: the Board plane button shows within this distance of the plane
+const SPAWN_OFS := Vector2(86, -86)   # where you climb out, off the nose quarter and just inside BOARD_R (Greg 2026-10-24)
 # Slow health regen: after REGEN_DELAY s of standing still (within one tile of where you
 # stopped), not sprinting, not shooting and not hurt, health creeps back up to REGEN_CAP.
 const REGEN_DELAY := 3.0
@@ -76,6 +78,8 @@ var win_idx := 0
 var wd := World.new()
 var baker: Baker
 var synth: Synth
+var title: TitleScreen   # title screen: loading screen, flyover behind the menu, music (title.gd)
+var radio: Radio
 var ui: UI
 # Systems split out of this script; each keeps a reference back to the game (gm).
 var survivors := Survivors.new(self)
@@ -121,7 +125,6 @@ var Hv := 720.0
 var thr_bar := {"x": 0.0, "y": 0.0, "w": 38.0, "h": 120.0}
 var mouse := {"x": 0.0, "y": 0.0, "down": false, "active": false}
 var ptrs := {}           # mouse-drag roles in flight: 0 -> {role,sx,sy,x,y}
-var demo := {"x": 0.0, "y": 0.0, "h": -0.5}
 var TCACHE := {}
 var ASH: Array = []
 var AP = null
@@ -192,7 +195,12 @@ func _ready() -> void:
 	ui.game = self
 	add_child(ui)
 	add_child(FpsCounter.new())
+	radio = Radio.new(self)
+	add_child(radio)
 	get_viewport().size_changed.connect(_resize)
+	title = TitleScreen.new(self)
+	add_child(title)
+	title.loading()
 	menu.load_settings()
 	_resize()
 	# world + textures
@@ -202,11 +210,11 @@ func _ready() -> void:
 	baker.set_world(wd)
 	await baker.build_overview(OCEAN_PAD)
 	await Tx.bake_all(baker)
-	var st: Dictionary = wd.strips[wd.START]
-	demo = {"x": st.x, "y": st.y, "h": -0.6}
+	await title.preload_all()
 	ready_done = true
 	menu.show_title()
 	synth.warm()
+	title.reveal()
 
 func _resize() -> void:
 	var s := get_viewport().get_visible_rect().size
@@ -215,7 +223,7 @@ func _resize() -> void:
 	thr_bar.w = 38.0
 	thr_bar.x = Wv - thr_bar.w - 12
 	thr_bar.h = clampf(Hv * 0.34, 120, 250)
-	thr_bar.y = maxf(150, Hv - thr_bar.h - 120)
+	thr_bar.y = maxf(150, Hv - thr_bar.h - 90)   # just above the radio knob in the corner (radio.gd)
 	if dark_rect: dark_rect.size = s
 	var post := get_node_or_null("Post")
 	if post: post.size = s
@@ -336,6 +344,9 @@ func _unhandled_input(e: InputEvent) -> void:
 	elif e is InputEventMouseButton:
 		var x: float = e.position.x
 		var y: float = e.position.y
+		if e.button_index == MOUSE_BUTTON_RIGHT and e.pressed and mode == "flight" and uist == "":
+			Render.minimap_click(self, Vector2(x, y), true)   # minimap: tune the radio to a field
+			return
 		if e.button_index != MOUSE_BUTTON_LEFT: return
 		if e.pressed:
 			if not ads_virtual:
@@ -347,6 +358,7 @@ func _unhandled_input(e: InputEvent) -> void:
 				return
 			if uist != "": return
 			if mode == "flight":
+				if Render.minimap_click(self, Vector2(x, y)): return   # minimap: pick a field
 				var role := "thr" if (x > Wv - 100 and y > thr_bar.y - 50 and y < thr_bar.y + thr_bar.h + 50) else "steer"
 				ptrs[0] = {"role": role, "sx": x, "sy": y, "x": x, "y": y}
 				if role == "thr": set_thr(y)
@@ -498,11 +510,10 @@ func _process(delta: float) -> void:
 		if uist == "": upd_ground(dt)
 		if ads_virtual and S: ads_follow()
 	else:
-		demo.x += cos(demo.h) * 60 * dt
-		demo.y += sin(demo.h) * 60 * dt
-		demo.h += sin(T * 0.1) * 0.02 * dt
+		title.update(dt)
 	update_cursor()
-	var fl: bool = mode == "flight" and F != null and uist == "" and not F.crashed
+	# the engine keeps running while the chart is open in flight (Greg, 2026-10-24)
+	var fl: bool = mode == "flight" and F != null and (uist == "" or uist == "map") and not F.crashed
 	synth.engine((F.thr if G.fuel > 0 else 0.0) if fl else 0.0, F.alt if F else 0.0, fl)
 	var rk := 0.0
 	if uist == "":
@@ -527,8 +538,8 @@ func draw_layer(idx: int, p: Pen) -> void:
 		Render.flight_layer(self, idx, p)
 	elif mode == "ground" and S:
 		Render.ground_layer(self, idx, p)
-	elif idx == 0 and baker.overview:
-		Render.draw_world(self, p, demo.x, demo.y, Render.flight_scale(self, 90), T)
+	elif baker.overview:
+		title.draw(idx, p)
 	elif idx == 0:
 		p.rect(0, 0, Wv, Hv, U.hx("#2c4c58"))
 
@@ -547,9 +558,9 @@ func gen_site(s: Dictionary) -> Dictionary:
 	var ry: int = site.ry
 	site.merge({"noise": 0.0, "waves": [], "splat": [], "flick": 0.0, "hbT": 0.0, "nd": 1e9, "band": -1, "smoke": [], "swing": 0.0, "thrown": [], "crows": [], "pk": [],
 		"s": s, "pump": Vector2(plane.x + 260, (ry - 1) * TS + 14) if s.fuel else null,
-		"p": {"x": plane.x + 150, "y": plane.y - 8, "ang": 0.0, "cd": 0.0, "stam": 100.0, "jt": 0.0, "jcd": 0.0, "safe": Vector2(plane.x + 150, plane.y - 8), "jx": 0, "wk": 0.0, "sprint": false},
+		"p": {"x": plane.x + SPAWN_OFS.x, "y": plane.y + SPAWN_OFS.y, "ang": 0.0, "cd": 0.0, "stam": 100.0, "jt": 0.0, "jcd": 0.0, "safe": plane + SPAWN_OFS, "jx": 0, "wk": 0.0, "sprint": false},
 		"zs": [], "sv": [], "bul": [], "drops": [], "fx": [], "fl": [], "mf": [], "t": 0.0, "spawnT": 5.0, "danger": s.danger, "scrN": 0,
-		"cx": plane.x + 150, "cy": plane.y, "shake": 0.0, "flash": 0.0, "hurt": 0.0, "nearPlane": false, "scorch": [], "flow": PackedInt32Array(), "flowT": 0.0,
+		"cx": plane.x + SPAWN_OFS.x, "cy": plane.y, "shake": 0.0, "flash": 0.0, "hurt": 0.0, "nearPlane": false, "scorch": [], "flow": PackedInt32Array(), "flowT": 0.0,
 		"boomFlash": 0.0, "rain": minf(1.0, wd.storm_at(s.x, s.y).k * 1.6), "npcs": [], "safes": [], "air": false, "tSprint": false, "noAmmoT": -9.0, "flN": 0, "cawT": -9.0, "sipT": -9.0, "tkHint": false,
 		"rcx": 0.0, "rcy": 0.0, "adsK": 0.0, "cap": 0, "rooms_ra": []})
 	var bg := SiteBg.new()
@@ -887,9 +898,24 @@ func stamp_scorch(x: float, y: float) -> void:
 ## Muzzle flash from someone other than the player (survivors, your rescue): a short glow
 ## at the gun drawn by render.gd, which also lights the dark at night. The player's own
 ## flash is S.flash.
-func muzzle_flash(x: float, y: float, ang: float) -> void:
+func muzzle_flash(x: float, y: float, ang: float, wi: int = 2) -> void:
 	if not S.has("mf"): S.mf = []
-	S.mf.append({"x": x + cos(ang) * 26, "y": y + sin(ang) * 26, "life": 0.06})   # same spot and length as yours
+	var m := muzzle(x, y, ang, wi)
+	S.mf.append({"x": m.x, "y": m.y, "life": 0.06})   # at the gun's muzzle, like yours
+
+const MUZZLE_SIDE := 2.0   # the gun is held this far right of the body's centre line (the sprites)
+## The end of the barrel of gun wi (D.WEAPONS, its "len" ahead of the body) for someone at (x, y)
+## facing ang: where their shots and muzzle flash start. A barrel poking through a wall
+## stops at the wall, so you can't shoot through one you're standing against.
+func muzzle(x: float, y: float, ang: float, wi: int) -> Vector2:
+	var L := float(D.WEAPONS[wi].get("len", 16))
+	var o := Vector2(x, y)
+	var m := o + Vector2(L, MUZZLE_SIDE).rotated(ang)
+	var n := int(ceil(L / 4.0))
+	for i in range(1, n + 1):
+		var q := o.lerp(m, float(i) / n)
+		if solid_b(q.x, q.y): return o.lerp(m, float(i - 1) / n)
+	return m
 
 ## A blood splat on the screen when you're hurt, never over the player: tries random spots
 ## until one (with its drips) stays clear of you on screen, else none this time.
@@ -1230,9 +1256,10 @@ func shoot() -> void:
 	var scope_k := 1.2 if has("scope") else 1.0
 	# "hip_zdmg": damage to the dead when NOT aimed in (crossbow); survivors still take base_dmg
 	var zdmg: float = (float(w.hip_zdmg) if w.has("hip_zdmg") and not aimed and not mid_ease else base_dmg) * scope_k
+	var mz := muzzle(p.x, p.y, p.ang, G.weapon)
 	for i in w.pel:
 		var a: float = p.ang + (randf() - 0.5) * spr * 2
-		S.bul.append({"x": p.x + cos(p.ang) * 16, "y": p.y + sin(p.ang) * 16, "vx": cos(a) * w.spd, "vy": sin(a) * w.spd, "life": w.life, "dmg": base_dmg * scope_k, "zdmg": zdmg, "aim": aimed, "pl": true, "kb": w.kb, "bolt": w.bolt, "sg": int(w.pel) > 1, "src": p})
+		S.bul.append({"x": mz.x, "y": mz.y, "vx": cos(a) * w.spd, "vy": sin(a) * w.spd, "life": w.life, "dmg": base_dmg * scope_k, "zdmg": zdmg, "aim": aimed, "pl": true, "kb": w.kb, "bolt": w.bolt, "sg": int(w.pel) > 1, "src": p})
 	if not w.bolt:   # spent casing — guns only, the crossbow has none
 		S.fx.append({"x": p.x + cos(p.ang) * 8, "y": p.y + sin(p.ang) * 8, "vx": cos(p.ang + 1.6) * 110 + (randf() - 0.5) * 40, "vy": sin(p.ang + 1.6) * 110 + (randf() - 0.5) * 40, "life": 0.7, "c": "#d9b35a", "sz": 2.2, "drag": true})
 	add_noise(w.noise, true)
@@ -1544,7 +1571,7 @@ func upd_ground(dt: float) -> void:
 	upd_pickups(dt)
 	upd_crows(p, dt)
 	upd_tanker(p, ml, dt)
-	S.nearPlane = Vector2(p.x - S.plane.x, p.y - S.plane.y).length() < 130
+	S.nearPlane = Vector2(p.x - S.plane.x, p.y - S.plane.y).length() < BOARD_R
 	upd_camera(p, dt)
 	upd_mood(dt)
 
@@ -2403,6 +2430,7 @@ func win() -> void:
 	menu.clear_save()
 	CP = ""
 	ui.show_win()
+	title.enter()
 	mode = "title"
 	F = null
 	_free_site()

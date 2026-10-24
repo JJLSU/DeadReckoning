@@ -1185,9 +1185,10 @@ func sv_fire(v: Dictionary, spread: float = 1.0) -> void:
 	var fr: bool = v.get("fr", false)   # a rescue survivor: your side's rounds (hit zombies and hostiles)
 	if fr: dmg = float(w.dmg) * NPC_DMG
 	var bs: float = float(w.spd) * (1.0 if fr else 0.65)
+	var mz: Vector2 = gm.muzzle(v.x, v.y, aim, int(v.get("w", 0)))
 	for k in int(w.pel):
 		var a: float = aim + (randf() - 0.5) * spr * 2.0
-		gm.S.bul.append({"x": v.x + cos(a) * 14, "y": v.y + sin(a) * 14, "vx": cos(a) * bs, "vy": sin(a) * bs,
+		gm.S.bul.append({"x": mz.x, "y": mz.y, "vx": cos(a) * bs, "vy": sin(a) * bs,
 			"life": w.life, "dmg": dmg, "pl": fr, "kb": float(w.kb) * 0.5 if fr else 0.0, "bolt": w.bolt, "sg": int(w.pel) > 1, "src": v})
 	if fr:
 		gm.sfx(w.snd)
@@ -1195,7 +1196,7 @@ func sv_fire(v: Dictionary, spread: float = 1.0) -> void:
 	else:
 		gm.sfx("bow" if w.silent else "enemy")
 		if not w.silent: gm.add_noise(float(w.noise) * SV_SHOT_NOISE)
-	if not w.silent: gm.muzzle_flash(v.x, v.y, aim)
+	if not w.silent: gm.muzzle_flash(v.x, v.y, aim, int(v.get("w", 0)))
 	v.mag = int(v.get("mag", sv_mag_cap(v))) - 1
 	if v.mag <= 0:   # empty
 		sv_start_reload(v)

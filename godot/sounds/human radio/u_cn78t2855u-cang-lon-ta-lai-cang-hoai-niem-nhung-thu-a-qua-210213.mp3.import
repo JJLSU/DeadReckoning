@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://b003cqq4reoyr"
+path="res://.godot/imported/u_cn78t2855u-cang-lon-ta-lai-cang-hoai-niem-nhung-thu-a-qua-210213.mp3-39330f25c298c4038d179fd900e56de3.mp3str"
+
+[deps]
+
+source_file="res://sounds/human radio/u_cn78t2855u-cang-lon-ta-lai-cang-hoai-niem-nhung-thu-a-qua-210213.mp3"
+dest_files=["res://.godot/imported/u_cn78t2855u-cang-lon-ta-lai-cang-hoai-niem-nhung-thu-a-qua-210213.mp3-39330f25c298c4038d179fd900e56de3.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

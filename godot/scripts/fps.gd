@@ -1,6 +1,7 @@
 class_name FpsCounter
 extends CanvasLayer
 ## Frame-rate readout in the bottom-right corner, above everything else (menus included).
+## In flight it moves up and left, above the radio's NAV and COMM panels and clear of the throttle.
 ## Second line, averaged per frame: draw = time spent in the game's own drawing code
 ## (DrawLayer adds to draw_us), gpu = time the graphics card took to render the frame.
 ## If draw is close to the frame time, the CPU is the limit; if gpu is, the graphics card is.
@@ -33,6 +34,9 @@ func _ready() -> void:
 	RenderingServer.viewport_set_measure_render_time(get_viewport().get_viewport_rid(), true)
 
 func _process(dt: float) -> void:
+	var fl: bool = get_parent().get("mode") == "flight"
+	lbl.offset_right = -70 if fl else -8
+	lbl.offset_bottom = -96 if fl else -4
 	acc += dt
 	n += 1
 	gpu += RenderingServer.viewport_get_measured_render_time_gpu(get_viewport().get_viewport_rid())

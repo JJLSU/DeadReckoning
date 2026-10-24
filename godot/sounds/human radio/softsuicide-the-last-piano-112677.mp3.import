@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://dialho10v4qo3"
+path="res://.godot/imported/softsuicide-the-last-piano-112677.mp3-a451310392b7f9f76df5e7edd42406a0.mp3str"
+
+[deps]
+
+source_file="res://sounds/human radio/softsuicide-the-last-piano-112677.mp3"
+dest_files=["res://.godot/imported/softsuicide-the-last-piano-112677.mp3-a451310392b7f9f76df5e7edd42406a0.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

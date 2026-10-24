@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://1si5qubu1bm3"
+path="res://.godot/imported/freesound_community-background-piano-music-_-samples-61960.mp3-f75e032a97d6ccf0455390cf6065d731.mp3str"
+
+[deps]
+
+source_file="res://sounds/human radio/freesound_community-background-piano-music-_-samples-61960.mp3"
+dest_files=["res://.godot/imported/freesound_community-background-piano-music-_-samples-61960.mp3-f75e032a97d6ccf0455390cf6065d731.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

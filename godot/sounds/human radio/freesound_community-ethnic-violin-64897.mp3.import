@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://bxnlam3yk0ibi"
+path="res://.godot/imported/freesound_community-ethnic-violin-64897.mp3-49e2d47f0baad57fbcec4112e026df30.mp3str"
+
+[deps]
+
+source_file="res://sounds/human radio/freesound_community-ethnic-violin-64897.mp3"
+dest_files=["res://.godot/imported/freesound_community-ethnic-violin-64897.mp3-49e2d47f0baad57fbcec4112e026df30.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4

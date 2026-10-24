@@ -1,0 +1,19 @@
+[remap]
+
+importer="mp3"
+type="AudioStreamMP3"
+uid="uid://l68rpx6tll8p"
+path="res://.godot/imported/freesound_community-excellent-tones-20120831-1908utc-35744khz-18850.mp3-350566d86749f3fd88a2c831b27d30ca.mp3str"
+
+[deps]
+
+source_file="res://sounds/zombie radio/background/freesound_community-excellent-tones-20120831-1908utc-35744khz-18850.mp3"
+dest_files=["res://.godot/imported/freesound_community-excellent-tones-20120831-1908utc-35744khz-18850.mp3-350566d86749f3fd88a2c831b27d30ca.mp3str"]
+
+[params]
+
+loop=false
+loop_offset=0
+bpm=0
+beat_count=0
+bar_beats=4
